@@ -742,7 +742,18 @@ func isFilteredChildEnvKey(key string) bool {
 		"CLAUDE_CODE_ENTRYPOINT", // entrypoint marker (cli/sdk-cli/...)
 		"CLAUDE_CODE_EXECPATH",   // path to the running CLI binary
 		"CLAUDE_CODE_SESSION_ID", // per-session identifier
-		"CLAUDE_CODE_SSE_PORT":   // IDE-extension transport port
+		"CLAUDE_CODE_SSE_PORT",   // IDE-extension transport port
+		// AIFIRST: host-managed-auth markers set by the Claude desktop app
+		// (claude-desktop-3p entrypoint). Either one alone makes a spawned
+		// standalone claude report "Not logged in" even with valid stored
+		// credentials: PROVIDER_MANAGED_BY_HOST tells it auth is answered by
+		// a host process that is not in our process tree, and
+		// HOST_AUTH_ENV_VAR points it at an env var (e.g. ANTHROPIC_API_KEY)
+		// the host never exported to us. Verified by per-var bisect; the
+		// sibling CHILD_SESSION / HOST_SESSION_ID / SDK_HAS_*_REFRESH
+		// markers tested harmless alone and are left untouched.
+		"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+		"CLAUDE_CODE_HOST_AUTH_ENV_VAR":
 		return true
 	}
 	// CLAUDECODE_* (no underscore between CLAUDE and CODE) is wholly internal;
