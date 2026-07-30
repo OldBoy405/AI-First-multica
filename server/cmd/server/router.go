@@ -700,11 +700,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// browser redirect; the workspace/agent/initiator are recovered from the
 	// sealed state). It exchanges the code, upserts the install, then bounces
 	// the browser back to Settings → Integrations.
-	// Stripe webhook (no Multica auth — Stripe signs the raw body
-	// with a shared secret, the multica-cloud upstream verifies. We
-	// only forward the bytes + the Stripe-Signature header; see
-	// HandleCloudBillingStripeWebhook for the rationale).
-	r.Post("/api/webhooks/stripe", h.HandleCloudBillingStripeWebhook)
+	// AIFIRST: Stripe webhook unmounted — intranet self-host has no cloud
+	// billing (CR-2026-001 FR-1). Handler kept; only the mount is removed.
+	// Upstream original: r.Post("/api/webhooks/stripe", h.HandleCloudBillingStripeWebhook)
 
 	// Composio OAuth callback (MUL-3843). NOT under the Auth group on purpose:
 	// Composio 302-redirects the user's browser here at the end of the OAuth
@@ -959,18 +957,20 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// authoritative server-set X-Actor-Source header and 403s
 		// any task-token request. See actor_guards.go for the full
 		// rationale.
-		r.Route("/api/cloud-billing", func(r chi.Router) {
-			r.Use(handler.RequireHumanActor)
-
-			r.Get("/balance", h.GetCloudBillingBalance)
-			r.Get("/transactions", h.ListCloudBillingTransactions)
-			r.Get("/batches", h.ListCloudBillingBatches)
-			r.Get("/topups", h.ListCloudBillingTopups)
-			r.Get("/price-tiers", h.ListCloudBillingPriceTiers)
-			r.Post("/checkout-sessions", h.CreateCloudBillingCheckoutSession)
-			r.Get("/checkout-sessions/{sessionId}", h.GetCloudBillingCheckoutSession)
-			r.Post("/portal-sessions", h.CreateCloudBillingPortalSession)
-		})
+		// AIFIRST: /api/cloud-billing route group unmounted — intranet
+		// self-host has no cloud billing (CR-2026-001 FR-1). Handlers
+		// kept; only the mount is removed. Upstream original:
+		//   r.Route("/api/cloud-billing", func(r chi.Router) {
+		//   	r.Use(handler.RequireHumanActor)
+		//   	r.Get("/balance", h.GetCloudBillingBalance)
+		//   	r.Get("/transactions", h.ListCloudBillingTransactions)
+		//   	r.Get("/batches", h.ListCloudBillingBatches)
+		//   	r.Get("/topups", h.ListCloudBillingTopups)
+		//   	r.Get("/price-tiers", h.ListCloudBillingPriceTiers)
+		//   	r.Post("/checkout-sessions", h.CreateCloudBillingCheckoutSession)
+		//   	r.Get("/checkout-sessions/{sessionId}", h.GetCloudBillingCheckoutSession)
+		//   	r.Post("/portal-sessions", h.CreateCloudBillingPortalSession)
+		//   })
 
 		// --- Workspace-scoped routes (all require workspace membership) ---
 		r.Group(func(r chi.Router) {
