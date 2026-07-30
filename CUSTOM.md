@@ -19,6 +19,14 @@
 | C4 | `.env` 行尾必须全程 LF | Windows 上不要用会改写行尾的工具碰 `.env` | 实测踩坑（2026-07-30）：`.env.example` 为 CRLF，`make selfhost` 复制生成的 `.env` 带 `\r`，Postgres 卷用"密码+`\r`"初始化；之后任何把行尾规范成 LF 的编辑（如 Git Bash 的 `sed -i`）都会造成 backend 与已初始化卷的密码不一致（SASL auth failed）。修复方式：数据可弃时 `docker-compose down -v` 重建卷 |
 | C5 | 本机 agent CLI 需已独立 `claude /login`（daemon 干净环境要求已根修，见代码改动 #2） | 实测踩坑（2026-07-31，CR-2026-001 TASK-04）：Claude Code 桌面 App 的登录态不共享给命令行 `claude`，须一次性 `/login` | 同左 |
 
+## 已知测试失败基线（上游既有，非本 fork 引入）
+
+双周 rebase 后跑全量测试时，以下失败为已知基线，不计入"本次改动引入的回归"；若数量或名单变化才需要排查：
+
+| 测试 | 包 | 确认方式 | 记录日期 |
+|---|---|---|---|
+| `TestTraecliBlockedArgsFiltering` / `TestQoderBackendInvokesACPFlagAndFiltersBlockedArgs` / `TestQoderFiltersRemoteMcpWhenInitializeDoesNotAdvertiseCapability` | `server/pkg/agent` | `git stash` 摘除本地全部改动后仍失败（2026-07-31，Windows + 本机装有 Qoder 的环境）；根因未诊断，疑与测试对本机环境的隐含假设有关 | 2026-07-31 |
+
 ## 未做（防止误以为已做）
 
 - controlled-shell/gitguard 下沉 daemon（P1-F5，M0 明确范围外——当前 Agent 执行未受白名单约束）
