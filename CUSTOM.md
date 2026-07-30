@@ -15,6 +15,7 @@
 | C1 | `MULTICA_CLOUD_FLEET_URL` / `MULTICA_FLEET_URL` | 永远留空 | 空值 → CloudPATVerifier 为 nil → `mcn_` 云节点令牌天然 401（`server/internal/middleware/auth.go`），本地执行路线不用云节点 |
 | C2 | `DISABLE_WORKSPACE_CREATION` | 先建组织 workspace，随后置 `true` 并重启后端 | 单组织内部部署；上游 `.env.example` 自带此两阶段引导（#3433） |
 | C3 | `ALLOWED_EMAIL_DOMAINS` | 部署时填公司邮箱域 | 限制内网注册来源；与 `ALLOW_SIGNUP` 组合为 AND 语义 |
+| C4 | `.env` 行尾必须全程 LF | Windows 上不要用会改写行尾的工具碰 `.env` | 实测踩坑（2026-07-30）：`.env.example` 为 CRLF，`make selfhost` 复制生成的 `.env` 带 `\r`，Postgres 卷用"密码+`\r`"初始化；之后任何把行尾规范成 LF 的编辑（如 Git Bash 的 `sed -i`）都会造成 backend 与已初始化卷的密码不一致（SASL auth failed）。修复方式：数据可弃时 `docker-compose down -v` 重建卷 |
 
 ## 未做（防止误以为已做）
 
