@@ -8,6 +8,8 @@
 |---|---|---|---|---|
 | 1 | `server/cmd/server/router.go`（2 处，均有 `// AIFIRST:` 标记） | 摘除 Stripe webhook（`/api/webhooks/stripe`）与 `/api/cloud-billing` 路由组的挂载；handler 代码保留未删 | 内网自托管无云端计费；访问即 404。CR-2026-001 FR-1（AI First Platform 仓库 `change-requests/CR-2026-001/`） | 2026-07-30 |
 | 2 | `server/pkg/agent/claude.go#isFilteredChildEnvKey`（`// AIFIRST:` 标记） | 过滤名单补入 `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` 与 `CLAUDE_CODE_HOST_AUTH_ENV_VAR` 两个宿主托管认证标记 | 二分实证：两者任一单独泄漏给 daemon 拉起的 claude 子进程即报 `Not logged in`（凭据文件明明有效）；同批的 CHILD_SESSION/HOST_SESSION_ID/SDK_HAS_*_REFRESH 单独存在无害、未动。**候选回馈上游 PR**（上游注释明说该名单按名维护、欢迎补全）。CR-2026-001 TASK-04 | 2026-07-31 |
+| 3 | `server/migrations/158_aifirst_cr_projection.{up,down}.sql`（新文件） | 新增治理投影三表：`cr` / `cr_sync_event` / `approval_record`（approve 用部分唯一索引 `WHERE decision='approve'`，reject 多条留痕） | P0 数据模型映射（git 权威 / PG 投影）落地；表可清空重放。rebase 时保持迁移编号顺延、勿与上游新迁移撞号。CR-2026-002 TASK-04 | 2026-07-31 |
+| 4 | `server/internal/governance/`（新包：`actions.go`、`transitions_gen.go`、`gen/generate-transitions.mjs`、测试） | 治理层自研包：activity_log 两个 `aifirst.` action 常量 + CR 状态机只读副本（45 条展开转移，生成产物入库，`gen --check` 守一致性）+ 后续 crsync/approval/reconcile 落此包 | 规则一（自研代码住新目录）；构建不依赖 tools checkout（SDD-SUG-003）。状态机变更流程：改 tools dir-graph.yaml → 重跑 gen → 提交两仓。CR-2026-002 TASK-04 | 2026-07-31 |
 
 ## 纯配置约定（无代码改动，部署时执行）
 
