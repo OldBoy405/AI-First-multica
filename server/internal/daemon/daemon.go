@@ -3774,6 +3774,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		binDir := filepath.Dir(selfBin)
 		agentEnv["PATH"] = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	}
+	// AIFIRST: controlled-shell wiring (CR-2026-002 TASK-09). The shim dir goes
+	// FIRST on PATH so the agent's default `git` resolves to the gitguard
+	// gateway; CRCTL_WORKSPACE points crctl at the knowledge-base root.
+	if env.GitShimDir != "" {
+		agentEnv["PATH"] = env.GitShimDir + string(os.PathListSeparator) + agentEnv["PATH"]
+	}
+	if len(d.cfg.CRWorkspaceRoots) > 0 {
+		agentEnv["CRCTL_WORKSPACE"] = d.cfg.CRWorkspaceRoots[0]
+	}
 	// Point Codex to the per-task CODEX_HOME so it discovers skills natively
 	// without polluting the system ~/.codex/skills/.
 	if env.CodexHome != "" {

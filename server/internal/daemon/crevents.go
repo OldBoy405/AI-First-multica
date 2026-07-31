@@ -30,7 +30,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/gitguard"
 )
 
 const crEventsBatchLimit = 100
@@ -294,10 +297,37 @@ func scanOutboxDir(dir string) ([]crOutboxEvent, error) {
 	return events, nil
 }
 
+// crGitGuard lazily loads the controlled-shell whitelist for the collector's
+// read-only git calls (TASK-09 closed the TASK-06 TODO: the daemon guards its
+// own git here too, caller=system-orchestrator). Unconfigured = direct exec
+// (upstream fallback); configured-but-broken = fail closed.
+var crGitGuard struct {
+	once   sync.Once
+	guard  *gitguard.Guard
+	broken bool
+}
+
+func crGuardCheck(sub string, args ...string) error {
+	crGitGuard.once.Do(func() {
+		g, err := gitguard.FromEnv()
+		if err != nil {
+			crGitGuard.broken = true
+			return
+		}
+		crGitGuard.guard = g
+	})
+	if crGitGuard.broken {
+		return &gitguard.Error{Code: gitguard.CodeUnavailable, Caller: gitguard.SystemCaller, Sub: sub, Message: "controlled-shell rules unusable; daemon git denied"}
+	}
+	if crGitGuard.guard != nil {
+		return crGitGuard.guard.Check(sub, args, gitguard.SystemCaller)
+	}
+	return nil
+}
+
 // scanCommitsSinceCursor is the fallback channel. Returns the parsed events and
-// the new HEAD to persist after a successful report. TODO(CR-2026-002 TASK-09):
-// route through pkg/gitguard once it exists; until then this is a direct,
-// read-only git invocation (log/rev-parse only).
+// the new HEAD to persist after a successful report. Read-only git only
+// (rev-parse/log), whitelist-checked when the rules are configured.
 func scanCommitsSinceCursor(root string) ([]crOutboxEvent, string, error) {
 	head, err := gitLine(root, "rev-parse", "HEAD")
 	if err != nil {
@@ -314,6 +344,9 @@ func scanCommitsSinceCursor(root string) ([]crOutboxEvent, string, error) {
 	rangeArg := head
 	if cursor != "" {
 		rangeArg = cursor + ".." + head
+	}
+	if err := crGuardCheck("log", "--reverse", "--format=%H%x00%cI%x00%s", rangeArg); err != nil {
+		return nil, "", err
 	}
 	out, err := exec.Command("git", "-C", root, "log", "--reverse", "--format=%H%x00%cI%x00%s", rangeArg).Output()
 	if err != nil {
@@ -383,6 +416,11 @@ func mergeCREvents(outbox, commits []crOutboxEvent) []crOutboxEvent {
 }
 
 func gitLine(dir string, args ...string) (string, error) {
+	if len(args) > 0 {
+		if err := crGuardCheck(args[0], args[1:]...); err != nil {
+			return "", err
+		}
+	}
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
 	if err != nil {
 		return "", err

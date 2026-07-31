@@ -8,23 +8,71 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/multica-ai/multica/server/pkg/gitguard"
 )
+
+// AIFIRST: daemon self-guard (CR-2026-002 TASK-09, AC-5④). Every git command
+// in this file passes the controlled-shell whitelist with
+// caller=system-orchestrator when MULTICA_CONTROLLED_SHELL_RULES is set.
+// Unconfigured deployments keep the exact upstream behavior (direct exec);
+// configured-but-broken rules fail closed (every git denied) — same semantics
+// as crctl's SHELL_UNAVAILABLE.
+var systemGuard struct {
+	once   sync.Once
+	guard  *gitguard.Guard
+	broken bool
+}
+
+func loadSystemGuard() (*gitguard.Guard, bool) {
+	systemGuard.once.Do(func() {
+		g, err := gitguard.FromEnv()
+		if err != nil {
+			slog.Error("execenv: controlled-shell rules configured but unusable; denying all daemon git (fail closed)", "error", err)
+			systemGuard.broken = true
+			return
+		}
+		systemGuard.guard = g
+	})
+	return systemGuard.guard, systemGuard.broken
+}
+
+// guardedGitCommand applies the whitelist (when configured) and returns the
+// command to run. All call sites in this file route through here so the
+// caller=system-orchestrator audit trail is complete.
+func guardedGitCommand(dir, sub string, args ...string) (*exec.Cmd, error) {
+	g, broken := loadSystemGuard()
+	if broken {
+		return nil, &gitguard.Error{Code: gitguard.CodeUnavailable, Caller: gitguard.SystemCaller, Sub: sub, Message: "controlled-shell rules unusable; daemon git denied"}
+	}
+	if g != nil {
+		if err := g.Check(sub, args, gitguard.SystemCaller); err != nil {
+			return nil, err
+		}
+		slog.Debug("execenv: git allowed", "caller", gitguard.SystemCaller, "sub", sub)
+	}
+	return exec.Command("git", append([]string{"-C", dir, sub}, args...)...), nil
+}
 
 // detectGitRepo checks if dir is inside a git repository (regular or bare).
 // Returns the git root path and true if found.
 func detectGitRepo(dir string) (string, bool) {
 	// Try regular repo first.
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel")
-
+	cmd, err := guardedGitCommand(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", false
+	}
 	if out, err := cmd.Output(); err == nil {
 		return strings.TrimSpace(string(out)), true
 	}
 
 	// Try bare repo: git-dir is "." for bare repos when -C points at the repo.
-	cmd = exec.Command("git", "-C", dir, "rev-parse", "--is-bare-repository")
-
+	cmd, err = guardedGitCommand(dir, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return "", false
+	}
 	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
 		return dir, true
 	}
@@ -34,8 +82,10 @@ func detectGitRepo(dir string) (string, bool) {
 
 // fetchOrigin runs `git fetch origin` to ensure the local repo has the latest remote refs.
 func fetchOrigin(gitRoot string) error {
-	cmd := exec.Command("git", "-C", gitRoot, "fetch", "origin")
-
+	cmd, err := guardedGitCommand(gitRoot, "fetch", "origin")
+	if err != nil {
+		return err
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch origin: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -46,29 +96,29 @@ func fetchOrigin(gitRoot string) error {
 // Falls back to "origin/main", then "HEAD".
 func getRemoteDefaultBranch(gitRoot string) string {
 	// Try symbolic-ref of origin/HEAD (set by `git clone` or `git remote set-head`).
-	cmd := exec.Command("git", "-C", gitRoot, "symbolic-ref", "refs/remotes/origin/HEAD")
-
-	if out, err := cmd.Output(); err == nil {
-		ref := strings.TrimSpace(string(out))
-		// ref looks like "refs/remotes/origin/main" — return "origin/main".
-		if strings.HasPrefix(ref, "refs/remotes/") {
-			return strings.TrimPrefix(ref, "refs/remotes/")
+	if cmd, err := guardedGitCommand(gitRoot, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		if out, err := cmd.Output(); err == nil {
+			ref := strings.TrimSpace(string(out))
+			// ref looks like "refs/remotes/origin/main" — return "origin/main".
+			if strings.HasPrefix(ref, "refs/remotes/") {
+				return strings.TrimPrefix(ref, "refs/remotes/")
+			}
+			return ref
 		}
-		return ref
 	}
 
 	// Fallback: check if origin/main exists.
-	cmd = exec.Command("git", "-C", gitRoot, "rev-parse", "--verify", "origin/main")
-
-	if err := cmd.Run(); err == nil {
-		return "origin/main"
+	if cmd, err := guardedGitCommand(gitRoot, "rev-parse", "--verify", "origin/main"); err == nil {
+		if err := cmd.Run(); err == nil {
+			return "origin/main"
+		}
 	}
 
 	// Fallback: check if origin/master exists.
-	cmd = exec.Command("git", "-C", gitRoot, "rev-parse", "--verify", "origin/master")
-
-	if err := cmd.Run(); err == nil {
-		return "origin/master"
+	if cmd, err := guardedGitCommand(gitRoot, "rev-parse", "--verify", "origin/master"); err == nil {
+		if err := cmd.Run(); err == nil {
+			return "origin/master"
+		}
 	}
 
 	return "HEAD"
@@ -91,8 +141,10 @@ func setupGitWorktree(gitRoot, worktreePath, branchName, baseRef string) error {
 }
 
 func runGitWorktreeAdd(gitRoot, worktreePath, branchName, baseRef string) error {
-	cmd := exec.Command("git", "-C", gitRoot, "worktree", "add", "-b", branchName, worktreePath, baseRef)
-
+	cmd, err := guardedGitCommand(gitRoot, "worktree", "add", "-b", branchName, worktreePath, baseRef)
+	if err != nil {
+		return err
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -102,17 +154,17 @@ func runGitWorktreeAdd(gitRoot, worktreePath, branchName, baseRef string) error 
 // removeGitWorktree removes a worktree and its branch. Best-effort: logs errors.
 func removeGitWorktree(gitRoot, worktreePath, branchName string, logger *slog.Logger) {
 	// Remove the worktree.
-	cmd := exec.Command("git", "-C", gitRoot, "worktree", "remove", "--force", worktreePath)
-
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if cmd, err := guardedGitCommand(gitRoot, "worktree", "remove", "--force", worktreePath); err != nil {
+		logger.Warn("execenv: git worktree remove denied", "error", err)
+	} else if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Warn("execenv: git worktree remove failed", "output", strings.TrimSpace(string(out)), "error", err)
 	}
 
 	// Delete the branch (best-effort).
 	if branchName != "" {
-		cmd = exec.Command("git", "-C", gitRoot, "branch", "-D", branchName)
-	
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if cmd, err := guardedGitCommand(gitRoot, "branch", "-D", branchName); err != nil {
+			logger.Warn("execenv: git branch delete denied", "error", err)
+		} else if out, err := cmd.CombinedOutput(); err != nil {
 			logger.Warn("execenv: git branch delete failed", "branch", branchName, "output", strings.TrimSpace(string(out)), "error", err)
 		}
 	}
@@ -121,8 +173,10 @@ func removeGitWorktree(gitRoot, worktreePath, branchName string, logger *slog.Lo
 // excludeFromGit adds a pattern to the worktree's .git/info/exclude file.
 func excludeFromGit(worktreePath, pattern string) error {
 	// Resolve the actual git dir for this worktree.
-	cmd := exec.Command("git", "-C", worktreePath, "rev-parse", "--git-dir")
-
+	cmd, err := guardedGitCommand(worktreePath, "rev-parse", "--git-dir")
+	if err != nil {
+		return err
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("resolve git dir: %w", err)
