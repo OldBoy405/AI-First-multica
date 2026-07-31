@@ -11,6 +11,7 @@
 | 3 | `server/migrations/158_aifirst_cr_projection.{up,down}.sql`（新文件） | 新增治理投影三表：`cr` / `cr_sync_event` / `approval_record`（approve 用部分唯一索引 `WHERE decision='approve'`，reject 多条留痕） | P0 数据模型映射（git 权威 / PG 投影）落地；表可清空重放。rebase 时保持迁移编号顺延、勿与上游新迁移撞号。CR-2026-002 TASK-04 | 2026-07-31 |
 | 4 | `server/internal/governance/`（新包：`actions.go`、`transitions_gen.go`、`gen/generate-transitions.mjs`、测试） | 治理层自研包：activity_log 两个 `aifirst.` action 常量 + CR 状态机只读副本（45 条展开转移，生成产物入库，`gen --check` 守一致性）+ 后续 crsync/approval/reconcile 落此包 | 规则一（自研代码住新目录）；构建不依赖 tools checkout（SDD-SUG-003）。状态机变更流程：改 tools dir-graph.yaml → 重跑 gen → 提交两仓。CR-2026-002 TASK-04 | 2026-07-31 |
 | 5 | `server/internal/governance/crsync.go` + `server/cmd/server/router.go`（1 处 AIFIRST 挂载：`POST /api/daemon/cr-events`） | CR 投影 worker：事件幂等入账（`ON CONFLICT DO NOTHING`）→ per-CR 互斥 → 合法转移校验（transitions_gen）→ 更新 cr 行 / 乱序置 needs_reconcile → `cr:updated` 经 events.Bus 自动广播 workspace 房间。workspace 绑定只信 DaemonAuth 上下文，请求体 workspace_root_hash 仅日志用 | P1 §A 同步协议服务端半边；直接用 pgx 不走 sqlc（避免动上游 query 文件）。CR-2026-002 TASK-05 | 2026-07-31 |
+| 6 | `server/internal/daemon/crevents.go`（新文件）+ `daemon.go`（1 处 AIFIRST 启动钩子）+ `config.go`（CRWorkspaceRoots 字段 + `MULTICA_CR_WORKSPACES` env）+ `client.go` 不动（ReportCREvents 定义在 crevents.go 里） | daemon CR 事件采集器：heartbeat 同周期扫 `{root}/.crctl/outbox/`（主）+ commit 兜底扫描（`.scan-cursor` 游标，四类 `[cr] ` 前缀契约）→ 双通道按幂等键合并（outbox 赢）→ 批 ≤100 上报 → 仅 accepted 删文件、rejected 三振进 `outbox/dead/`、上报失败游标不动（离线积压重试） | P1 §A.3。**部署口径**：daemon 启动环境需设 `MULTICA_CR_WORKSPACES=<knowledge-base 本地路径>`（分号分隔多工作区），未设则采集器完全关闭。commit 扫描的 git 调用暂直调 exec（只读 log/rev-parse），TASK-09 gitguard 收编（代码内 TODO）。CR-2026-002 TASK-06 | 2026-07-31 |
 
 ## 纯配置约定（无代码改动，部署时执行）
 
@@ -31,7 +32,7 @@
 | `TestTraecliBlockedArgsFiltering` / `TestQoderBackendInvokesACPFlagAndFiltersBlockedArgs` / `TestQoderFiltersRemoteMcpWhenInitializeDoesNotAdvertiseCapability` | `server/pkg/agent` | `git stash` 摘除本地全部改动后仍失败（2026-07-31，Windows + 本机装有 Qoder 的环境）；根因未诊断，疑与测试对本机环境的隐含假设有关 | 2026-07-31 |
 | `TestNewAPIClient_LeftoverMarkerActionableError` 等 7 项 | `server/cmd/multica` | 未改动的 main 检出 A/B 复跑结果完全一致（2026-07-31，CR-2026-002 TASK-05 全量基线时发现）；多为 Windows 路径分隔符/本机环境假设 | 2026-07-31 |
 | `TestCLIConfig_BackwardCompat_*` 等 4 项 | `server/internal/cli` | 同上 A/B 验证一致 | 2026-07-31 |
-| gofmt：本机 Go 工具链对上游 794 个文件报格式差异 | 全仓 | 上游格式化用的 Go 版本与本机不同；**本 fork 新增文件必须过本机 gofmt**，上游文件不动 | 2026-07-31 |
+| gofmt：本机对上游 794 个文件报格式差异 | 全仓 | **根因是 CRLF**：Windows autocrlf 检出的上游 .go 文件字节级 ≠ gofmt 输出（LF），并非格式真差异（T06 期核实，修正 T05 时"工具链版本差异"的初判）。**fork 新增 .go 文件以 LF 写入且必须过 gofmt**；上游文件不动 | 2026-07-31 |
 
 ## 未做（防止误以为已做）
 

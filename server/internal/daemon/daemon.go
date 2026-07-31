@@ -798,6 +798,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
 
+	// AIFIRST: CR event collector — ships crctl outbox events to the server
+	// projection (CR-2026-002 TASK-06). No-op unless MULTICA_CR_WORKSPACES is set.
+	if len(d.cfg.CRWorkspaceRoots) > 0 {
+		go d.crEventsLoop(ctx)
+	}
+
 	taskWakeups := make(chan taskWakeup, 256)
 	go d.taskWakeupLoop(ctx, taskWakeups)
 	go d.heartbeatLoop(ctx)

@@ -110,6 +110,12 @@ type Config struct {
 	// prefers a matching, executable override over resolving the profile's
 	// command_name on PATH. nil/empty means "always resolve via PATH".
 	ProfileCommandOverrides map[string]string
+
+	// AIFIRST: CRWorkspaceRoots lists local crctl workspace roots (knowledge-base
+	// checkouts) whose .crctl/outbox/ the CR event collector scans and reports
+	// to POST /api/daemon/cr-events (CR-2026-002 TASK-06). Sourced from
+	// MULTICA_CR_WORKSPACES (os.PathListSeparator-separated). Empty = collector off.
+	CRWorkspaceRoots []string
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
@@ -535,7 +541,26 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		CodexArgs:                      codexArgs,
 		CodebuddyArgs:                  codebuddyArgs,
 		ProfileCommandOverrides:        profileCommandOverrides,
+		CRWorkspaceRoots:               crWorkspaceRootsFromEnv(),
 	}, nil
+}
+
+// AIFIRST: crWorkspaceRootsFromEnv parses MULTICA_CR_WORKSPACES into workspace
+// roots for the CR event collector (CR-2026-002 TASK-06). Uses the platform
+// path-list separator (';' on Windows, ':' elsewhere) because roots are
+// absolute paths that may themselves contain ':'.
+func crWorkspaceRootsFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("MULTICA_CR_WORKSPACES"))
+	if raw == "" {
+		return nil
+	}
+	var roots []string
+	for _, p := range strings.Split(raw, string(os.PathListSeparator)) {
+		if p = strings.TrimSpace(p); p != "" {
+			roots = append(roots, p)
+		}
+	}
+	return roots
 }
 
 // officialCloudHost is the hostname of Multica's hosted cloud. It's the only
