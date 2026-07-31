@@ -166,10 +166,21 @@ type crEventCollector struct {
 	// rejectCounts tracks per-file consecutive server rejections; at 3 the file
 	// moves to outbox/dead/ so one poisoned event cannot wedge the channel.
 	rejectCounts map[string]int
+	// lastSnapshot tracks the last successfully reported reconcile snapshot
+	// per root (TASK-07 daemon mode). Zero time = send on the first pass.
+	lastSnapshot map[string]time.Time
+	// snapshotInterval is the daemon-mode reconcile cadence.
+	// ponytail: fixed 5min matches the server-mode default; make it Config-driven
+	// if a deployment ever needs a different cadence.
+	snapshotInterval time.Duration
 }
 
 func newCREventCollector(roots []string, reporter crEventReporter, logger *slog.Logger) *crEventCollector {
-	return &crEventCollector{roots: roots, reporter: reporter, logger: logger, rejectCounts: map[string]int{}}
+	return &crEventCollector{
+		roots: roots, reporter: reporter, logger: logger,
+		rejectCounts: map[string]int{}, lastSnapshot: map[string]time.Time{},
+		snapshotInterval: 5 * time.Minute,
+	}
 }
 
 // crEventsLoop is launched from Daemon.Run when CRWorkspaceRoots is non-empty.
@@ -211,6 +222,13 @@ func (c *crEventCollector) collectRoot(ctx context.Context, root string) error {
 		c.logger.Debug("cr commit scan skipped", "root", root, "error", err)
 	}
 	events := mergeCREvents(fileEvents, commitEvents)
+	snapshotSent := false
+	if time.Since(c.lastSnapshot[root]) >= c.snapshotInterval {
+		if snap, ok := buildSnapshotEvent(root); ok {
+			events = append(events, snap)
+			snapshotSent = true
+		}
+	}
 	if len(events) == 0 {
 		return nil
 	}
@@ -226,25 +244,62 @@ func (c *crEventCollector) collectRoot(ctx context.Context, root string) error {
 	// Only after every batch reported successfully may the cursor advance —
 	// a mid-run failure must rescan the same commit range next tick.
 	if newCursor != "" {
+		// The root may not have a .crctl dir yet (crctl never ran there) —
+		// create it, or the cursor write fails every tick and the whole range
+		// is rescanned forever.
+		if err := os.MkdirAll(filepath.Join(root, ".crctl"), 0o755); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(root, ".crctl", ".scan-cursor"), []byte(newCursor+"\n"), 0o644); err != nil {
 			return err
 		}
 	}
+	if snapshotSent {
+		c.lastSnapshot[root] = time.Now()
+	}
 	return nil
+}
+
+// buildSnapshotEvent packages the local authority — HEAD sha plus the raw
+// _backlog.yml — as one "snapshot" event for daemon-mode reconcile (TASK-07).
+// Parsing happens server-side (governance.ParseBacklog) so both reconcile
+// modes share one parser. Returns ok=false when the root has no backlog (not
+// a crctl workspace yet) or git is unreadable — skip silently, retry next tick.
+func buildSnapshotEvent(root string) (crOutboxEvent, bool) {
+	raw, err := os.ReadFile(filepath.Join(root, "change-requests", "_backlog.yml"))
+	if err != nil {
+		return crOutboxEvent{}, false
+	}
+	head, err := gitLine(root, "rev-parse", "HEAD")
+	if err != nil {
+		head = "" // snapshot still useful without the pointer
+	}
+	payload, err := json.Marshal(map[string]string{"head_sha": head, "backlog": string(raw)})
+	if err != nil {
+		return crOutboxEvent{}, false
+	}
+	name := "snapshot:" + head
+	if head == "" {
+		name = "snapshot:nohead"
+	}
+	return crOutboxEvent{
+		V: 1, File: name, EventKind: "snapshot", Actor: "daemon-reconcile",
+		Payload: payload, OccurredAt: time.Now(),
+	}, true
 }
 
 func (c *crEventCollector) applyAck(outboxDir string, ack crEventsAck) {
 	for _, file := range ack.Accepted {
 		delete(c.rejectCounts, file)
-		if strings.HasPrefix(file, "commit:") {
-			continue // synthetic id from the commit-scan channel; nothing on disk
+		if strings.HasPrefix(file, "commit:") || strings.HasPrefix(file, "snapshot:") {
+			continue // synthetic ids (commit-scan / reconcile snapshot); nothing on disk
 		}
 		if err := os.Remove(filepath.Join(outboxDir, file)); err != nil && !os.IsNotExist(err) {
 			c.logger.Warn("could not delete acked outbox file", "file", file, "error", err)
 		}
 	}
 	for _, rej := range ack.Rejected {
-		if strings.HasPrefix(rej.File, "commit:") {
+		if strings.HasPrefix(rej.File, "commit:") || strings.HasPrefix(rej.File, "snapshot:") {
 			continue
 		}
 		c.rejectCounts[rej.File]++

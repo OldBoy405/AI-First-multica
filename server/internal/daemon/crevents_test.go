@@ -228,3 +228,111 @@ func TestParseCRCommitMessageContracts(t *testing.T) {
 		}
 	}
 }
+
+// ── TASK-07 daemon-mode reconcile: periodic snapshot events ─────────────────
+
+func TestSnapshotEventEmittedAndThrottled(t *testing.T) {
+	root := t.TempDir()
+	sha := gitInitWithCRCommit(t, root, "wip: seed")
+	if err := os.MkdirAll(filepath.Join(root, "change-requests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backlog := "change-requests:\n  - id: CR-2026-002\n    status: developing\n"
+	if err := os.WriteFile(filepath.Join(root, "change-requests", "_backlog.yml"), []byte(backlog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := &fakeReporter{ack: acceptAll}
+	col := newTestCollector(root, rep)
+	col.collectAll(context.Background())
+	if len(rep.reports) == 0 {
+		t.Fatal("first pass must report (snapshot due immediately)")
+	}
+	var snap *crOutboxEvent
+	for i := range rep.reports[0].Events {
+		if rep.reports[0].Events[i].EventKind == "snapshot" {
+			snap = &rep.reports[0].Events[i]
+		}
+	}
+	if snap == nil {
+		t.Fatalf("no snapshot event in first report: %+v", rep.reports[0].Events)
+	}
+	if snap.File != "snapshot:"+sha {
+		t.Fatalf("bad synthetic file id %q", snap.File)
+	}
+	var p struct {
+		HeadSHA string `json:"head_sha"`
+		Backlog string `json:"backlog"`
+	}
+	if err := json.Unmarshal(snap.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.HeadSHA != sha || p.Backlog != backlog {
+		t.Fatalf("payload mismatch: %+v", p)
+	}
+
+	// Within the interval the snapshot must not repeat.
+	rep.reports = nil
+	col.collectAll(context.Background())
+	for _, r := range rep.reports {
+		for _, e := range r.Events {
+			if e.EventKind == "snapshot" {
+				t.Fatal("snapshot re-sent within the throttle interval")
+			}
+		}
+	}
+
+	// After the interval elapses it is sent again.
+	col.lastSnapshot[root] = time.Now().Add(-6 * time.Minute)
+	rep.reports = nil
+	col.collectAll(context.Background())
+	found := false
+	for _, r := range rep.reports {
+		for _, e := range r.Events {
+			if e.EventKind == "snapshot" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("snapshot not re-sent after the interval")
+	}
+}
+
+func TestSnapshotSkippedWithoutBacklog(t *testing.T) {
+	root := t.TempDir()
+	gitInitWithCRCommit(t, root, "wip: seed")
+	rep := &fakeReporter{ack: acceptAll}
+	col := newTestCollector(root, rep)
+	col.collectAll(context.Background())
+	for _, r := range rep.reports {
+		for _, e := range r.Events {
+			if e.EventKind == "snapshot" {
+				t.Fatal("root without _backlog.yml must not emit snapshots")
+			}
+		}
+	}
+}
+
+func TestSnapshotReportFailureRetriesNextTick(t *testing.T) {
+	root := t.TempDir()
+	gitInitWithCRCommit(t, root, "wip: seed")
+	if err := os.MkdirAll(filepath.Join(root, "change-requests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "change-requests", "_backlog.yml"),
+		[]byte("change-requests: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := &fakeReporter{ack: acceptAll, err: context.DeadlineExceeded}
+	col := newTestCollector(root, rep)
+	col.collectAll(context.Background())
+	if !col.lastSnapshot[root].IsZero() {
+		t.Fatal("failed report must not advance lastSnapshot")
+	}
+	rep.err = nil
+	col.collectAll(context.Background())
+	if col.lastSnapshot[root].IsZero() {
+		t.Fatal("successful report must advance lastSnapshot")
+	}
+}

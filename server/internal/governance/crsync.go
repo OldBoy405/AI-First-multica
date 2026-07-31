@@ -39,8 +39,14 @@ var crIDRe = regexp.MustCompile(`^CR-\d{4}-\d{3}$`)
 var knownEventKinds = map[string]bool{
 	"status": true, "owners": true, "checkpoint": true,
 	"merge": true, "archive": true, "inbox": true,
-	"audit": true, // TASK-10: activity_log rows, bypasses the cr ledger
+	"audit":    true, // TASK-10: activity_log rows, bypasses the cr ledger
+	"snapshot": true, // TASK-07: daemon-mode reconcile, bypasses the cr ledger
 }
+
+// ledgerlessKinds carry no commit sha (the ledger's idempotency key) and may
+// lack a CR binding; they are handled by dedicated ingestors instead of the
+// projection ledger.
+var ledgerlessKinds = map[string]bool{"audit": true, "snapshot": true}
 
 // OutboxEvent mirrors the crctl outbox event schema v1. File is injected by the
 // daemon alongside the event so the server can ack exactly which outbox files
@@ -131,9 +137,10 @@ func validateEvent(ev OutboxEvent) string {
 	if ev.V != 1 {
 		return "BAD_EVENT"
 	}
-	// audit events may lack a CR binding (e.g. a gitguard denial outside any
-	// CR context); every other kind projects onto a cr row and needs the id.
-	if !crIDRe.MatchString(ev.CRID) && !(ev.EventKind == "audit" && ev.CRID == "") {
+	// audit/snapshot events may lack a CR binding (a gitguard denial outside
+	// any CR context; a whole-workspace snapshot); every other kind projects
+	// onto a cr row and needs the id.
+	if !crIDRe.MatchString(ev.CRID) && !(ledgerlessKinds[ev.EventKind] && ev.CRID == "") {
 		return "BAD_EVENT"
 	}
 	if !knownEventKinds[ev.EventKind] {
@@ -152,6 +159,9 @@ func validateEvent(ev OutboxEvent) string {
 func (s *SyncService) ingest(ctx context.Context, workspaceID string, ev OutboxEvent) error {
 	if ev.EventKind == "audit" {
 		return s.ingestAudit(ctx, workspaceID, ev)
+	}
+	if ev.EventKind == "snapshot" {
+		return s.ingestSnapshot(ctx, workspaceID, ev)
 	}
 	payload := ev.Payload
 	if len(payload) == 0 {
