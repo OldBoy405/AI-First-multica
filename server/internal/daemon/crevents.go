@@ -270,11 +270,17 @@ func buildSnapshotEvent(root string) (crOutboxEvent, bool) {
 	if err != nil {
 		return crOutboxEvent{}, false
 	}
+	// CR-2026-003 FR-2: ship archived CRs' final states too — absence is valid
+	// (nothing archived yet), so a read error just degrades to empty.
+	rawHist, err := os.ReadFile(filepath.Join(root, "change-requests", "_history.yml"))
+	if err != nil {
+		rawHist = nil
+	}
 	head, err := gitLine(root, "rev-parse", "HEAD")
 	if err != nil {
 		head = "" // snapshot still useful without the pointer
 	}
-	payload, err := json.Marshal(map[string]string{"head_sha": head, "backlog": string(raw)})
+	payload, err := json.Marshal(map[string]string{"head_sha": head, "backlog": string(raw), "history": string(rawHist)})
 	if err != nil {
 		return crOutboxEvent{}, false
 	}

@@ -100,7 +100,21 @@ func FetchGitHubSnapshot(ctx context.Context, cfg ReconcileConfig) (AuthoritySna
 	if err != nil {
 		return AuthoritySnapshot{}, err
 	}
-	return AuthoritySnapshot{HeadSHA: commit.SHA, Statuses: statuses}, nil
+	// CR-2026-003 FR-2: archived CRs live in _history.yml — same pinned sha, so
+	// backlog and history form one consistent snapshot. A 404 is a valid state
+	// (workspace never archived anything); any other failure aborts the cycle.
+	var rawHist []byte
+	if err := githubGet(ctx, cfg.Token, base+"/contents/change-requests/_history.yml?ref="+commit.SHA, "application/vnd.github.raw+json", nil, &rawHist); err != nil {
+		if !strings.Contains(err.Error(), "HTTP 404") {
+			return AuthoritySnapshot{}, fmt.Errorf("_history.yml@%.8s: %w", commit.SHA, err)
+		}
+		rawHist = nil
+	}
+	history, err := ParseHistory(rawHist)
+	if err != nil {
+		return AuthoritySnapshot{}, err
+	}
+	return AuthoritySnapshot{HeadSHA: commit.SHA, Statuses: mergeAuthority(statuses, history)}, nil
 }
 
 func githubGet(ctx context.Context, token, url, accept string, jsonOut any, rawOut *[]byte) error {

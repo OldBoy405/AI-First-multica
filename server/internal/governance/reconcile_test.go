@@ -6,6 +6,7 @@ package governance
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,5 +138,123 @@ func TestSnapshotEventHeals(t *testing.T) {
 	resp = postEvents(t, svc, testWorkspaceID, []OutboxEvent{bad})
 	if len(resp.Rejected) != 1 || resp.Rejected[0].Code != "INGEST_FAILED" {
 		t.Fatalf("corrupt snapshot must reject, got %+v", resp)
+	}
+}
+
+// ── CR-2026-003 tests ────────────────────────────────────────────────────────
+// "pending:" is the cross-language contract literal with crctl pendingCommitSha()
+// (tools crctl.test.mjs locks the same literal on the JS side).
+
+// AC-1 (FR-1): two embedded status events for the same CR must both land in the
+// ledger and both advance the projection — and the placeholder must never leak
+// into cr.projected_commit.
+func TestEmbeddedPlaceholderEventsDoNotCollide(t *testing.T) {
+	svc := NewSyncService(testPool, nil)
+	resetCR(t, "CR-9301-100")
+	t.Cleanup(func() { resetCR(t, "CR-9301-100") })
+
+	// Seed via a real-sha registration, then two placeholder transitions
+	// (mirrors writing-back -> archived, the sequence that was silently lost).
+	evs := []OutboxEvent{
+		{V: 1, File: "e0.json", EventKind: "status", CRID: "CR-9301-100",
+			FromStatus: "", ToStatus: "drafting", Trigger: "requirement-register",
+			CommitSHA: "realsha0", OccurredAt: time.Now()},
+		{V: 1, File: "e1.json", EventKind: "status", CRID: "CR-9301-100",
+			FromStatus: "drafting", ToStatus: "requirement-reviewing", Trigger: "review-requirement",
+			CommitSHA: "pending:1753900000000:11111:1", OccurredAt: time.Now()},
+		{V: 1, File: "e2.json", EventKind: "status", CRID: "CR-9301-100",
+			FromStatus: "requirement-reviewing", ToStatus: "requirement-approved", Trigger: "approve-requirement",
+			CommitSHA: "pending:1753900000000:11111:2", OccurredAt: time.Now()},
+	}
+	resp := postEvents(t, svc, testWorkspaceID, evs)
+	if len(resp.Accepted) != 3 {
+		t.Fatalf("want 3 accepted, got %+v", resp)
+	}
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM cr_sync_event WHERE cr_id = 'CR-9301-100' AND event_kind = 'status'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("idempotency collision: want 3 ledger rows, got %d (the pre-fix bug collapsed placeholders)", n)
+	}
+	st, nr, pc := crRow(t, "CR-9301-100")
+	if st != "requirement-approved" || nr {
+		t.Fatalf("second placeholder transition lost: status=%s needs_reconcile=%v", st, nr)
+	}
+	if strings.HasPrefix(pc, "pending:") {
+		t.Fatalf("placeholder leaked into projected_commit: %q", pc)
+	}
+	if pc != "realsha0" {
+		t.Fatalf("projected_commit should keep the last real sha, got %q", pc)
+	}
+	// NFR-1: real-sha dedup behavior unchanged — replaying e0 is still a no-op.
+	resp = postEvents(t, svc, testWorkspaceID, evs[:1])
+	if len(resp.Accepted) != 1 {
+		t.Fatalf("replay must still be acked: %+v", resp)
+	}
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM cr_sync_event WHERE cr_id = 'CR-9301-100' AND event_kind = 'status'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("real-sha replay must dedup (NFR-1), got %d rows", n)
+	}
+}
+
+func TestParseHistory(t *testing.T) {
+	lf := "history:\n  - id: CR-9300-001\n    final-status: archived\n  - id: CR-9300-002\n    final-status: rejected\n"
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+	for name, raw := range map[string]string{"lf": lf, "crlf": crlf} {
+		m, err := ParseHistory([]byte(raw))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if m["CR-9300-001"] != "archived" || m["CR-9300-002"] != "rejected" {
+			t.Fatalf("%s: got %v", name, m)
+		}
+	}
+	if m, err := ParseHistory(nil); err != nil || len(m) != 0 {
+		t.Fatalf("empty history is valid (never archived): %v %v", m, err)
+	}
+	if _, err := ParseHistory([]byte("{{not yaml")); err == nil {
+		t.Fatal("garbage must hard-fail, never silently empty (工程纪律 1)")
+	}
+}
+
+func TestMergeAuthorityBacklogWins(t *testing.T) {
+	m := mergeAuthority(map[string]string{"CR-A": "developing"}, map[string]string{"CR-A": "archived", "CR-B": "archived"})
+	if m["CR-A"] != "developing" || m["CR-B"] != "archived" || len(m) != 2 {
+		t.Fatalf("backlog must win on overlap: %v", m)
+	}
+}
+
+// AC-2 (FR-2): an archived CR whose projection is stuck heals from the merged
+// snapshot — the exact shape CR-2026-001/002 were stuck in.
+func TestArchivedCRHealsFromHistorySnapshot(t *testing.T) {
+	svc := NewSyncService(testPool, nil)
+	seedCR(t, "CR-9302-001", "writing-back", true) // the real-world stuck shape
+	backlog := "change-requests:\n"
+	history := "history:\n  - id: CR-9302-001\n    final-status: archived\n"
+	payload, _ := json.Marshal(map[string]string{"head_sha": "hist-sha", "backlog": backlog, "history": history})
+	ev := OutboxEvent{V: 1, File: "snapshot:hist", EventKind: "snapshot",
+		Actor: "daemon-reconcile", Payload: payload, OccurredAt: time.Now()}
+	resp := postEvents(t, svc, testWorkspaceID, []OutboxEvent{ev})
+	if len(resp.Accepted) != 1 {
+		t.Fatalf("want accepted, got %+v", resp)
+	}
+	if st, nr, _ := crRow(t, "CR-9302-001"); st != "archived" || nr {
+		t.Fatalf("archived CR did not heal from history: %s/%v", st, nr)
+	}
+	// Backward compat: a snapshot without the history field behaves pre-fix.
+	seedCR(t, "CR-9302-002", "writing-back", true)
+	payload2, _ := json.Marshal(map[string]string{"head_sha": "h2", "backlog": backlog})
+	ev2 := OutboxEvent{V: 1, File: "snapshot:nohist", EventKind: "snapshot",
+		Actor: "daemon-reconcile", Payload: payload2, OccurredAt: time.Now()}
+	if resp := postEvents(t, svc, testWorkspaceID, []OutboxEvent{ev2}); len(resp.Accepted) != 1 {
+		t.Fatalf("old-daemon snapshot must still be accepted: %+v", resp)
+	}
+	if st, _, _ := crRow(t, "CR-9302-002"); st != "writing-back" {
+		t.Fatalf("no-history snapshot must not touch the row (compat): %s", st)
 	}
 }
