@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/governance"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -427,6 +428,20 @@ func main() {
 	// — there is no separate goroutine for scheduled Autopilot anymore.
 	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
 		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
+	}
+	// AIFIRST: server-mode CR reconcile (CR-2026-002 TASK-07). Mounted only when
+	// REMOTE_RECONCILE_MODE=server with a usable GitHub remote; a broken
+	// server-mode config refuses startup (fail loudly, not silently unguarded).
+	// Daemon-mode snapshots need no job here — they arrive via /cr-events.
+	if reconcileCfg, on, err := governance.FromReconcileEnv(); err != nil {
+		slog.Error("reconcile config rejected; refusing to start", "error", err)
+		os.Exit(1)
+	} else if on {
+		if err := schedulerMgr.Register(governance.ReconcileJob(pool, governance.NewSyncService(pool, bus), reconcileCfg)); err != nil {
+			slog.Warn("scheduler: failed to register aifirst_cr_reconcile job", "error", err)
+		} else {
+			slog.Info("aifirst cr reconcile job registered", "interval", reconcileCfg.Interval, "remote", reconcileCfg.RemoteURL)
+		}
 	}
 	go func() {
 		_ = schedulerMgr.Run(sweepCtx)

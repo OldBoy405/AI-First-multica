@@ -20,6 +20,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/governance"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -2471,6 +2472,10 @@ type TaskCompleteRequest struct {
 	Output    string `json:"output"`
 	SessionID string `json:"session_id"` // Claude session ID for future resumption
 	WorkDir   string `json:"work_dir"`   // working directory used during execution
+	// AIFIRST: server-computed audit summary of the task's tool calls
+	// (CR-2026-002 TASK-10, AC-6②③). Never trusted from the daemon — always
+	// overwritten below from the persisted task_message stream.
+	ToolCalls *governance.ToolCallSummary `json:"tool_calls,omitempty"`
 }
 
 func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
@@ -2486,6 +2491,18 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// AIFIRST: aggregate the already-persisted tool_use/tool_result stream into
+	// an audit summary carried inside the task result (CR-2026-002 TASK-10).
+	req.ToolCalls = nil
+	if msgs, err := h.Queries.ListTaskMessages(r.Context(), parseUUID(taskID)); err == nil {
+		tm := make([]governance.ToolMsg, 0, len(msgs))
+		for _, m := range msgs {
+			tm = append(tm, governance.ToolMsg{Seq: int(m.Seq), Type: m.Type, Tool: m.Tool.String, Input: m.Input})
+		}
+		s := governance.SummarizeToolCalls(tm)
+		req.ToolCalls = &s
 	}
 
 	result, _ := json.Marshal(req)

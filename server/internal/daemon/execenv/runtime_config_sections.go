@@ -36,6 +36,20 @@ import (
 // Background Task Safety is emitted by `writeBackgroundTaskSafetySlim`
 // below.
 
+// AIFIRST: writeControlledShellSection puts the git discipline where the model
+// can see it (CR-2026-002 TASK-09, P1 §C.3 — behavioral constraint layer).
+// Emitted only when the controlled-shell rules are configured on this daemon.
+func writeControlledShellSection(b *strings.Builder) {
+	if g, _ := loadSystemGuard(); g == nil {
+		return
+	}
+	b.WriteString("## Controlled Shell (git)\n\n")
+	b.WriteString("`git` in this environment is a whitelist gateway — a denied command returns a structured FORBIDDEN_* error, which is expected behavior, not an outage. ")
+	b.WriteString("For CR (Change Request) work use `crctl git <sub> [args]` (same whitelist, plus audit). ")
+	b.WriteString("Never edit governance state files directly (change-requests/_backlog.yml, cr.md, approval.yml, review-annotations/*); they are written exclusively by crctl. ")
+	b.WriteString("specs/ and delivery/ are writeback-skill territory and need human confirmation.\n\n")
+}
+
 // writeHeader emits the brief's leading title and one-line elevator pitch.
 func writeHeader(b *strings.Builder) {
 	b.WriteString("# Multica Agent Runtime\n\n")
@@ -520,6 +534,7 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 
 	writeHeader(&b)
 	writeBackgroundTaskSafetySlim(&b)
+	writeControlledShellSection(&b)
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeTaskInitiator(&b, ctx)

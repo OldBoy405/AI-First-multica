@@ -1,0 +1,18 @@
+# AIFIRST: governance env overlay (CR-2026-002 TASK-11).
+# Compose with: docker compose -p multica \
+#   -f docker-compose.selfhost.yml -f docker-compose.selfhost.build.yml -f docker-compose.aifirst.yml ...
+# Adds the CR-governance variables the upstream selfhost compose does not
+# enumerate. Values come from .env; every one of them defaults to "off".
+services:
+  backend:
+    environment:
+      # Ed25519 signed approvals (TASK-08): unset = approval endpoints not
+      # mounted; invalid = refuse start. Only key_id is ever logged.
+      APPROVAL_SIGNING_KEY: ${APPROVAL_SIGNING_KEY:-}
+      APPROVAL_SIGNING_KEY_ID: ${APPROVAL_SIGNING_KEY_ID:-}
+      # Server-mode reconcile (TASK-07): PAT must be fine-grained, single-repo,
+      # Contents: Read-only. Never logged.
+      REMOTE_RECONCILE_MODE: ${REMOTE_RECONCILE_MODE:-}
+      KNOWLEDGE_BASE_REMOTE_URL: ${KNOWLEDGE_BASE_REMOTE_URL:-}
+      KNOWLEDGE_BASE_TOKEN: ${KNOWLEDGE_BASE_TOKEN:-}
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-}

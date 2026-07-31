@@ -152,6 +152,11 @@ type Environment struct {
 	LocalDirectory bool
 	// CodexHome is the path to the per-task CODEX_HOME directory (set only for codex provider).
 	CodexHome string
+	// AIFIRST: GitShimDir is the per-task bin dir holding the controlled-shell
+	// git shim (CR-2026-002 TASK-09). Non-empty only when
+	// MULTICA_CONTROLLED_SHELL_RULES is configured; the daemon prepends it to
+	// the agent PATH.
+	GitShimDir string
 	// OpenclawConfigPath is the path to the per-task synthesized OpenClaw
 	// config (set only for openclaw provider). The daemon exports this as
 	// OPENCLAW_CONFIG_PATH on the openclaw subprocess so its native skill
@@ -281,6 +286,14 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	if err := writeSidecarManifest(envRoot, manifest); err != nil {
 		logger.Warn("execenv: write sidecar manifest failed (non-fatal)", "error", err)
 	}
+
+	// AIFIRST: forge the controlled-shell layers (git PATH shim + Claude hooks)
+	// when MULTICA_CONTROLLED_SHELL_RULES is configured (CR-2026-002 TASK-09).
+	crguard, err := prepareCRGuard(envRoot, workDir, params.Provider, params.AgentName, logger)
+	if err != nil {
+		return nil, fmt.Errorf("execenv: prepare crguard: %w", err)
+	}
+	env.GitShimDir = crguard.ShimDir
 
 	// For OpenClaw, synthesize a per-task config that pins workspace to
 	// workDir. The skill scanner then reads {workDir}/skills/ (written by
