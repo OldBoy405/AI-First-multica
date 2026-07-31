@@ -49,3 +49,14 @@ SELECT project_id,
 FROM issue
 WHERE project_id = ANY(sqlc.arg('project_ids')::uuid[])
 GROUP BY project_id;
+
+-- name: GetProjectSettings :one
+SELECT settings FROM project WHERE id = $1;
+
+-- name: UpdateProjectSettings :one
+-- Shallow-merge the given keys into the project settings bag. Values are
+-- caller-validated; workspace_id is the SQL-layer tenant guard (see DeleteProject).
+UPDATE project
+SET settings = settings || @patch::jsonb, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id
+RETURNING *;

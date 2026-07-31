@@ -1136,6 +1136,17 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "you do not have access to this agent")
 			return
 		}
+		// Shared-queue stop rule (CR-2026-004 FR-4, P2 "sender stops own,
+		// owner stops any"): plain members may only cancel tasks they
+		// originated; workspace owners/admins may cancel any. The cancelled
+		// row is kept (soft delete) so the withdrawal stays auditable.
+		if uuidToString(task.OriginatorUserID) != userID {
+			member, merr := h.getWorkspaceMember(r.Context(), userID, workspaceID)
+			if merr != nil || (member.Role != "owner" && member.Role != "admin") {
+				writeErrorCode(w, http.StatusForbidden, "not_task_originator", "only the task originator or a workspace owner/admin can cancel this task")
+				return
+			}
+		}
 	}
 
 	cancelled, err := h.TaskService.CancelTaskWithResult(r.Context(), taskUUID)

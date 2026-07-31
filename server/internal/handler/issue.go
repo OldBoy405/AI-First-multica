@@ -1991,12 +1991,30 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 
 	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), wsUUID, requesterUUID, agentUUID, squadUUID, prompt, projectUUID, parentIssueUUID, attachmentIDs)
 	if err != nil {
+		var full *service.ErrProjectQueueFull
+		if errors.As(err, &full) {
+			writeProjectQueueFull(w, full)
+			return
+		}
 		slog.Warn("quick-create enqueue failed", append(logger.RequestAttrs(r), "error", err)...)
 		writeError(w, http.StatusInternalServerError, "failed to enqueue quick-create task")
 		return
 	}
 
 	writeJSON(w, http.StatusAccepted, QuickCreateIssueResponse{TaskID: uuidToString(task.ID)})
+}
+
+// writeProjectQueueFull returns 429 with a stable error code plus the live
+// depth/limit pair so the frontend can flip into its queue-full disabled
+// state without a follow-up query (CR-2026-004 FR-1/FR-5).
+func writeProjectQueueFull(w http.ResponseWriter, full *service.ErrProjectQueueFull) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	json.NewEncoder(w).Encode(map[string]any{
+		"code":        "project_queue_full",
+		"queue_depth": full.Depth,
+		"queue_limit": full.Limit,
+	})
 }
 
 // writeAgentUnavailable returns 422 with a stable error code so the modal

@@ -734,12 +734,19 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	}
 
 	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	priority := priorityToInt(issue.Priority)
+	if override, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, originatorUserID); gerr != nil {
+		slog.Info("task enqueue rejected: project queue full", "issue_id", util.UUIDToString(issue.ID), "error", gerr)
+		return db.AgentTaskQueue{}, gerr
+	} else if override != 0 {
+		priority = override
+	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:              issue.AssigneeID,
 		RuntimeID:            agent.RuntimeID,
 		IssueID:              issue.ID,
-		Priority:             priorityToInt(issue.Priority),
+		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
 		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
@@ -829,12 +836,19 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	}
 
 	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	priority := priorityToInt(issue.Priority)
+	if override, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, originatorUserID); gerr != nil {
+		slog.Info("mention task enqueue rejected: project queue full", "issue_id", util.UUIDToString(issue.ID), "error", gerr)
+		return db.AgentTaskQueue{}, gerr
+	} else if override != 0 {
+		priority = override
+	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
 		AgentID:              agentID,
 		RuntimeID:            agent.RuntimeID,
 		IssueID:              issue.ID,
-		Priority:             priorityToInt(issue.Priority),
+		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
 		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
@@ -1000,11 +1014,24 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 		return db.AgentTaskQueue{}, fmt.Errorf("marshal quick-create context: %w", err)
 	}
 
+	// Quick-create rides the same per-project capacity gate as issue enqueues
+	// when the user picked a target project. The task itself is not
+	// issue-linked yet, so it does not occupy a counted slot — acceptable
+	// under the soft-limit semantics (CR-2026-004 SDD §3.1).
+	priority := priorityToInt("high")
+	if projectID.Valid {
+		if override, gerr := s.guardProjectQueueCapacity(ctx, projectID, workspaceID, requesterID); gerr != nil {
+			return db.AgentTaskQueue{}, gerr
+		} else if override != 0 {
+			priority = override
+		}
+	}
+
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, requesterID, agent)
 	task, err := s.Queries.CreateQuickCreateTask(ctx, db.CreateQuickCreateTaskParams{
 		AgentID:              agentID,
 		RuntimeID:            agent.RuntimeID,
-		Priority:             priorityToInt("high"),
+		Priority:             priority,
 		Context:              contextJSON,
 		OriginatorUserID:     requesterID,
 		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,

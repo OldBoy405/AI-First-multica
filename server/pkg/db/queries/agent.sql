@@ -1013,3 +1013,14 @@ SET status = CASE WHEN EXISTS (
     updated_at = now()
 WHERE a.id = $1
 RETURNING *;
+
+-- name: CountProjectPendingTasks :one
+-- Shared Team Agent queue depth for a project: queued + dispatched tasks on
+-- issues belonging to the project (same "pending" reading as
+-- HasPendingTaskForIssue). running / waiting_local_directory / deferred and
+-- terminal states are excluded — under the single-writer claim rule the
+-- running task is no longer part of the waiting line. CR-2026-004 FR-1.
+SELECT count(*) FROM agent_task_queue atq
+JOIN issue i ON i.id = atq.issue_id
+WHERE i.project_id = $1
+  AND atq.status IN ('queued', 'dispatched');

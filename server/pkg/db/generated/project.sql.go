@@ -29,7 +29,7 @@ INSERT INTO project (
     lead_type, lead_id, priority
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8
-) RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority
+) RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings
 `
 
 type CreateProjectParams struct {
@@ -67,6 +67,7 @@ func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (P
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Priority,
+		&i.Settings,
 	)
 	return i, err
 }
@@ -87,7 +88,7 @@ func (q *Queries) DeleteProject(ctx context.Context, arg DeleteProjectParams) er
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings FROM project
 WHERE id = $1
 `
 
@@ -106,12 +107,13 @@ func (q *Queries) GetProject(ctx context.Context, id pgtype.UUID) (Project, erro
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Priority,
+		&i.Settings,
 	)
 	return i, err
 }
 
 const getProjectInWorkspace = `-- name: GetProjectInWorkspace :one
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings FROM project
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -135,6 +137,7 @@ func (q *Queries) GetProjectInWorkspace(ctx context.Context, arg GetProjectInWor
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Priority,
+		&i.Settings,
 	)
 	return i, err
 }
@@ -174,8 +177,19 @@ func (q *Queries) GetProjectIssueStats(ctx context.Context, projectIds []pgtype.
 	return items, nil
 }
 
+const getProjectSettings = `-- name: GetProjectSettings :one
+SELECT settings FROM project WHERE id = $1
+`
+
+func (q *Queries) GetProjectSettings(ctx context.Context, id pgtype.UUID) ([]byte, error) {
+	row := q.db.QueryRow(ctx, getProjectSettings, id)
+	var settings []byte
+	err := row.Scan(&settings)
+	return settings, err
+}
+
 const listProjects = `-- name: ListProjects :many
-SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority FROM project
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings FROM project
 WHERE workspace_id = $1
   AND ($2::text IS NULL OR status = $2)
   AND ($3::text IS NULL OR priority = $3)
@@ -209,6 +223,7 @@ func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]P
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.Priority,
+			&i.Settings,
 		); err != nil {
 			return nil, err
 		}
@@ -231,7 +246,7 @@ UPDATE project SET
     lead_id = $8,
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority
+RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings
 `
 
 type UpdateProjectParams struct {
@@ -269,6 +284,42 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (P
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Priority,
+		&i.Settings,
+	)
+	return i, err
+}
+
+const updateProjectSettings = `-- name: UpdateProjectSettings :one
+UPDATE project
+SET settings = settings || $1::jsonb, updated_at = now()
+WHERE id = $2 AND workspace_id = $3
+RETURNING id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, settings
+`
+
+type UpdateProjectSettingsParams struct {
+	Patch       []byte      `json:"patch"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Shallow-merge the given keys into the project settings bag. Values are
+// caller-validated; workspace_id is the SQL-layer tenant guard (see DeleteProject).
+func (q *Queries) UpdateProjectSettings(ctx context.Context, arg UpdateProjectSettingsParams) (Project, error) {
+	row := q.db.QueryRow(ctx, updateProjectSettings, arg.Patch, arg.ID, arg.WorkspaceID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Icon,
+		&i.Status,
+		&i.LeadType,
+		&i.LeadID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Priority,
+		&i.Settings,
 	)
 	return i, err
 }
