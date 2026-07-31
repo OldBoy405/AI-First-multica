@@ -39,6 +39,7 @@ var crIDRe = regexp.MustCompile(`^CR-\d{4}-\d{3}$`)
 var knownEventKinds = map[string]bool{
 	"status": true, "owners": true, "checkpoint": true,
 	"merge": true, "archive": true, "inbox": true,
+	"audit": true, // TASK-10: activity_log rows, bypasses the cr ledger
 }
 
 // OutboxEvent mirrors the crctl outbox event schema v1. File is injected by the
@@ -130,7 +131,9 @@ func validateEvent(ev OutboxEvent) string {
 	if ev.V != 1 {
 		return "BAD_EVENT"
 	}
-	if !crIDRe.MatchString(ev.CRID) {
+	// audit events may lack a CR binding (e.g. a gitguard denial outside any
+	// CR context); every other kind projects onto a cr row and needs the id.
+	if !crIDRe.MatchString(ev.CRID) && !(ev.EventKind == "audit" && ev.CRID == "") {
 		return "BAD_EVENT"
 	}
 	if !knownEventKinds[ev.EventKind] {
@@ -147,6 +150,9 @@ func validateEvent(ev OutboxEvent) string {
 // acked as accepted so the daemon deletes its outbox file — duplication is the
 // normal case, not an error.
 func (s *SyncService) ingest(ctx context.Context, workspaceID string, ev OutboxEvent) error {
+	if ev.EventKind == "audit" {
+		return s.ingestAudit(ctx, workspaceID, ev)
+	}
 	payload := ev.Payload
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
