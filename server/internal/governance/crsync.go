@@ -24,7 +24,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/events"
-	"github.com/multica-ai/multica/server/internal/middleware"
 )
 
 // MaxEventsPerBatch bounds one report call (PRD FR-2).
@@ -104,9 +103,9 @@ func (s *SyncService) lockCR(crID string) func() {
 // request body's workspace_root_hash is log-only, never a trust input
 // (SDD-SUG-002).
 func (s *SyncService) HandleCREvents(w http.ResponseWriter, r *http.Request) {
-	workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context())
+	workspaceID, denyReason := resolveDaemonWorkspace(r, s.pool)
 	if workspaceID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "daemon token with workspace binding required"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": denyReason})
 		return
 	}
 	var req crEventsRequest

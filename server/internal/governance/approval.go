@@ -314,9 +314,9 @@ func (a *ApprovalService) HandleListCRs(w http.ResponseWriter, r *http.Request) 
 // HandleGrantsPending is GET /api/daemon/approvals/pending (DaemonAuth group):
 // undelivered grants for the daemon's workspace.
 func (a *ApprovalService) HandleGrantsPending(w http.ResponseWriter, r *http.Request) {
-	workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context())
+	workspaceID, denyReason := resolveDaemonWorkspace(r, a.pool)
 	if workspaceID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "daemon token with workspace binding required"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": denyReason})
 		return
 	}
 	rows, err := a.pool.Query(r.Context(), `
@@ -349,9 +349,9 @@ func (a *ApprovalService) HandleGrantsPending(w http.ResponseWriter, r *http.Req
 // HandleGrantsAck is POST /api/daemon/approvals/ack {ids: [...]} — the daemon
 // confirms grants were written to the workspace's .crctl/grants/.
 func (a *ApprovalService) HandleGrantsAck(w http.ResponseWriter, r *http.Request) {
-	workspaceID := middleware.DaemonWorkspaceIDFromContext(r.Context())
+	workspaceID, denyReason := resolveDaemonWorkspace(r, a.pool)
 	if workspaceID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "daemon token with workspace binding required"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": denyReason})
 		return
 	}
 	var req struct {
