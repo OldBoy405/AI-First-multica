@@ -151,11 +151,15 @@ func (s *SyncService) ingest(ctx context.Context, workspaceID string, ev OutboxE
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
 	}
+	evidence := ev.Evidence
+	if evidence == nil {
+		evidence = map[string]string{}
+	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, actor, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, actor, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (cr_id, commit_sha, event_kind) DO NOTHING`,
-		ev.CRID, ev.CommitSHA, ev.EventKind, payload, ev.Actor, ev.OccurredAt)
+		ev.CRID, ev.CommitSHA, ev.EventKind, payload, evidence, ev.Actor, ev.OccurredAt)
 	if err != nil {
 		return err
 	}

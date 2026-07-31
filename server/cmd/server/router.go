@@ -717,6 +717,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
 
+	// AIFIRST: signed-approval service (CR-2026-002 TASK-08). Key not configured →
+	// approval endpoints are not mounted (feature off); configured but invalid →
+	// refuse to start (P1 §B.5 fail-closed). Only key_id is ever logged.
+	approvalSvc, approvalErr := governance.NewApprovalServiceFromEnv(pool)
+	if approvalErr != nil {
+		slog.Error("approval signing key rejected; refusing to start", "error", approvalErr)
+		os.Exit(1)
+	}
+
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(queries, patCache, daemonTokenCache, cloudPATVerifier))
@@ -725,6 +734,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// service projects crctl outbox events onto the cr table; see
 		// internal/governance/crsync.go and CUSTOM.md.
 		r.Post("/cr-events", governance.NewSyncService(pool, bus).HandleCREvents)
+		// AIFIRST: grant delivery queue for daemons (CR-2026-002 TASK-08).
+		if approvalSvc != nil {
+			r.Get("/approvals/pending", approvalSvc.HandleGrantsPending)
+			r.Post("/approvals/ack", approvalSvc.HandleGrantsAck)
+		}
 
 		r.Post("/register", h.DaemonRegister)
 		r.Post("/deregister", h.DaemonDeregister)
@@ -765,6 +779,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(queries, patCache, cloudPATVerifier))
 		r.Use(middleware.RefreshCloudFrontCookies(cfSigner))
+
+		// AIFIRST: CR governance approval endpoints (CR-2026-002 TASK-08).
+		// Human-only (task tokens rejected inside the handlers), workspace
+		// membership enforced here.
+		if approvalSvc != nil {
+			r.Route("/api/workspaces/{workspaceID}/crs", func(r chi.Router) {
+				r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "workspaceID"))
+				r.Get("/", approvalSvc.HandleListCRs)
+				r.Get("/{crID}/approval", approvalSvc.HandleApprovalCard)
+				r.Post("/{crID}/approve", approvalSvc.HandleApprove)
+			})
+		}
 
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)

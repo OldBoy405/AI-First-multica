@@ -1,0 +1,12 @@
+{
+  "$comment": "canonical evidence digest 共享测试向量（CR-2026-002 TASK-03）。消费方：tools crctl 测试（conformance）与 multica governance/approval.go Go 测试（跨语言一致性，TASK-08）。公式：sha256(concat(sorted-paths 的逐文件 sha256(normalizeEol(content)) hex))。",
+  "files": [
+    "review-annotations-code.yml",
+    "test-report.md"
+  ],
+  "perFileSha256": [
+    "9e9b1cad06d8c5a90d86d9ae1c7985eaaae8dc3cd2b30ae30d7889e5ee7eeefa",
+    "ada97cdc4e5e4a13874d40765d7ed6b82d143fccc6da1514502df50562b97e12"
+  ],
+  "digest": "c28c5b93b37145b690b21a62d1ee80233cbc6be10a175c7ab2c77d238b0caf5d"
+}

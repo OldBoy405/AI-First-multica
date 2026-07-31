@@ -79,6 +79,75 @@ func (c *Client) ReportCREvents(ctx context.Context, report crEventsReport) (crE
 	return ack, err
 }
 
+// ── grant delivery (CR-2026-002 TASK-08, P1 §B.1 ④) ─────────────────────────
+
+type pendingGrant struct {
+	ID    string          `json:"id"`
+	CRID  string          `json:"cr_id"`
+	Stage string          `json:"stage"`
+	Grant json.RawMessage `json:"grant"`
+}
+
+type pendingGrantsResponse struct {
+	Grants []pendingGrant `json:"grants"`
+}
+
+// grantFetcher is the narrow client surface for grant delivery; tests fake it.
+type grantFetcher interface {
+	FetchPendingGrants(ctx context.Context) (pendingGrantsResponse, error)
+	AckGrants(ctx context.Context, ids []string) error
+}
+
+func (c *Client) FetchPendingGrants(ctx context.Context) (pendingGrantsResponse, error) {
+	var resp pendingGrantsResponse
+	err := c.getJSON(ctx, "/api/daemon/approvals/pending", &resp)
+	return resp, err
+}
+
+func (c *Client) AckGrants(ctx context.Context, ids []string) error {
+	return c.postJSON(ctx, "/api/daemon/approvals/ack", map[string]any{"ids": ids}, nil)
+}
+
+// deliverGrants writes every pending grant to {root}/.crctl/grants/ for each
+// configured workspace root, then acks. Idempotent: overwriting the same grant
+// file is harmless, and crctl re-verifies the signature on use anyway.
+func deliverGrants(ctx context.Context, roots []string, fetcher grantFetcher, logger *slog.Logger) {
+	resp, err := fetcher.FetchPendingGrants(ctx)
+	if err != nil {
+		logger.Debug("grant fetch deferred", "error", err)
+		return
+	}
+	if len(resp.Grants) == 0 {
+		return
+	}
+	acked := make([]string, 0, len(resp.Grants))
+	for _, g := range resp.Grants {
+		written := false
+		for _, root := range roots {
+			dir := filepath.Join(root, ".crctl", "grants")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				logger.Warn("cannot create grants dir", "dir", dir, "error", err)
+				continue
+			}
+			name := fmt.Sprintf("%s-%s.grant.json", g.CRID, g.Stage)
+			if err := os.WriteFile(filepath.Join(dir, name), append([]byte(g.Grant), '\n'), 0o644); err != nil {
+				logger.Warn("cannot write grant file", "file", name, "error", err)
+				continue
+			}
+			logger.Info("grant delivered", "cr", g.CRID, "stage", g.Stage, "root", root)
+			written = true
+		}
+		if written {
+			acked = append(acked, g.ID)
+		}
+	}
+	if len(acked) > 0 {
+		if err := fetcher.AckGrants(ctx, acked); err != nil {
+			logger.Debug("grant ack deferred (grants stay pending, redelivery is idempotent)", "error", err)
+		}
+	}
+}
+
 // The four stable [cr] commit-message contracts (P1 design §4.3 / SDD §4.3).
 var (
 	crCommitStatusRe  = regexp.MustCompile(`^\[cr\] status (CR-\d{4}-\d{3}) (\S+) -> (\S+)$`)
@@ -107,12 +176,14 @@ func (d *Daemon) crEventsLoop(ctx context.Context) {
 	ticker := time.NewTicker(d.cfg.HeartbeatInterval)
 	defer ticker.Stop()
 	col.collectAll(ctx) // first pass immediately, not one interval late
+	deliverGrants(ctx, d.cfg.CRWorkspaceRoots, d.client, d.logger)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			col.collectAll(ctx)
+			deliverGrants(ctx, d.cfg.CRWorkspaceRoots, d.client, d.logger)
 		}
 	}
 }

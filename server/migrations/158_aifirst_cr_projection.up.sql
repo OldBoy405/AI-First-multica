@@ -36,6 +36,7 @@ CREATE TABLE cr_sync_event (
     commit_sha TEXT NOT NULL DEFAULT '',              -- empty until the --embedded completion event arrives
     event_kind TEXT NOT NULL,                         -- status|owners|checkpoint|merge|archive|inbox
     payload JSONB NOT NULL,
+    evidence JSONB NOT NULL DEFAULT '{}',             -- {path: "sha256:<hex>"} snapshot attached by crctl when entering an approval-pending status; grant issuance reads the latest one
     actor TEXT NOT NULL DEFAULT '',
     occurred_at TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -48,6 +49,7 @@ CREATE INDEX idx_cr_sync_event_unprocessed ON cr_sync_event(cr_id, received_at) 
 -- Approval records: persistence side of server-signed (grant) approvals
 CREATE TABLE approval_record (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
     cr_id TEXT NOT NULL,
     stage TEXT NOT NULL,                              -- one of the four gates.json#approvalStages keys
     decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject')),
@@ -56,6 +58,8 @@ CREATE TABLE approval_record (
     key_id TEXT NOT NULL,
     signature TEXT NOT NULL,                          -- base64(ed25519)
     reject_reason TEXT NOT NULL DEFAULT '',
+    grant_json JSONB NOT NULL DEFAULT '{}',           -- the exact grant file signed at issuance (delivered verbatim to the daemon; avoids reconstruction drift)
+    delivered_at TIMESTAMPTZ,                         -- set when the daemon acks pickup
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
