@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,23 @@ var knownEventKinds = map[string]bool{
 // lack a CR binding; they are handled by dedicated ingestors instead of the
 // projection ledger.
 var ledgerlessKinds = map[string]bool{"audit": true, "snapshot": true}
+
+// pendingShaPrefix marks an embedded-mode placeholder commit sha — crctl's
+// pendingCommitSha() emits "pending:{ms}:{pid}:{seq}" (CR-2026-003 FR-1, the
+// cross-language contract literal locked by tests on both sides). Placeholders
+// exist solely to keep the idempotency key unique; they must never be
+// projected as a commit pointer.
+const pendingShaPrefix = "pending:"
+
+// projectableSha returns the sha usable as cr.projected_commit: placeholders
+// degrade to "" so the existing "empty keeps the current pointer" semantics
+// apply (the next checkpoint event carries the real sha and catches up).
+func projectableSha(sha string) string {
+	if strings.HasPrefix(sha, pendingShaPrefix) {
+		return ""
+	}
+	return sha
+}
 
 // OutboxEvent mirrors the crctl outbox event schema v1. File is injected by the
 // daemon alongside the event so the server can ack exactly which outbox files
@@ -242,7 +260,7 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 			INSERT INTO cr (workspace_id, cr_id, status, projected_commit, needs_reconcile)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (workspace_id, cr_id) DO NOTHING`,
-			workspaceID, ev.CRID, ev.ToStatus, ev.CommitSHA, !legalFresh)
+			workspaceID, ev.CRID, ev.ToStatus, projectableSha(ev.CommitSHA), !legalFresh)
 		if err != nil {
 			return err
 		}
@@ -255,7 +273,7 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 			              projected_commit = CASE WHEN $4 <> '' THEN $4 ELSE projected_commit END,
 			              updated_at = now()
 			WHERE workspace_id = $1 AND cr_id = $2`,
-			workspaceID, ev.CRID, ev.ToStatus, ev.CommitSHA)
+			workspaceID, ev.CRID, ev.ToStatus, projectableSha(ev.CommitSHA))
 		if err != nil {
 			return err
 		}

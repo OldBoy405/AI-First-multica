@@ -336,3 +336,49 @@ func TestSnapshotReportFailureRetriesNextTick(t *testing.T) {
 		t.Fatal("successful report must advance lastSnapshot")
 	}
 }
+
+// CR-2026-003 FR-2: the daemon snapshot ships _history.yml so archived CRs can
+// heal server-side; absence of the file degrades to an empty field.
+func TestSnapshotCarriesHistory(t *testing.T) {
+	root := t.TempDir()
+	gitInitWithCRCommit(t, root, "wip: seed")
+	if err := os.MkdirAll(filepath.Join(root, "change-requests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	backlog := "change-requests: []\n"
+	history := "history:\n  - id: CR-2026-001\n    final-status: archived\n"
+	if err := os.WriteFile(filepath.Join(root, "change-requests", "_backlog.yml"), []byte(backlog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "change-requests", "_history.yml"), []byte(history), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap, ok := buildSnapshotEvent(root)
+	if !ok {
+		t.Fatal("snapshot expected")
+	}
+	var p struct {
+		Backlog string `json:"backlog"`
+		History string `json:"history"`
+	}
+	if err := json.Unmarshal(snap.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Backlog != backlog || p.History != history {
+		t.Fatalf("payload mismatch: %+v", p)
+	}
+	// No history file: field degrades to empty, snapshot still emitted.
+	if err := os.Remove(filepath.Join(root, "change-requests", "_history.yml")); err != nil {
+		t.Fatal(err)
+	}
+	snap, ok = buildSnapshotEvent(root)
+	if !ok {
+		t.Fatal("snapshot expected without history file")
+	}
+	if err := json.Unmarshal(snap.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.History != "" {
+		t.Fatalf("missing history file must yield empty field, got %q", p.History)
+	}
+}

@@ -31,6 +31,10 @@ import (
 type snapshotPayload struct {
 	HeadSHA string `json:"head_sha"`
 	Backlog string `json:"backlog"`
+	// History is the raw _history.yml text (CR-2026-003 FR-2): archived CRs
+	// leave the backlog, so without it they could never self-heal. Optional —
+	// an older daemon that doesn't send it degrades to pre-fix behavior.
+	History string `json:"history,omitempty"`
 }
 
 // maxSnapshotBytes bounds one snapshot payload (a backlog is a list of ids and
@@ -49,7 +53,11 @@ func (s *SyncService) ingestSnapshot(ctx context.Context, workspaceID string, ev
 	if err != nil {
 		return err
 	}
-	_, err = s.ApplySnapshot(ctx, workspaceID, AuthoritySnapshot{HeadSHA: p.HeadSHA, Statuses: statuses})
+	history, err := ParseHistory([]byte(p.History))
+	if err != nil {
+		return err
+	}
+	_, err = s.ApplySnapshot(ctx, workspaceID, AuthoritySnapshot{HeadSHA: p.HeadSHA, Statuses: mergeAuthority(statuses, history)})
 	return err
 }
 
@@ -80,6 +88,45 @@ func ParseBacklog(raw []byte) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// ParseHistory extracts {cr_id: final-status} from a raw _history.yml
+// (CR-2026-003 FR-2). Same discipline as ParseBacklog: line endings normalized
+// first, and a file that fails to parse is an error, never an empty map. An
+// empty/absent file is valid (a workspace that never archived anything).
+func ParseHistory(raw []byte) (map[string]string, error) {
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	var doc struct {
+		History []struct {
+			ID          string `yaml:"id"`
+			FinalStatus string `yaml:"final-status"`
+		} `yaml:"history"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil, fmt.Errorf("_history.yml parse: %w", err)
+	}
+	out := make(map[string]string, len(doc.History))
+	for _, e := range doc.History {
+		if e.ID != "" && e.FinalStatus != "" {
+			out[e.ID] = e.FinalStatus
+		}
+	}
+	return out, nil
+}
+
+// mergeAuthority combines the in-flight backlog with archived history into one
+// authority snapshot. The two sources cannot overlap (cr-archive moves entries
+// atomically), but backlog wins defensively: an in-flight status must never be
+// masked by a stale history record.
+func mergeAuthority(backlog, history map[string]string) map[string]string {
+	merged := make(map[string]string, len(backlog)+len(history))
+	for id, st := range history {
+		merged[id] = st
+	}
+	for id, st := range backlog {
+		merged[id] = st
+	}
+	return merged
 }
 
 // ApplySnapshot replays the authority over one workspace's projection rows.
