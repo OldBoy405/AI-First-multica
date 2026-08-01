@@ -75,7 +75,9 @@
     "no_issues_yet": "イシューはまだありません",
     "toast_link_copied": "リンクをコピーしました",
     "toast_project_deleted": "プロジェクトを削除しました",
-    "toast_move_issue_failed": "イシューを移動できませんでした"
+    "toast_move_issue_failed": "イシューを移動できませんでした",
+    "queue_depth": "エージェントキュー {{depth}}/{{limit}}",
+    "queue_full_hint": "キューが満杯です — エージェントがビジー状態のため、後でもう一度お試しください"
   },
   "resources": {
     "section_header": "リソース",

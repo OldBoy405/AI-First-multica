@@ -76,7 +76,9 @@
     "no_issues_yet": "No issues yet",
     "toast_link_copied": "Link copied",
     "toast_project_deleted": "Project deleted",
-    "toast_move_issue_failed": "Failed to move issue"
+    "toast_move_issue_failed": "Failed to move issue",
+    "queue_depth": "{{depth}}/{{limit}} in agent queue",
+    "queue_full_hint": "Queue full — agent is busy, try again later"
   },
   "resources": {
     "section_header": "Resources",

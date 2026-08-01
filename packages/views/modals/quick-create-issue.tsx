@@ -347,6 +347,21 @@ export function AgentCreatePanel({
           setSubmitting(false);
           return;
         }
+        if (body.code === "project_queue_full") {
+          // Shared Team Agent queue is at capacity (CR-2026-004): keep the
+          // modal open with the structured reason so the user can retry
+          // later or withdraw a queued request. The 429 body carries the
+          // live depth/limit pair.
+          const b = body as { queue_depth?: number; queue_limit?: number };
+          setError(
+            t(($) => $.create_issue.agent.error_queue_full, {
+              depth: b.queue_depth ?? 0,
+              limit: b.queue_limit ?? 0,
+            }),
+          );
+          setSubmitting(false);
+          return;
+        }
         if (body.code === "daemon_version_unsupported") {
           // Race fallback: the picker pre-check should normally catch this,
           // but a runtime can silently re-register with an older CLI between

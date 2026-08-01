@@ -80,6 +80,17 @@ func (s *TaskService) guardProjectQueueCapacity(ctx context.Context, projectID, 
 	return 0, nil
 }
 
+// ProjectQueueStatus reports the live shared-queue depth and effective limit
+// for a project — the read side of the capacity gate, consumed by the
+// frontend queue indicator (CR-2026-004 FR-5).
+func (s *TaskService) ProjectQueueStatus(ctx context.Context, projectID pgtype.UUID) (depth, limit int64, err error) {
+	depth, err = s.Queries.CountProjectPendingTasks(ctx, projectID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return depth, s.projectQueueLimit(ctx, projectID), nil
+}
+
 // projectQueueLimit reads the per-project override, falling back to the
 // default on any missing/invalid value — config must never block enqueue.
 func (s *TaskService) projectQueueLimit(ctx context.Context, projectID pgtype.UUID) int64 {

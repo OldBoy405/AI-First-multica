@@ -203,7 +203,8 @@
       "error_agent_unavailable_fallback": "智能体不可用，请换一个。",
       "error_daemon_version": "该智能体的守护进程 CLI（{{current}}）低于要求的 {{min}}。请升级守护进程后再使用通过智能体创建。",
       "error_unknown": "提交失败，请重试。",
-      "sub_issue_of": "作为 {{identifier}} 的子 issue"
+      "sub_issue_of": "作为 {{identifier}} 的子 issue",
+      "error_queue_full": "项目 Agent 队列已满（{{depth}}/{{limit}}），请稍后再试或撤回一条排队请求。"
     }
   }
 }

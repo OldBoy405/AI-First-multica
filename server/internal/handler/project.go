@@ -539,6 +539,38 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// GetProjectQueueStatus reports the project's shared Team Agent queue depth
+// and effective capacity limit (CR-2026-004 FR-5). Any workspace member may
+// read it — it powers the queue indicator every member sees.
+func (h *Handler) GetProjectQueueStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	workspaceID := h.resolveWorkspaceID(r)
+	idUUID, ok := parseUUIDOrBadRequest(w, id, "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: idUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	depth, limit, err := h.TaskService.ProjectQueueStatus(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read queue status")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{
+		"queue_depth": depth,
+		"queue_limit": limit,
+	})
+}
+
 func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	workspaceID := h.resolveWorkspaceID(r)
