@@ -1,4 +1,5 @@
-export { projectKeys, projectListOptions, projectDetailOptions } from "./queries";
+export { projectKeys, projectListOptions, projectDetailOptions, projectChatOptions } from "./queries";
+export { useProjectChatStore, projectChatDraftKey, type ProjectChatMode } from "./project-chat-store";
 export { useCreateProject, useUpdateProject, useDeleteProject } from "./mutations";
 export { useProjectDraftStore } from "./draft-store";
 export {

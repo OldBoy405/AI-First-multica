@@ -144,5 +144,36 @@
     "direction_desc": "降序",
     "section_columns": "列",
     "view": "视图"
+  },
+  "chat": {
+    "surface_issues": "Issue",
+    "surface_chat": "聊天",
+    "tabs": {
+      "team_agent": "团队智能体",
+      "private_ask": "私密提问",
+      "discussion": "讨论"
+    },
+    "tooltips": {
+      "team_agent": "与项目共享的团队智能体聊天",
+      "private_ask": "以只有你可见的私密会话向智能体提问",
+      "discussion": "与团队成员讨论"
+    },
+    "greetings": {
+      "team_agent": "就这个项目与团队智能体聊天。",
+      "private_ask": "就这个项目私密地提问。",
+      "discussion": "与团队展开讨论。"
+    },
+    "tutorials": {
+      "team_agent": "团队智能体面向整个项目工作，团队所有成员都可见。",
+      "private_ask": "私密提问是只有你能看到的一对一会话。",
+      "discussion": "讨论是整个团队共享的话题串。"
+    },
+    "tutorial_dismiss": "关闭",
+    "coming_soon": "由后续版本提供。",
+    "loading": "加载中…",
+    "unconfigured_admin_title": "尚未配置团队智能体。",
+    "unconfigured_admin_cta": "配置团队智能体",
+    "unconfigured_member": "请联系项目 Owner 配置团队智能体。",
+    "stream_placeholder": "消息将显示在这里。"
   }
 }

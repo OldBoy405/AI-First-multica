@@ -26,7 +26,10 @@ import { TitleEditor, ContentEditor, type ContentEditorRef } from "../../editor"
 import { PriorityIcon } from "../../issues/components/priority-icon";
 import { ProjectQueueStatus } from "./project-queue-status";
 import { ProjectResourcesSection } from "./project-resources-section";
+import { ProjectChatPanel } from "./project-chat-panel";
+import { projectSurfaceTab, projectSurfaceHref } from "./surface-tab";
 import { IssueSurface } from "../../issues/surface/issue-surface";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Button } from "@multica/ui/components/ui/button";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@multica/ui/components/ui/resizable";
@@ -103,6 +106,15 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
   const wsId = useWorkspaceId();
   const wsPaths = useWorkspacePaths();
   const router = useNavigation();
+  // Issues | Chat surface is URL-driven via ?tab= so it stays deep-linkable;
+  // unknown/absent values fall back to issues.
+  const surfaceTab = projectSurfaceTab(router.searchParams);
+  const handleSurfaceTabChange = useCallback(
+    (next: string) => {
+      router.replace(projectSurfaceHref(router.pathname, router.searchParams, next));
+    },
+    [router],
+  );
   const userId = useAuthStore((s) => s.user?.id);
   const { data: project, isLoading } = useQuery(projectDetailOptions(wsId, projectId));
   const recordRecentContext = useRecentContextStore((s) => s.recordVisit);
@@ -538,10 +550,29 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
             }
           />
 
-          <IssueSurface
-            scope={issueScope}
-            modes={["board", "list", "swimlane", "gantt"]}
-          />
+          <Tabs
+            value={surfaceTab}
+            onValueChange={handleSurfaceTabChange}
+            className="flex-1 min-h-0"
+          >
+            <TabsList variant="line" className="mx-4 mt-1 shrink-0">
+              <TabsTrigger value="issues" className="flex-none">
+                {t(($) => $.chat.surface_issues)}
+              </TabsTrigger>
+              <TabsTrigger value="chat" className="flex-none">
+                {t(($) => $.chat.surface_chat)}
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="issues" className="flex min-h-0 flex-col">
+              <IssueSurface
+                scope={issueScope}
+                modes={["board", "list", "swimlane", "gantt"]}
+              />
+            </TabsContent>
+            <TabsContent value="chat" className="flex min-h-0 flex-col">
+              <ProjectChatPanel projectId={projectId} canConfigure={isWorkspaceAdmin} />
+            </TabsContent>
+          </Tabs>
           </div>
         </ResizablePanel>
         {!isMobile && <ResizableHandle />}

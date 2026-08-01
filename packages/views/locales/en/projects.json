@@ -146,5 +146,36 @@
     "direction_desc": "Descending",
     "section_columns": "Columns",
     "view": "View"
+  },
+  "chat": {
+    "surface_issues": "Issues",
+    "surface_chat": "Chat",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "Chat with the project's shared Team Agent",
+      "private_ask": "Ask an agent privately, just for you",
+      "discussion": "Discuss with your teammates"
+    },
+    "greetings": {
+      "team_agent": "Chat with your Team Agent about this project.",
+      "private_ask": "Ask a private question about this project.",
+      "discussion": "Start a discussion with your team."
+    },
+    "tutorials": {
+      "team_agent": "The Team Agent works across this project and is visible to everyone on the team.",
+      "private_ask": "Private Ask is a one-on-one chat only you can see.",
+      "discussion": "Discussion is a shared thread for the whole team."
+    },
+    "tutorial_dismiss": "Dismiss",
+    "coming_soon": "Coming in a later version.",
+    "loading": "Loading…",
+    "unconfigured_admin_title": "No Team Agent configured yet.",
+    "unconfigured_admin_cta": "Configure Team Agent",
+    "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
+    "stream_placeholder": "Messages will appear here."
   }
 }
