@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueposition"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // projectChatIssueTitle is the fixed title of every project's hidden Team Agent
@@ -81,11 +84,17 @@ func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, 
 	}
 
 	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
-		WorkspaceID:  workspaceID,
-		Title:        projectChatIssueTitle,
-		Description:  pgtype.Text{},
-		Status:       "todo",
-		Priority:     "none",
+		WorkspaceID: workspaceID,
+		Title:       projectChatIssueTitle,
+		Description: pgtype.Text{},
+		Status:      "todo",
+		// CR-2026-006 (TSUG-002): 'medium' maps to priority tier 2 via
+		// priorityToInt. Every group-chat task enqueues off this container
+		// issue and inherits its priority, so pinning the container at medium
+		// keeps project chat on par with 1:1 chat (also fixed at 2) — otherwise
+		// 'none'(=0) would let 1:1 chat perpetually jump ahead of group chat on
+		// the same agent. Owner/admin preemption (tier 100) still outranks it.
+		Priority:     "medium",
 		AssigneeType: pgtype.Text{},
 		AssigneeID:   pgtype.UUID{},
 		// The container has no meaningful author; attribute it to the member
@@ -110,4 +119,80 @@ func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, 
 		return db.Issue{}, fmt.Errorf("commit project chat issue: %w", err)
 	}
 	return issue, nil
+}
+
+// SendProjectChatMessage posts a member's message into the project's Team Agent
+// group chat (a comment on the hidden container issue) and enqueues a run for
+// the bound agent (CR-2026-006).
+//
+// The capacity guard is front-loaded so a full queue is rejected before any
+// comment is persisted — no orphan message for the capacity failure case,
+// which dominates. If the enqueue still fails (a concurrent enqueue slipping
+// past the front-load check into the guard *inside* EnqueueTaskForMention, or a
+// DB error), the comment is compensated by physical delete (comment has no
+// soft-delete) so a failed send leaves nothing behind.
+//
+// Error contract for the handler:
+//   - *ErrProjectQueueFull  -> 429 (queue full, try later). Covers both the
+//     front-load rejection and the inner-guard race (TSUG-001).
+//   - any other error       -> 502 (send failed, retryable).
+func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
+	if _, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, callerID); gerr != nil {
+		return db.Comment{}, db.AgentTaskQueue{}, gerr
+	}
+
+	comment, err := s.Queries.CreateComment(ctx, db.CreateCommentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  "member",
+		AuthorID:    callerID,
+		Content:     content,
+		Type:        "comment",
+	})
+	if err != nil {
+		return db.Comment{}, db.AgentTaskQueue{}, fmt.Errorf("create chat comment: %w", err)
+	}
+
+	// EnqueueTaskForMention re-runs the guard internally; a concurrent send can
+	// pass our front-load check and then trip that inner guard, returning
+	// *ErrProjectQueueFull here (TSUG-001). We return it verbatim so the handler
+	// maps it to 429 rather than the generic 502.
+	task, err := s.EnqueueTaskForMention(ctx, issue, agentID, comment.ID)
+	if err != nil {
+		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
+			ID: comment.ID, WorkspaceID: issue.WorkspaceID,
+		}); derr != nil {
+			// Double fault: the compensating delete also failed, leaving a
+			// visible-but-unanswered message. Log ids only, never the body
+			// (audit redaction). Still surface the original enqueue error.
+			slog.Error("project chat compensating delete failed",
+				"comment_id", util.UUIDToString(comment.ID),
+				"issue_id", util.UUIDToString(issue.ID),
+				"enqueue_error", err, "delete_error", derr)
+		}
+		return db.Comment{}, db.AgentTaskQueue{}, err
+	}
+
+	// Broadcast only after a successful enqueue (SDD §4.3 step 6): a send that
+	// fails and rolls back must never first flash a ghost message to peers.
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		ActorType:   "member",
+		ActorID:     util.UUIDToString(callerID),
+		Payload: map[string]any{
+			"comment": map[string]any{
+				"id":          util.UUIDToString(comment.ID),
+				"issue_id":    util.UUIDToString(comment.IssueID),
+				"author_type": comment.AuthorType,
+				"author_id":   util.UUIDToString(comment.AuthorID),
+				"content":     comment.Content,
+				"type":        comment.Type,
+				"created_at":  comment.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+			},
+			"issue_title":  issue.Title,
+			"issue_status": issue.Status,
+		},
+	})
+	return comment, task, nil
 }
