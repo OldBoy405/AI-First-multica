@@ -14,8 +14,10 @@ import (
 const countIssuesByProject = `-- name: CountIssuesByProject :one
 SELECT count(*) FROM issue
 WHERE project_id = $1
+  AND origin_type IS DISTINCT FROM 'project_chat'
 `
 
+// CR-2026-006: exclude the hidden Team Agent chat container issue from counts.
 func (q *Queries) CountIssuesByProject(ctx context.Context, projectID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countIssuesByProject, projectID)
 	var count int64
@@ -148,6 +150,7 @@ SELECT project_id,
        count(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done_count
 FROM issue
 WHERE project_id = ANY($1::uuid[])
+  AND origin_type IS DISTINCT FROM 'project_chat'
 GROUP BY project_id
 `
 
@@ -157,6 +160,7 @@ type GetProjectIssueStatsRow struct {
 	DoneCount  int64       `json:"done_count"`
 }
 
+// CR-2026-006: exclude the hidden Team Agent chat container issue from stats.
 func (q *Queries) GetProjectIssueStats(ctx context.Context, projectIds []pgtype.UUID) ([]GetProjectIssueStatsRow, error) {
 	rows, err := q.db.Query(ctx, getProjectIssueStats, projectIds)
 	if err != nil {

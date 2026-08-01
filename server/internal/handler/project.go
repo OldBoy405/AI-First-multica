@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -512,6 +513,28 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			patch[service.ProjectSettingTeamAgentQueueLimit] = int64(f)
+		}
+		// CR-2026-006: the agent bound as the project's Team Agent. Must be an
+		// agent that exists in this workspace; validated so a forged id can't be
+		// persisted and surface later as a broken chat.
+		if v, present := req.Settings[service.ProjectSettingTeamAgentID]; present {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "settings.team_agent_id must be an agent id string")
+				return
+			}
+			agentUUID, perr := util.ParseUUID(s)
+			if perr != nil {
+				writeError(w, http.StatusBadRequest, "settings.team_agent_id is not a valid agent id")
+				return
+			}
+			if _, aerr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+				ID: agentUUID, WorkspaceID: prevProject.WorkspaceID,
+			}); aerr != nil {
+				writeError(w, http.StatusBadRequest, "settings.team_agent_id: agent not found in workspace")
+				return
+			}
+			patch[service.ProjectSettingTeamAgentID] = s
 		}
 		if len(patch) > 0 {
 			patchJSON, merr := json.Marshal(patch)
