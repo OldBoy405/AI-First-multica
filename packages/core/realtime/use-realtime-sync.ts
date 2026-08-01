@@ -534,6 +534,11 @@ export function useRealtimeSync(
         const wsId = getCurrentWsId();
         if (!wsId) return;
         qc.invalidateQueries({ queryKey: agentTaskSnapshotKeys.list(wsId) });
+        // Shared Team Agent queue indicator (CR-2026-004): every task
+        // lifecycle event can move a project's queued+dispatched depth
+        // (queued +1, running/cancelled/completed/failed -1), so the
+        // queue-status queries ride the same prefix invalidation.
+        qc.invalidateQueries({ queryKey: projectKeys.queueStatusAll(wsId) });
         // 30d activity series shares the same lifecycle signal — any task
         // completion / failure shifts the histogram. (Dispatch alone
         // doesn't change a completed_at-anchored series, but invalidating

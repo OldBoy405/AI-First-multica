@@ -203,7 +203,8 @@
       "error_agent_unavailable_fallback": "エージェントを利用できません。別のエージェントを選択してください。",
       "error_daemon_version": "このエージェントのデーモン CLI（{{current}}）が必要なバージョン {{min}} を下回っています。エージェントで作成を使用するには、デーモンをアップグレードしてください。",
       "error_unknown": "送信できませんでした。再試行してください。",
-      "sub_issue_of": "{{identifier}} のサブイシュー"
+      "sub_issue_of": "{{identifier}} のサブイシュー",
+      "error_queue_full": "プロジェクトのエージェントキューが満杯です（{{depth}}/{{limit}}）。後でもう一度お試しいただくか、キュー内のリクエストを取り消してください。"
     }
   }
 }

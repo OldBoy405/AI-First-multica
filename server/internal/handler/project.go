@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/logger"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -37,6 +39,9 @@ type ProjectResponse struct {
 	// payload to keep parent metadata and child collections separate; clients
 	// that need the list call ListProjectResources directly.
 	ResourceCount int64 `json:"resource_count"`
+	// Settings is the project settings bag (e.g. team_agent_queue_limit,
+	// CR-2026-004). Raw passthrough — the frontend reads known keys.
+	Settings json.RawMessage `json:"settings"`
 }
 
 func projectToResponse(p db.Project) ProjectResponse {
@@ -52,6 +57,7 @@ func projectToResponse(p db.Project) ProjectResponse {
 		LeadID:      uuidToPtr(p.LeadID),
 		CreatedAt:   timestampToString(p.CreatedAt),
 		UpdatedAt:   timestampToString(p.UpdatedAt),
+		Settings:    json.RawMessage(p.Settings),
 	}
 }
 
@@ -100,6 +106,9 @@ type UpdateProjectRequest struct {
 	Priority    *string `json:"priority"`
 	LeadType    *string `json:"lead_type"`
 	LeadID      *string `json:"lead_id"`
+	// Settings carries a shallow patch into the project settings bag.
+	// Owner/admin only; keys are whitelisted (CR-2026-004).
+	Settings map[string]any `json:"settings"`
 }
 
 func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -489,6 +498,35 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			params.LeadID = pgtype.UUID{Valid: false}
 		}
 	}
+	if _, ok := rawFields["settings"]; ok {
+		// Settings changes are a governance action (queue capacity), gated to
+		// owner/admin unlike the rest of the project fields (CR-2026-004 FR-3).
+		if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "project not found", "owner", "admin"); !ok {
+			return
+		}
+		patch := map[string]any{}
+		if v, present := req.Settings[service.ProjectSettingTeamAgentQueueLimit]; present {
+			f, isNum := v.(float64)
+			if !isNum || f < 1 || f != math.Trunc(f) {
+				writeError(w, http.StatusBadRequest, "settings.team_agent_queue_limit must be a positive integer")
+				return
+			}
+			patch[service.ProjectSettingTeamAgentQueueLimit] = int64(f)
+		}
+		if len(patch) > 0 {
+			patchJSON, merr := json.Marshal(patch)
+			if merr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to encode settings patch")
+				return
+			}
+			if _, uerr := h.Queries.UpdateProjectSettings(r.Context(), db.UpdateProjectSettingsParams{
+				ID: prevProject.ID, WorkspaceID: prevProject.WorkspaceID, Patch: patchJSON,
+			}); uerr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update project settings")
+				return
+			}
+		}
+	}
 	project, err := h.Queries.UpdateProject(r.Context(), params)
 	if err != nil {
 		h.writeProjectWriteError(w, r, err, "update")
@@ -499,6 +537,38 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	resp.ResourceCount = h.loadProjectResourceCount(r.Context(), project.ID)
 	h.publish(protocol.EventProjectUpdated, workspaceID, "member", userID, map[string]any{"project": resp})
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// GetProjectQueueStatus reports the project's shared Team Agent queue depth
+// and effective capacity limit (CR-2026-004 FR-5). Any workspace member may
+// read it — it powers the queue indicator every member sees.
+func (h *Handler) GetProjectQueueStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	workspaceID := h.resolveWorkspaceID(r)
+	idUUID, ok := parseUUIDOrBadRequest(w, id, "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: idUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	depth, limit, err := h.TaskService.ProjectQueueStatus(r.Context(), project.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read queue status")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{
+		"queue_depth": depth,
+		"queue_limit": limit,
+	})
 }
 
 func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {

@@ -75,7 +75,9 @@
     "no_issues_yet": "目前还没有 issue",
     "toast_link_copied": "已复制链接",
     "toast_project_deleted": "已删除项目",
-    "toast_move_issue_failed": "移动 issue 失败"
+    "toast_move_issue_failed": "移动 issue 失败",
+    "queue_depth": "Agent 队列 {{depth}}/{{limit}}",
+    "queue_full_hint": "队列已满 —— Agent 忙，请稍后"
   },
   "resources": {
     "section_header": "资源",

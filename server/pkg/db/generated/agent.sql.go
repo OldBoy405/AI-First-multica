@@ -1047,6 +1047,25 @@ func (q *Queries) CompleteAgentTask(ctx context.Context, arg CompleteAgentTaskPa
 	return i, err
 }
 
+const countProjectPendingTasks = `-- name: CountProjectPendingTasks :one
+SELECT count(*) FROM agent_task_queue atq
+JOIN issue i ON i.id = atq.issue_id
+WHERE i.project_id = $1
+  AND atq.status IN ('queued', 'dispatched')
+`
+
+// Shared Team Agent queue depth for a project: queued + dispatched tasks on
+// issues belonging to the project (same "pending" reading as
+// HasPendingTaskForIssue). running / waiting_local_directory / deferred and
+// terminal states are excluded — under the single-writer claim rule the
+// running task is no longer part of the waiting line. CR-2026-004 FR-1.
+func (q *Queries) CountProjectPendingTasks(ctx context.Context, projectID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectPendingTasks, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countRunningTasks = `-- name: CountRunningTasks :one
 SELECT count(*) FROM agent_task_queue
 WHERE agent_id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory')

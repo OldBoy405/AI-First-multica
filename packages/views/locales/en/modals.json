@@ -205,7 +205,8 @@
       "error_agent_unavailable_fallback": "Agent is unavailable. Pick another agent.",
       "error_daemon_version": "This agent's daemon CLI ({{current}}) is below the required {{min}}. Upgrade the daemon to use Create with agent.",
       "error_unknown": "Failed to submit. Try again.",
-      "sub_issue_of": "Sub-issue of {{identifier}}"
+      "sub_issue_of": "Sub-issue of {{identifier}}",
+      "error_queue_full": "The project's agent queue is full ({{depth}}/{{limit}}). Please try again later or withdraw a queued request."
     }
   }
 }

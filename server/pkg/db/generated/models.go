@@ -129,6 +129,22 @@ type AgentTaskQueue struct {
 	DeliveredCommentIds  []pgtype.UUID `json:"delivered_comment_ids"`
 }
 
+type ApprovalRecord struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	CrID           string             `json:"cr_id"`
+	Stage          string             `json:"stage"`
+	Decision       string             `json:"decision"`
+	ApproverUserID pgtype.UUID        `json:"approver_user_id"`
+	EvidenceDigest string             `json:"evidence_digest"`
+	KeyID          string             `json:"key_id"`
+	Signature      string             `json:"signature"`
+	RejectReason   string             `json:"reject_reason"`
+	GrantJson      []byte             `json:"grant_json"`
+	DeliveredAt    pgtype.Timestamptz `json:"delivered_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type Attachment struct {
 	ID            pgtype.UUID        `json:"id"`
 	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
@@ -376,6 +392,34 @@ type ContactSalesInquiry struct {
 	SubmitterIp     *netip.Addr        `json:"submitter_ip"`
 	UserAgent       string             `json:"user_agent"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type Cr struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	CrID            string             `json:"cr_id"`
+	Title           string             `json:"title"`
+	Status          string             `json:"status"`
+	Owners          []byte             `json:"owners"`
+	TargetVersion   string             `json:"target_version"`
+	ProjectedCommit string             `json:"projected_commit"`
+	NeedsReconcile  bool               `json:"needs_reconcile"`
+	ShellIssueID    pgtype.UUID        `json:"shell_issue_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CrSyncEvent struct {
+	ID          int64              `json:"id"`
+	CrID        string             `json:"cr_id"`
+	CommitSha   string             `json:"commit_sha"`
+	EventKind   string             `json:"event_kind"`
+	Payload     []byte             `json:"payload"`
+	Evidence    []byte             `json:"evidence"`
+	Actor       string             `json:"actor"`
+	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
+	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
+	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
 }
 
 type DaemonConnection struct {
@@ -704,6 +748,7 @@ type Project struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	Priority    string             `json:"priority"`
+	Settings    []byte             `json:"settings"`
 }
 
 type ProjectResource struct {

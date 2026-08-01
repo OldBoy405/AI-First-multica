@@ -1956,6 +1956,12 @@ export class ApiClient {
     return this.fetch(`/api/projects/${id}`);
   }
 
+  // Shared Team Agent queue depth + effective capacity for a project
+  // (CR-2026-004). Powers the queue indicator and the full-queue disabled state.
+  async getProjectQueueStatus(id: string): Promise<{ queue_depth: number; queue_limit: number }> {
+    return this.fetch(`/api/projects/${id}/queue-status`);
+  }
+
   async createProject(data: CreateProjectRequest): Promise<Project> {
     return this.fetch("/api/projects", {
       method: "POST",

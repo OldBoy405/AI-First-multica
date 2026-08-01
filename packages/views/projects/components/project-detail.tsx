@@ -24,6 +24,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { useNavigation } from "../../navigation";
 import { TitleEditor, ContentEditor, type ContentEditorRef } from "../../editor";
 import { PriorityIcon } from "../../issues/components/priority-icon";
+import { ProjectQueueStatus } from "./project-queue-status";
 import { ProjectResourcesSection } from "./project-resources-section";
 import { IssueSurface } from "../../issues/surface/issue-surface";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
@@ -400,6 +401,9 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
           </PropRow>
         </div>}
       </div>
+
+      {/* Shared Team Agent queue (CR-2026-004) */}
+      <ProjectQueueStatus wsId={wsId} projectId={projectId} />
 
       {/* Progress */}
       {issueMetrics.totalCount > 0 && (() => {
