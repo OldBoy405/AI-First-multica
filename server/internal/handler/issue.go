@@ -2008,9 +2008,7 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 // depth/limit pair so the frontend can flip into its queue-full disabled
 // state without a follow-up query (CR-2026-004 FR-1/FR-5).
 func writeProjectQueueFull(w http.ResponseWriter, full *service.ErrProjectQueueFull) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusTooManyRequests)
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
 		"code":        "project_queue_full",
 		"queue_depth": full.Depth,
 		"queue_limit": full.Limit,

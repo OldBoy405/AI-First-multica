@@ -275,6 +275,7 @@ vi.mock("sonner", () => ({
 }));
 
 import { I18nProvider } from "@multica/core/i18n/react";
+import { ApiError } from "@multica/core/api";
 import enCommon from "../locales/en/common.json";
 import enModals from "../locales/en/modals.json";
 import { AgentCreatePanel } from "./quick-create-issue";
@@ -364,6 +365,30 @@ describe("AgentCreatePanel", () => {
     expect(mockClearPrompt).toHaveBeenCalled();
     expect(mockSetLastMode).toHaveBeenCalledWith("agent");
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("shows the structured queue-full error in-modal on 429 project_queue_full (CR-2026-004)", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const err = new ApiError("project queue full");
+    (err as { body?: unknown }).body = {
+      code: "project_queue_full",
+      queue_depth: 2,
+      queue_limit: 2,
+    };
+    mockQuickCreateIssue.mockRejectedValue(err);
+
+    renderPanel({ onClose, isExpanded: false, setIsExpanded: vi.fn() });
+    await user.click(screen.getByRole("button", { name: /^Create \(/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/agent queue is full \(2\/2\)/i),
+      ).toBeInTheDocument();
+    });
+    // The modal stays open so the user can retry or withdraw a queued request.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mockClearPrompt).not.toHaveBeenCalled();
   });
 
   it("passes referenced upload attachment ids to quick-create", async () => {
