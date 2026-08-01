@@ -21,6 +21,15 @@ vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
 }));
 
+// The panel only gates on config state; the Team Agent stream + composer are
+// covered by project-team-agent-chat.test.tsx. Stub the child so this test
+// stays focused on the delegation and doesn't pull in the timeline/WS stack.
+vi.mock("./project-team-agent-chat", () => ({
+  ProjectTeamAgentChat: (props: { issueId: string }) => (
+    <div data-testid="project-team-agent-chat" data-issue={props.issueId} />
+  ),
+}));
+
 import { ProjectChatPanel } from "./project-chat-panel";
 
 function renderPanel(canConfigure: boolean) {
@@ -73,11 +82,12 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
     expect(screen.queryByTestId("project-chat-unconfigured-admin")).toBeNull();
   });
 
-  it("configured Team Agent renders the stream placeholder (TASK-04)", async () => {
+  it("configured Team Agent renders the message stream for the backing issue (TASK-04)", async () => {
     mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
     renderPanel(true);
     await waitFor(() =>
-      expect(screen.getByTestId("project-chat-stream-placeholder")).toBeTruthy(),
+      expect(screen.getByTestId("project-team-agent-chat")).toBeTruthy(),
     );
+    expect(screen.getByTestId("project-team-agent-chat").getAttribute("data-issue")).toBe("i1");
   });
 });

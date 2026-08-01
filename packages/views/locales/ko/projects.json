@@ -174,6 +174,17 @@
     "unconfigured_admin_title": "아직 Team Agent가 설정되지 않았습니다.",
     "unconfigured_admin_cta": "Team Agent 설정",
     "unconfigured_member": "프로젝트 소유자에게 Team Agent 설정을 요청하세요.",
-    "stream_placeholder": "메시지가 여기에 표시됩니다."
+    "stream": {
+      "no_earlier": "이전 메시지가 없습니다",
+      "composer_placeholder": "Team Agent에 메시지…",
+      "send": "보내기",
+      "send_failed": "전송에 실패했습니다. 다시 시도해 주세요",
+      "queue_full_title": "에이전트가 사용 중입니다. 잠시 후 다시 시도하세요",
+      "queue_full_depth": "대기열 {{depth}}/{{limit}}",
+      "status_running": "실행 중",
+      "status_done": "완료",
+      "status_error": "실패",
+      "status_interrupted": "중단됨"
+    }
   }
 }

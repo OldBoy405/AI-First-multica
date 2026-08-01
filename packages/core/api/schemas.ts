@@ -353,6 +353,25 @@ export const EMPTY_PROJECT_CHAT: ProjectChat = {
   team_agent_id: "",
 };
 
+// Result of posting a Team Agent chat message (CR-2026-006 TASK-02):
+// the created backing comment plus the enqueued agent task.
+export interface ProjectChatSendResult {
+  comment_id: string;
+  task_id: string;
+}
+
+export const ProjectChatSendResultSchema = z
+  .object({
+    comment_id: z.string().default(""),
+    task_id: z.string().default(""),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
+  comment_id: "",
+  task_id: "",
+};
+
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),
   matched_snippet: z.string().optional(),

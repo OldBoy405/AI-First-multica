@@ -21,6 +21,7 @@ import {
   TooltipContent,
 } from "@multica/ui/components/ui/tooltip";
 import { Button } from "@multica/ui/components/ui/button";
+import { ProjectTeamAgentChat } from "./project-team-agent-chat";
 import { useT } from "../../i18n";
 
 const MODES: readonly ProjectChatMode[] = [
@@ -127,18 +128,24 @@ function ModePane({
         </div>
       )}
 
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
-        {mode === "team_agent" ? (
-          <TeamAgentPane projectId={projectId} canConfigure={canConfigure} />
-        ) : (
-          <>
-            <p className="text-sm font-medium">{t(($) => $.chat.greetings[mode])}</p>
-            <p className="text-xs text-muted-foreground">
-              {t(($) => $.chat.coming_soon)}
-            </p>
-          </>
-        )}
-      </div>
+      {mode === "team_agent" ? (
+        <TeamAgentPane projectId={projectId} canConfigure={canConfigure} />
+      ) : (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+          <p className="text-sm font-medium">{t(($) => $.chat.greetings[mode])}</p>
+          <p className="text-xs text-muted-foreground">
+            {t(($) => $.chat.coming_soon)}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CenteredState({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+      {children}
     </div>
   );
 }
@@ -158,45 +165,51 @@ function TeamAgentPane({
 
   if (isLoading) {
     return (
-      <p className="text-xs text-muted-foreground">{t(($) => $.chat.loading)}</p>
+      <CenteredState>
+        <p className="text-xs text-muted-foreground">{t(($) => $.chat.loading)}</p>
+      </CenteredState>
     );
   }
 
-  const configured = !!chat?.team_agent_id;
+  const configured = !!chat?.team_agent_id && !!chat.issue_id;
 
   if (!configured) {
     return canConfigure ? (
-      <div
-        data-testid="project-chat-unconfigured-admin"
-        className="flex flex-col items-center gap-2"
-      >
-        <p className="text-sm font-medium">
-          {t(($) => $.chat.unconfigured_admin_title)}
-        </p>
-        {/* TODO(TASK-05): open the model/agent selector and PATCH
-            settings.team_agent_id via PUT /api/projects/:id. */}
-        <Button variant="outline" size="sm" disabled>
-          {t(($) => $.chat.unconfigured_admin_cta)}
-        </Button>
-      </div>
+      <CenteredState>
+        <div
+          data-testid="project-chat-unconfigured-admin"
+          className="flex flex-col items-center gap-2"
+        >
+          <p className="text-sm font-medium">
+            {t(($) => $.chat.unconfigured_admin_title)}
+          </p>
+          {/* TODO(TASK-05): open the model/agent selector and PATCH
+              settings.team_agent_id via PUT /api/projects/:id. */}
+          <Button variant="outline" size="sm" disabled>
+            {t(($) => $.chat.unconfigured_admin_cta)}
+          </Button>
+        </div>
+      </CenteredState>
     ) : (
-      <p
-        data-testid="project-chat-unconfigured-member"
-        className="text-xs text-muted-foreground"
-      >
-        {t(($) => $.chat.unconfigured_member)}
-      </p>
+      <CenteredState>
+        <p
+          data-testid="project-chat-unconfigured-member"
+          className="text-xs text-muted-foreground"
+        >
+          {t(($) => $.chat.unconfigured_member)}
+        </p>
+      </CenteredState>
     );
   }
 
-  // Configured: the message stream itself is TASK-04.
-  // TODO(TASK-04): render the Team Agent message stream for chat.issue_id here.
   return (
-    <p
-      data-testid="project-chat-stream-placeholder"
-      className="text-xs text-muted-foreground"
-    >
-      {t(($) => $.chat.stream_placeholder)}
-    </p>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ProjectTeamAgentChat
+        issueId={chat.issue_id}
+        projectId={projectId}
+        wsId={wsId}
+        canConfigure={canConfigure}
+      />
+    </div>
   );
 }

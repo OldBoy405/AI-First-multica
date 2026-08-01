@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { projectKeys } from "./queries";
 import { useWorkspaceId } from "../hooks";
 import { useRecentContextStore } from "../chat/recent-context-store";
@@ -50,6 +50,23 @@ export function useUpdateProject() {
     onSettled: (_data, _err, vars) => {
       qc.invalidateQueries({ queryKey: projectKeys.detail(wsId, vars.id) });
       qc.invalidateQueries({ queryKey: projectKeys.list(wsId) });
+    },
+  });
+}
+
+// Send a Team Agent chat message (CR-2026-006 TASK-04). The composer awaits
+// mutateAsync and branches on the thrown ApiError for the 429/502/409 paths;
+// this hook only handles the cross-cutting side effect: a 409
+// team_agent_not_configured means config drifted since the panel loaded, so
+// refresh the chat context to flip the panel back to its unconfigured guide.
+export function useSendProjectChatMessage(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.sendProjectChatMessage(projectId, content),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+      }
     },
   });
 }

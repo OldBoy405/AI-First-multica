@@ -513,7 +513,10 @@ function FailureBubble({
 // closed: preface + final, never middle. See extractCopyText for the
 // authoritative copy logic.
 
-function TimelineView({
+// Exported for reuse by the project group-chat Team Agent stream (CR-2026-006
+// TASK-04), which renders the same tool-execution / thinking / streaming cards.
+// Internal logic is unchanged — this is the identical component chat uses.
+export function TimelineView({
   items,
   isStreaming,
   attachments,

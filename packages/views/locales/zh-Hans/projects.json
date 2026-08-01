@@ -149,9 +149,9 @@
     "surface_issues": "Issue",
     "surface_chat": "聊天",
     "tabs": {
-      "team_agent": "团队智能体",
-      "private_ask": "私密提问",
-      "discussion": "讨论"
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
     },
     "tooltips": {
       "team_agent": "与项目共享的团队智能体聊天",
@@ -174,6 +174,17 @@
     "unconfigured_admin_title": "尚未配置团队智能体。",
     "unconfigured_admin_cta": "配置团队智能体",
     "unconfigured_member": "请联系项目 Owner 配置团队智能体。",
-    "stream_placeholder": "消息将显示在这里。"
+    "stream": {
+      "no_earlier": "没有更早的消息",
+      "composer_placeholder": "给 Team Agent 发消息…",
+      "send": "发送",
+      "send_failed": "发送失败，请重试",
+      "queue_full_title": "Agent 忙，请稍后",
+      "queue_full_depth": "队列中 {{depth}}/{{limit}}",
+      "status_running": "运行中",
+      "status_done": "已完成",
+      "status_error": "失败",
+      "status_interrupted": "已中断"
+    }
   }
 }

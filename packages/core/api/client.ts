@@ -169,6 +169,9 @@ import {
   EMPTY_PROJECT_CHAT,
   ProjectChatSchema,
   type ProjectChat,
+  EMPTY_PROJECT_CHAT_SEND_RESULT,
+  ProjectChatSendResultSchema,
+  type ProjectChatSendResult,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1971,6 +1974,23 @@ export class ApiClient {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/chat`);
     return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
       endpoint: "GET /api/projects/:id/chat",
+    });
+  }
+
+  // Post a message to the project's Team Agent (CR-2026-006 TASK-02). On
+  // success the server creates a backing comment and enqueues an agent task;
+  // non-2xx responses (409 team_agent_not_configured / 429 project_queue_full /
+  // 502 enqueue_failed) throw a structured ApiError the caller branches on.
+  async sendProjectChatMessage(
+    id: string,
+    content: string,
+  ): Promise<ProjectChatSendResult> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
+      endpoint: "POST /api/projects/:id/chat/messages",
     });
   }
 

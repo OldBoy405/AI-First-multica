@@ -176,6 +176,17 @@
     "unconfigured_admin_title": "No Team Agent configured yet.",
     "unconfigured_admin_cta": "Configure Team Agent",
     "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
-    "stream_placeholder": "Messages will appear here."
+    "stream": {
+      "no_earlier": "No earlier messages",
+      "composer_placeholder": "Message Team Agent…",
+      "send": "Send",
+      "send_failed": "Failed to send, please try again",
+      "queue_full_title": "Agent is busy, try again later",
+      "queue_full_depth": "{{depth}}/{{limit}} in queue",
+      "status_running": "Running",
+      "status_done": "Done",
+      "status_error": "Failed",
+      "status_interrupted": "Interrupted"
+    }
   }
 }
