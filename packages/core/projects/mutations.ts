@@ -71,6 +71,22 @@ export function useSendProjectChatMessage(wsId: string, projectId: string) {
   });
 }
 
+// Bind a Team Agent to the project's group chat (CR-2026-006 FR-4/DD-4). Not
+// optimistic: the backend validates the agent exists in the workspace before
+// accepting it, so the outcome isn't locally predictable (CLAUDE.md's
+// optimistic-update rule). Invalidating projectKeys.chat is what flips the
+// panel from the unconfigured guide to the live message stream.
+export function useSetProjectTeamAgent(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) =>
+      api.updateProject(projectId, { settings: { team_agent_id: agentId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+    },
+  });
+}
+
 export function useDeleteProject() {
   const qc = useQueryClient();
   const wsId = useWorkspaceId();

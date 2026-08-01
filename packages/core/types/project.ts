@@ -40,6 +40,10 @@ export interface UpdateProjectRequest {
   priority?: ProjectPriority;
   lead_type?: "member" | "agent" | null;
   lead_id?: string | null;
+  // Governance-gated bag (owner/admin only server-side). CR-2026-006 adds
+  // team_agent_id; CR-2026-004's team_agent_queue_limit is set via API only
+  // today (no frontend UI), so it isn't typed here yet.
+  settings?: { team_agent_id?: string };
 }
 
 export interface ListProjectsResponse {

@@ -367,9 +367,16 @@ export function TeamAgentComposer({
   const queueFull = canConfigure ? null : sendQueueFull ?? liveFull;
   const locked = queueFull != null;
 
+  // Pending-message pattern (CLAUDE.md: render immediately with a visible
+  // pending state and retry on failure, not silent optimism). The real
+  // comment lands in the timeline via WS `comment:created`; this local bubble
+  // only covers the gap between click and that event / the error toast.
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+
   const handleSend = async () => {
     const content = draft.trim();
     if (!content || locked || runtimeBlocked || isPending) return;
+    setPendingMessage(content);
     try {
       await mutateAsync(content);
       setDraft(projectId, "team_agent", ""); // success → clear draft
@@ -396,11 +403,24 @@ export function TeamAgentComposer({
         // enqueue_failed (502) and everything else: transient — keep the draft.
       }
       toast.error(t(($) => $.chat.stream.send_failed));
+    } finally {
+      // Cleared on both success and failure: on success the real comment
+      // takes over via WS; on failure the draft is preserved so the user can
+      // just hit send again, and a lingering "sending…" bubble would lie.
+      setPendingMessage(null);
     }
   };
 
   return (
     <div className="shrink-0 border-t px-4 py-3">
+      {pendingMessage && (
+        <div data-testid="project-chat-pending-message" className="mb-2 flex justify-end">
+          <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+            <span className="break-words">{pendingMessage}</span>
+          </div>
+        </div>
+      )}
       {queueFull && (
         <div
           data-testid="project-chat-queue-full"

@@ -108,18 +108,25 @@ vi.mock("@multica/core/api", async (importActual) => {
 });
 
 // ─── Project store + send mutation + queue status mocked ───────────────────
-const drafts: Record<string, string> = {};
-const setDraft = vi.fn((projectId: string, mode: string, text: string) => {
-  const key = `${projectId}:${mode}`;
-  if (text) drafts[key] = text;
-  else delete drafts[key];
-});
+// Callable-store shape (selectorFn + getState), matching the Zustand mock
+// convention used elsewhere in this repo (see chat-input.test.tsx).
+const projectChatState = {
+  drafts: {} as Record<string, string>,
+  setDraft: vi.fn((projectId: string, mode: string, text: string) => {
+    const key = `${projectId}:${mode}`;
+    if (text) projectChatState.drafts[key] = text;
+    else delete projectChatState.drafts[key];
+  }),
+};
 const sendMock = { mutateAsync: vi.fn(), isPending: false };
 
 vi.mock("@multica/core/projects", () => ({
   projectChatDraftKey: (projectId: string, mode: string) => `${projectId}:${mode}`,
-  useProjectChatStore: (selector: (s: unknown) => unknown) =>
-    selector({ drafts, setDraft }),
+  useProjectChatStore: Object.assign(
+    (selector?: (s: typeof projectChatState) => unknown) =>
+      selector ? selector(projectChatState) : projectChatState,
+    { getState: () => projectChatState },
+  ),
   useSendProjectChatMessage: () => sendMock,
   // Never resolves — keeps `queue` undefined so the live-queue path never
   // interferes with the tests that drive the 429 latch explicitly.
@@ -176,8 +183,8 @@ function task(id: string, at: string): AgentTask {
 }
 
 beforeEach(() => {
-  for (const k of Object.keys(drafts)) delete drafts[k];
-  setDraft.mockClear();
+  for (const k of Object.keys(projectChatState.drafts)) delete projectChatState.drafts[k];
+  projectChatState.setDraft.mockClear();
   sendMock.mutateAsync = vi.fn();
   sendMock.isPending = false;
   cfg.canEdit = true;
@@ -224,7 +231,7 @@ describe("TeamAgentComposer", () => {
   const props = { projectId: "proj-1", wsId: "ws-1", canConfigure: false };
 
   it("clears the draft on a successful send", async () => {
-    drafts["proj-1:team_agent"] = "hello agent";
+    projectChatState.drafts["proj-1:team_agent"] = "hello agent";
     sendMock.mutateAsync = vi.fn().mockResolvedValue({ comment_id: "c1", task_id: "t1" });
     renderWithProviders(<TeamAgentComposer {...props} />);
 
@@ -233,12 +240,36 @@ describe("TeamAgentComposer", () => {
     });
 
     expect(sendMock.mutateAsync).toHaveBeenCalledWith("hello agent");
-    expect(drafts["proj-1:team_agent"]).toBeUndefined();
+    expect(projectChatState.drafts["proj-1:team_agent"]).toBeUndefined();
+  });
+
+  it("renders a visible pending bubble immediately, cleared once the send settles", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "hello agent";
+    let resolveSend!: (v: { comment_id: string; task_id: string }) => void;
+    sendMock.mutateAsync = vi.fn(
+      () => new Promise((resolve) => (resolveSend = resolve)),
+    );
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    // Pending state must appear synchronously on click — before the request
+    // settles — not only as a button spinner (CLAUDE.md pending-message rule).
+    act(() => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    expect(screen.getByTestId("project-chat-pending-message").textContent).toBe(
+      "hello agent",
+    );
+
+    await act(async () => {
+      resolveSend({ comment_id: "c1", task_id: "t1" });
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("project-chat-pending-message")).toBeNull();
   });
 
   it("keeps the draft and toasts on 502 enqueue_failed", async () => {
     const { toast } = await import("sonner");
-    drafts["proj-1:team_agent"] = "retry me";
+    projectChatState.drafts["proj-1:team_agent"] = "retry me";
     sendMock.mutateAsync = vi
       .fn()
       .mockRejectedValue(new ApiError("bad", 502, "Bad Gateway", { code: "enqueue_failed" }));
@@ -248,12 +279,12 @@ describe("TeamAgentComposer", () => {
       screen.getByTestId("project-chat-send").click();
     });
 
-    expect(drafts["proj-1:team_agent"]).toBe("retry me");
+    expect(projectChatState.drafts["proj-1:team_agent"]).toBe("retry me");
     expect(toast.error).toHaveBeenCalled();
   });
 
   it("disables the input and shows depth/limit on 429 project_queue_full", async () => {
-    drafts["proj-1:team_agent"] = "busy send";
+    projectChatState.drafts["proj-1:team_agent"] = "busy send";
     sendMock.mutateAsync = vi.fn().mockRejectedValue(
       new ApiError("full", 429, "Too Many Requests", {
         code: "project_queue_full",
@@ -271,13 +302,13 @@ describe("TeamAgentComposer", () => {
       expect(screen.getByTestId("project-chat-queue-full")).toBeTruthy();
     });
     // Draft is retained for the resend, input is locked, depth/limit surfaced.
-    expect(drafts["proj-1:team_agent"]).toBe("busy send");
+    expect(projectChatState.drafts["proj-1:team_agent"]).toBe("busy send");
     expect(screen.getByTestId("project-chat-composer-input")).toBeDisabled();
     expect(screen.getByTestId("project-chat-queue-full").textContent).toContain("5/5");
   });
 
   it("never locks the composer for owner/admin (canConfigure)", async () => {
-    drafts["proj-1:team_agent"] = "admin send";
+    projectChatState.drafts["proj-1:team_agent"] = "admin send";
     sendMock.mutateAsync = vi.fn().mockRejectedValue(
       new ApiError("full", 429, "Too Many Requests", {
         code: "project_queue_full",
@@ -311,7 +342,7 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
 
   beforeEach(() => {
     cfg.agent = { id: "agent-1", model: "gpt-5", runtime_id: "rt-1" };
-    drafts["proj-1:team_agent"] = "hi"; // isolate send-disable to runtime state
+    projectChatState.drafts["proj-1:team_agent"] = "hi"; // isolate send-disable to runtime state
   });
 
   it("permission + runtime → interactive picker, send enabled", async () => {

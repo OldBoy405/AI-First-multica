@@ -11,6 +11,7 @@ export {
   useUpdateProject,
   useDeleteProject,
   useSendProjectChatMessage,
+  useSetProjectTeamAgent,
 } from "./mutations";
 export { useProjectDraftStore } from "./draft-store";
 export {

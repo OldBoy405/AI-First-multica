@@ -174,6 +174,7 @@
     "unconfigured_admin_title": "Team Agent はまだ設定されていません。",
     "unconfigured_admin_cta": "Team Agent を設定",
     "unconfigured_member": "Team Agent の設定はプロジェクトのオーナーに依頼してください。",
+    "team_agent_setup_failed": "Team Agent の設定に失敗しました。もう一度お試しください",
     "stream": {
       "no_earlier": "これより前のメッセージはありません",
       "composer_placeholder": "Team Agent にメッセージ…",

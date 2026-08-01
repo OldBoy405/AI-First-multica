@@ -1,14 +1,18 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Lock, MessagesSquare, X } from "lucide-react";
+import { toast } from "sonner";
 import { projectChatOptions } from "@multica/core/projects/queries";
 import {
   useProjectChatStore,
+  useSetProjectTeamAgent,
   projectChatDraftKey,
   type ProjectChatMode,
 } from "@multica/core/projects";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { agentListOptions } from "@multica/core/workspace/queries";
 import {
   Tabs,
   TabsList,
@@ -21,6 +25,13 @@ import {
   TooltipContent,
 } from "@multica/ui/components/ui/tooltip";
 import { Button } from "@multica/ui/components/ui/button";
+import { ActorAvatar } from "../../common/actor-avatar";
+import {
+  PropertyPicker,
+  PickerItem,
+  PickerSection,
+  PickerEmpty,
+} from "../../issues/components/pickers/property-picker";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
 import { useT } from "../../i18n";
 
@@ -171,7 +182,11 @@ function TeamAgentPane({
     );
   }
 
-  const configured = !!chat?.team_agent_id && !!chat.issue_id;
+  // Explicit non-empty-string checks rather than truthy/falsy: both fields
+  // default to "" (never undefined) once `chat` itself has loaded, and "" is
+  // the actual "not configured yet" sentinel, not just a falsy placeholder.
+  const configured =
+    chat !== undefined && chat.team_agent_id !== "" && chat.issue_id !== "";
 
   if (!configured) {
     return canConfigure ? (
@@ -183,11 +198,7 @@ function TeamAgentPane({
           <p className="text-sm font-medium">
             {t(($) => $.chat.unconfigured_admin_title)}
           </p>
-          {/* TODO(TASK-05): open the model/agent selector and PATCH
-              settings.team_agent_id via PUT /api/projects/:id. */}
-          <Button variant="outline" size="sm" disabled>
-            {t(($) => $.chat.unconfigured_admin_cta)}
-          </Button>
+          <TeamAgentSetupPicker projectId={projectId} wsId={wsId} />
         </div>
       </CenteredState>
     ) : (
@@ -212,5 +223,64 @@ function TeamAgentPane({
         canConfigure={canConfigure}
       />
     </div>
+  );
+}
+
+// Inline agent picker for the unconfigured-admin guide (SDD §5.2: "owner/admin
+// see an inline agent selector; selecting writes settings.team_agent_id").
+// Agent-only (no squads) — a group chat has exactly one Team Agent, so the
+// squad branch other agent pickers carry doesn't apply here.
+function TeamAgentSetupPicker({
+  projectId,
+  wsId,
+}: {
+  projectId: string;
+  wsId: string;
+}) {
+  const { t } = useT("projects");
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const setTeamAgent = useSetProjectTeamAgent(wsId, projectId);
+
+  const activeAgents = useMemo(() => agents.filter((a) => !a.archived_at), [agents]);
+  const query = filter.trim().toLowerCase();
+  const filteredAgents = activeAgents.filter((a) =>
+    !query || a.name.toLowerCase().includes(query),
+  );
+
+  const handlePick = (agentId: string) => {
+    setOpen(false);
+    setTeamAgent.mutate(agentId, {
+      onError: () => toast.error(t(($) => $.chat.team_agent_setup_failed)),
+    });
+  };
+
+  return (
+    <PropertyPicker
+      open={open}
+      onOpenChange={setOpen}
+      width="w-56"
+      searchable
+      onSearchChange={setFilter}
+      trigger={
+        <Button variant="outline" size="sm" disabled={setTeamAgent.isPending}>
+          {t(($) => $.chat.unconfigured_admin_cta)}
+        </Button>
+      }
+    >
+      {filteredAgents.length === 0 ? (
+        <PickerEmpty />
+      ) : (
+        <PickerSection label={t(($) => $.chat.tabs.team_agent)}>
+          {filteredAgents.map((a) => (
+            <PickerItem key={a.id} selected={false} onClick={() => handlePick(a.id)}>
+              <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
+              <span className="truncate">{a.name}</span>
+            </PickerItem>
+          ))}
+        </PickerSection>
+      )}
+    </PropertyPicker>
   );
 }
