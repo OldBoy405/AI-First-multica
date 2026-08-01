@@ -468,6 +468,11 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		whereClause += " AND i.status NOT IN ('done', 'cancelled')"
 	}
 
+	// CR-2026-006: exclude the hidden Team Agent chat container issue. Critical
+	// here because the search WHERE also matches on comment content (Tier 7/8),
+	// so without this, chat messages would leak into global issue search results.
+	whereClause += " AND i.origin_type IS DISTINCT FROM 'project_chat'"
+
 	// --- ORDER BY clause ---
 	// Build ranking CASE with fine-grained tiers.
 	var rankCases []string
@@ -935,7 +940,9 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build dynamic SQL — same approach as ListGroupedIssues.
-	where := []string{"i.workspace_id = $1"}
+	// CR-2026-006: hide the per-project Team Agent chat container issue
+	// (origin_type='project_chat') from every issue-listing surface.
+	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'"}
 	args := []any{wsUUID}
 	addArg := func(v any) string {
 		args = append(args, v)
@@ -1267,7 +1274,9 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	where := []string{"i.workspace_id = $1"}
+	// CR-2026-006: hide the per-project Team Agent chat container issue
+	// (origin_type='project_chat') from every issue-listing surface.
+	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'"}
 	args := []any{wsUUID}
 	addArg := func(v any) string {
 		args = append(args, v)

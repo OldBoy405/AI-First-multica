@@ -10,6 +10,8 @@ export const projectKeys = {
     [...projectKeys.all(wsId), "queue-status", id] as const,
   queueStatusAll: (wsId: string) =>
     [...projectKeys.all(wsId), "queue-status"] as const,
+  chat: (wsId: string, id: string) =>
+    [...projectKeys.all(wsId), "chat", id] as const,
 };
 
 export function projectListOptions(wsId: string) {
@@ -33,5 +35,14 @@ export function projectQueueStatusOptions(wsId: string, id: string) {
   return queryOptions({
     queryKey: projectKeys.queueStatus(wsId, id),
     queryFn: () => api.getProjectQueueStatus(id),
+  });
+}
+
+// Project group-chat context (CR-2026-006): backing issue id + configured
+// Team Agent id. Powers the project chat panel's Team Agent tab.
+export function projectChatOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: projectKeys.chat(wsId, id),
+    queryFn: () => api.getProjectChat(id),
   });
 }

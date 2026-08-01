@@ -144,5 +144,51 @@
     "direction_desc": "내림차순",
     "section_columns": "열",
     "view": "보기"
+  },
+  "chat": {
+    "surface_issues": "Issue",
+    "surface_chat": "채팅",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "프로젝트 공용 Team Agent와 채팅하기",
+      "private_ask": "나만 볼 수 있는 개별 채팅으로 에이전트에게 질문하기",
+      "discussion": "팀원들과 논의하기"
+    },
+    "greetings": {
+      "team_agent": "이 프로젝트에 대해 Team Agent와 채팅하세요.",
+      "private_ask": "이 프로젝트에 대해 개별적으로 질문하세요.",
+      "discussion": "팀과 논의를 시작하세요."
+    },
+    "tutorials": {
+      "team_agent": "Team Agent는 프로젝트 전반에서 작동하며 팀원 모두에게 표시됩니다.",
+      "private_ask": "Private Ask는 나만 볼 수 있는 1:1 채팅입니다.",
+      "discussion": "Discussion은 팀 전체가 공유하는 스레드입니다."
+    },
+    "tutorial_dismiss": "닫기",
+    "coming_soon": "다음 버전에서 제공될 예정입니다.",
+    "loading": "불러오는 중…",
+    "unconfigured_admin_title": "아직 Team Agent가 설정되지 않았습니다.",
+    "unconfigured_admin_cta": "Team Agent 설정",
+    "unconfigured_member": "프로젝트 소유자에게 Team Agent 설정을 요청하세요.",
+    "team_agent_setup_failed": "Team Agent 설정에 실패했습니다. 다시 시도해 주세요",
+    "stream": {
+      "no_earlier": "이전 메시지가 없습니다",
+      "composer_placeholder": "Team Agent에 메시지…",
+      "send": "보내기",
+      "send_failed": "전송에 실패했습니다. 다시 시도해 주세요",
+      "queue_full_title": "에이전트가 사용 중입니다. 잠시 후 다시 시도하세요",
+      "queue_full_depth": "대기열 {{depth}}/{{limit}}",
+      "status_running": "실행 중",
+      "status_done": "완료",
+      "status_error": "실패",
+      "status_interrupted": "중단됨",
+      "model_label": "모델",
+      "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
+      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
+    }
   }
 }

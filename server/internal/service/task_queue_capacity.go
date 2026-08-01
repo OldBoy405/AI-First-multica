@@ -29,6 +29,10 @@ const (
 	// the per-project capacity override. Exported so the project-update
 	// handler validates against the same key the guard reads.
 	ProjectSettingTeamAgentQueueLimit = "team_agent_queue_limit"
+	// ProjectSettingTeamAgentID is the project.settings key holding the agent
+	// bound as the project's Team Agent (CR-2026-006). The project group-chat
+	// window routes messages to this agent. Stored as the agent UUID string.
+	ProjectSettingTeamAgentID = "team_agent_id"
 )
 
 // ErrProjectQueueFull is returned when a plain member's enqueue would push a

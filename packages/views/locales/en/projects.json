@@ -146,5 +146,51 @@
     "direction_desc": "Descending",
     "section_columns": "Columns",
     "view": "View"
+  },
+  "chat": {
+    "surface_issues": "Issues",
+    "surface_chat": "Chat",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "Chat with the project's shared Team Agent",
+      "private_ask": "Ask an agent privately, just for you",
+      "discussion": "Discuss with your teammates"
+    },
+    "greetings": {
+      "team_agent": "Chat with your Team Agent about this project.",
+      "private_ask": "Ask a private question about this project.",
+      "discussion": "Start a discussion with your team."
+    },
+    "tutorials": {
+      "team_agent": "The Team Agent works across this project and is visible to everyone on the team.",
+      "private_ask": "Private Ask is a one-on-one chat only you can see.",
+      "discussion": "Discussion is a shared thread for the whole team."
+    },
+    "tutorial_dismiss": "Dismiss",
+    "coming_soon": "Coming in a later version.",
+    "loading": "Loading…",
+    "unconfigured_admin_title": "No Team Agent configured yet.",
+    "unconfigured_admin_cta": "Configure Team Agent",
+    "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
+    "team_agent_setup_failed": "Failed to set the Team Agent, please try again",
+    "stream": {
+      "no_earlier": "No earlier messages",
+      "composer_placeholder": "Message Team Agent…",
+      "send": "Send",
+      "send_failed": "Failed to send, please try again",
+      "queue_full_title": "Agent is busy, try again later",
+      "queue_full_depth": "{{depth}}/{{limit}} in queue",
+      "status_running": "Running",
+      "status_done": "Done",
+      "status_error": "Failed",
+      "status_interrupted": "Interrupted",
+      "model_label": "Model",
+      "runtime_guide": "Start a local Agent in Settings first",
+      "model_update_failed": "Failed to update the model, please try again"
+    }
   }
 }

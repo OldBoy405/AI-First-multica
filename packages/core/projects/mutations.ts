@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { projectKeys } from "./queries";
 import { useWorkspaceId } from "../hooks";
 import { useRecentContextStore } from "../chat/recent-context-store";
@@ -50,6 +50,39 @@ export function useUpdateProject() {
     onSettled: (_data, _err, vars) => {
       qc.invalidateQueries({ queryKey: projectKeys.detail(wsId, vars.id) });
       qc.invalidateQueries({ queryKey: projectKeys.list(wsId) });
+    },
+  });
+}
+
+// Send a Team Agent chat message (CR-2026-006 TASK-04). The composer awaits
+// mutateAsync and branches on the thrown ApiError for the 429/502/409 paths;
+// this hook only handles the cross-cutting side effect: a 409
+// team_agent_not_configured means config drifted since the panel loaded, so
+// refresh the chat context to flip the panel back to its unconfigured guide.
+export function useSendProjectChatMessage(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (content: string) => api.sendProjectChatMessage(projectId, content),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+      }
+    },
+  });
+}
+
+// Bind a Team Agent to the project's group chat (CR-2026-006 FR-4/DD-4). Not
+// optimistic: the backend validates the agent exists in the workspace before
+// accepting it, so the outcome isn't locally predictable (CLAUDE.md's
+// optimistic-update rule). Invalidating projectKeys.chat is what flips the
+// panel from the unconfigured guide to the live message stream.
+export function useSetProjectTeamAgent(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) =>
+      api.updateProject(projectId, { settings: { team_agent_id: agentId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
     },
   });
 }

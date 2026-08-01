@@ -166,6 +166,12 @@ import {
   EMPTY_AGENT_TEMPLATE_DETAIL,
   EMPTY_AGENT_TEMPLATE_SUMMARY_LIST,
   EMPTY_APP_CONFIG,
+  EMPTY_PROJECT_CHAT,
+  ProjectChatSchema,
+  type ProjectChat,
+  EMPTY_PROJECT_CHAT_SEND_RESULT,
+  ProjectChatSendResultSchema,
+  type ProjectChatSendResult,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1960,6 +1966,32 @@ export class ApiClient {
   // (CR-2026-004). Powers the queue indicator and the full-queue disabled state.
   async getProjectQueueStatus(id: string): Promise<{ queue_depth: number; queue_limit: number }> {
     return this.fetch(`/api/projects/${id}/queue-status`);
+  }
+
+  // Project group-chat context (CR-2026-006 TASK-01): the backing issue id and
+  // the configured Team Agent id (empty string when unconfigured).
+  async getProjectChat(id: string): Promise<ProjectChat> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/chat`);
+    return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
+      endpoint: "GET /api/projects/:id/chat",
+    });
+  }
+
+  // Post a message to the project's Team Agent (CR-2026-006 TASK-02). On
+  // success the server creates a backing comment and enqueues an agent task;
+  // non-2xx responses (409 team_agent_not_configured / 429 project_queue_full /
+  // 502 enqueue_failed) throw a structured ApiError the caller branches on.
+  async sendProjectChatMessage(
+    id: string,
+    content: string,
+  ): Promise<ProjectChatSendResult> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
+      endpoint: "POST /api/projects/:id/chat/messages",
+    });
   }
 
   async createProject(data: CreateProjectRequest): Promise<Project> {

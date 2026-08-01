@@ -144,5 +144,51 @@
     "direction_desc": "降序",
     "section_columns": "列",
     "view": "视图"
+  },
+  "chat": {
+    "surface_issues": "Issue",
+    "surface_chat": "聊天",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "与项目共享的团队智能体聊天",
+      "private_ask": "以只有你可见的私密会话向智能体提问",
+      "discussion": "与团队成员讨论"
+    },
+    "greetings": {
+      "team_agent": "就这个项目与团队智能体聊天。",
+      "private_ask": "就这个项目私密地提问。",
+      "discussion": "与团队展开讨论。"
+    },
+    "tutorials": {
+      "team_agent": "团队智能体面向整个项目工作，团队所有成员都可见。",
+      "private_ask": "私密提问是只有你能看到的一对一会话。",
+      "discussion": "讨论是整个团队共享的话题串。"
+    },
+    "tutorial_dismiss": "关闭",
+    "coming_soon": "由后续版本提供。",
+    "loading": "加载中…",
+    "unconfigured_admin_title": "尚未配置团队智能体。",
+    "unconfigured_admin_cta": "配置团队智能体",
+    "unconfigured_member": "请联系项目 Owner 配置团队智能体。",
+    "team_agent_setup_failed": "团队智能体设置失败，请重试",
+    "stream": {
+      "no_earlier": "没有更早的消息",
+      "composer_placeholder": "给 Team Agent 发消息…",
+      "send": "发送",
+      "send_failed": "发送失败，请重试",
+      "queue_full_title": "Agent 忙，请稍后",
+      "queue_full_depth": "队列中 {{depth}}/{{limit}}",
+      "status_running": "运行中",
+      "status_done": "已完成",
+      "status_error": "失败",
+      "status_interrupted": "已中断",
+      "model_label": "模型",
+      "runtime_guide": "请先在设置中启动本地 Agent",
+      "model_update_failed": "模型更新失败，请重试"
+    }
   }
 }

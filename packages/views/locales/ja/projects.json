@@ -144,5 +144,51 @@
     "direction_desc": "降順",
     "section_columns": "列",
     "view": "ビュー"
+  },
+  "chat": {
+    "surface_issues": "Issue",
+    "surface_chat": "チャット",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "プロジェクト共有の Team Agent とチャットする",
+      "private_ask": "自分だけの個別チャットでエージェントに質問する",
+      "discussion": "チームメンバーと話し合う"
+    },
+    "greetings": {
+      "team_agent": "このプロジェクトについて Team Agent とチャットしましょう。",
+      "private_ask": "このプロジェクトについて個別に質問しましょう。",
+      "discussion": "チームでのディスカッションを始めましょう。"
+    },
+    "tutorials": {
+      "team_agent": "Team Agent はプロジェクト全体で動作し、チーム全員に表示されます。",
+      "private_ask": "Private Ask は自分だけが見られる 1 対 1 のチャットです。",
+      "discussion": "Discussion はチーム全体で共有されるスレッドです。"
+    },
+    "tutorial_dismiss": "閉じる",
+    "coming_soon": "今後のバージョンで提供予定です。",
+    "loading": "読み込み中…",
+    "unconfigured_admin_title": "Team Agent はまだ設定されていません。",
+    "unconfigured_admin_cta": "Team Agent を設定",
+    "unconfigured_member": "Team Agent の設定はプロジェクトのオーナーに依頼してください。",
+    "team_agent_setup_failed": "Team Agent の設定に失敗しました。もう一度お試しください",
+    "stream": {
+      "no_earlier": "これより前のメッセージはありません",
+      "composer_placeholder": "Team Agent にメッセージ…",
+      "send": "送信",
+      "send_failed": "送信に失敗しました。もう一度お試しください",
+      "queue_full_title": "エージェントは処理中です。しばらくしてからお試しください",
+      "queue_full_depth": "キュー {{depth}}/{{limit}}",
+      "status_running": "実行中",
+      "status_done": "完了",
+      "status_error": "失敗",
+      "status_interrupted": "中断",
+      "model_label": "モデル",
+      "runtime_guide": "先に設定でローカル Agent を起動してください",
+      "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
+    }
   }
 }

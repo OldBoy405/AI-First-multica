@@ -334,6 +334,44 @@ const ProjectSchema = z.object({
   resource_count: z.number().default(0),
 }).loose();
 
+// Project group-chat context (CR-2026-006 TASK-01). `team_agent_id` is an
+// empty string when the project has no Team Agent configured yet.
+export interface ProjectChat {
+  issue_id: string;
+  team_agent_id: string;
+}
+
+export const ProjectChatSchema = z
+  .object({
+    issue_id: z.string().default(""),
+    team_agent_id: z.string().default(""),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_CHAT: ProjectChat = {
+  issue_id: "",
+  team_agent_id: "",
+};
+
+// Result of posting a Team Agent chat message (CR-2026-006 TASK-02):
+// the created backing comment plus the enqueued agent task.
+export interface ProjectChatSendResult {
+  comment_id: string;
+  task_id: string;
+}
+
+export const ProjectChatSendResultSchema = z
+  .object({
+    comment_id: z.string().default(""),
+    task_id: z.string().default(""),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
+  comment_id: "",
+  task_id: "",
+};
+
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),
   matched_snippet: z.string().optional(),
