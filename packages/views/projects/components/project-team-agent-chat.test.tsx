@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { ApiError } from "@multica/core/api";
@@ -33,6 +34,78 @@ vi.mock("@multica/core/chat/queries", () => ({
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn() },
 }));
+
+// ─── Model-selector seams (CR-2026-006 TASK-05 / TSUG-003) ─────────────────
+// A single mutable config drives the four permission×runtime combos. Mutated
+// per test, read lazily inside the mock factories (same pattern as `sendMock`).
+const cfg: {
+  canEdit: boolean;
+  runtimeStatus: string;
+  agent: { id: string; model: string; runtime_id: string } | null;
+} = {
+  canEdit: true,
+  runtimeStatus: "online",
+  agent: null,
+};
+
+// Stubbed so we don't pull the inspector's PropertyPicker tree into this test;
+// the wrapper testids in the composer carry the state distinction, this only
+// needs to expose canEdit + a way to fire onChange.
+vi.mock("../../agents/components/inspector/model-picker", () => ({
+  ModelPicker: ({
+    canEdit,
+    value,
+    onChange,
+  }: {
+    canEdit: boolean;
+    value: string;
+    onChange: (m: string) => void;
+  }) =>
+    canEdit ? (
+      <button
+        data-testid="stub-model-interactive"
+        onClick={() => onChange("claude-opus")}
+      >
+        {value}
+      </button>
+    ) : (
+      <span data-testid="stub-model-readonly">{value}</span>
+    ),
+}));
+
+vi.mock("@multica/core/permissions", () => ({
+  useAgentPermissions: () => ({ canEdit: { allowed: cfg.canEdit, reason: "" } }),
+}));
+
+vi.mock("@multica/core/workspace/queries", () => ({
+  agentListOptions: () => ({
+    queryKey: ["agents"],
+    queryFn: async () => (cfg.agent ? [cfg.agent] : []),
+  }),
+}));
+
+vi.mock("@multica/core/runtimes", () => ({
+  runtimeListOptions: () => ({
+    queryKey: ["runtimes"],
+    queryFn: async () => [{ id: "rt-1", status: cfg.runtimeStatus }],
+  }),
+  runtimeModelsOptions: (rid: string | null) => ({
+    queryKey: ["models", rid],
+    queryFn: async () => ({
+      models: [{ id: "claude-opus", label: "Claude Opus" }],
+      supported: true,
+    }),
+    enabled: !!rid,
+  }),
+}));
+
+vi.mock("@multica/core/api", async (importActual) => {
+  const actual = await importActual<typeof import("@multica/core/api")>();
+  return {
+    ...actual,
+    api: { updateAgent: vi.fn().mockResolvedValue({}) },
+  };
+});
 
 // ─── Project store + send mutation + queue status mocked ───────────────────
 const drafts: Record<string, string> = {};
@@ -107,6 +180,13 @@ beforeEach(() => {
   setDraft.mockClear();
   sendMock.mutateAsync = vi.fn();
   sendMock.isPending = false;
+  cfg.canEdit = true;
+  cfg.runtimeStatus = "online";
+  cfg.agent = null;
+});
+
+afterEach(() => {
+  cleanup();
 });
 
 describe("TeamAgentStreamView", () => {
@@ -213,5 +293,97 @@ describe("TeamAgentComposer", () => {
 
     expect(screen.queryByTestId("project-chat-queue-full")).toBeNull();
     expect(screen.getByTestId("project-chat-composer-input")).not.toBeDisabled();
+  });
+});
+
+// ─── TSUG-003: two disabled states must stay distinct ──────────────────────
+// Decision order: permission first (selector interactivity), then runtime
+// availability (selector content + send). The four combos below each render a
+// distinct selector state, so "I can't edit" is never conflated with "no
+// runtime configured".
+describe("TeamAgentComposer model selector (TSUG-003)", () => {
+  const props = {
+    projectId: "proj-1",
+    wsId: "ws-1",
+    teamAgentId: "agent-1",
+    canConfigure: false,
+  };
+
+  beforeEach(() => {
+    cfg.agent = { id: "agent-1", model: "gpt-5", runtime_id: "rt-1" };
+    drafts["proj-1:team_agent"] = "hi"; // isolate send-disable to runtime state
+  });
+
+  it("permission + runtime → interactive picker, send enabled", async () => {
+    cfg.canEdit = true;
+    cfg.runtimeStatus = "online";
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    expect(await screen.findByTestId("project-chat-model-picker")).toBeTruthy();
+    expect(screen.queryByTestId("project-chat-model-readonly")).toBeNull();
+    expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
+    expect(screen.getByTestId("project-chat-send")).not.toBeDisabled();
+  });
+
+  it("permission + no runtime → runtime guide, send disabled", async () => {
+    cfg.canEdit = true;
+    cfg.runtimeStatus = "offline";
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    const guide = await screen.findByTestId("project-chat-model-runtime-guide");
+    expect(guide.textContent).toBe(
+      enProjects.chat.stream.runtime_guide,
+    );
+    expect(screen.queryByTestId("project-chat-model-picker")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-send")).toBeDisabled(),
+    );
+  });
+
+  it("no permission + runtime → read-only badge, send enabled", async () => {
+    cfg.canEdit = false;
+    cfg.runtimeStatus = "online";
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    expect(await screen.findByTestId("project-chat-model-readonly")).toBeTruthy();
+    expect(screen.getByTestId("stub-model-readonly").textContent).toBe("gpt-5");
+    expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
+    // The read-only badge renders as soon as the agent loads, so wait for the
+    // runtime query to settle before asserting send is re-enabled.
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-send")).not.toBeDisabled(),
+    );
+  });
+
+  it("no permission + no runtime → read-only badge (not the guide), send disabled", async () => {
+    cfg.canEdit = false;
+    cfg.runtimeStatus = "offline";
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    // Permission decides the selector: a non-editor sees the badge, never the
+    // "start a runtime" guide — the two disabled states are not conflated.
+    expect(await screen.findByTestId("project-chat-model-readonly")).toBeTruthy();
+    expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-send")).toBeDisabled(),
+    );
+  });
+
+  it("selecting a model persists to the agent's model field", async () => {
+    cfg.canEdit = true;
+    cfg.runtimeStatus = "online";
+    const { api } = await import("@multica/core/api");
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    const trigger = await screen.findByTestId("stub-model-interactive");
+    await act(async () => {
+      trigger.click();
+    });
+
+    await waitFor(() =>
+      expect(api.updateAgent).toHaveBeenCalledWith("agent-1", {
+        model: "claude-opus",
+      }),
+    );
   });
 });

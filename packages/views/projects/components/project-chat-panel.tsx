@@ -208,6 +208,7 @@ function TeamAgentPane({
         issueId={chat.issue_id}
         projectId={projectId}
         wsId={wsId}
+        teamAgentId={chat.team_agent_id}
         canConfigure={canConfigure}
       />
     </div>

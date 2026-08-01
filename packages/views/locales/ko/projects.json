@@ -184,7 +184,10 @@
       "status_running": "실행 중",
       "status_done": "완료",
       "status_error": "실패",
-      "status_interrupted": "중단됨"
+      "status_interrupted": "중단됨",
+      "model_label": "모델",
+      "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
+      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
     }
   }
 }

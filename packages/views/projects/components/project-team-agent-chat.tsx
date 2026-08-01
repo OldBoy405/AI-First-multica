@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, CheckCircle2, Loader2, SendHorizontal, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multica/core/api";
@@ -15,13 +15,17 @@ import {
 } from "@multica/core/projects";
 import { useAuthStore } from "@multica/core/auth";
 import { useActorName } from "@multica/core/workspace/hooks";
-import type { AgentTask, TimelineEntry } from "@multica/core/types";
+import { agentListOptions } from "@multica/core/workspace/queries";
+import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes";
+import { useAgentPermissions } from "@multica/core/permissions";
+import type { Agent, AgentTask, TimelineEntry } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { Button } from "@multica/ui/components/ui/button";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { ReadonlyContent } from "../../editor";
 import { buildTimeline } from "../../common/task-transcript";
 import { TimelineView } from "../../chat/components/chat-message-list";
+import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { useT } from "../../i18n";
 
@@ -38,11 +42,14 @@ export function ProjectTeamAgentChat({
   issueId,
   projectId,
   wsId,
+  teamAgentId,
   canConfigure,
 }: {
   issueId: string;
   projectId: string;
   wsId: string;
+  /** The configured Team Agent's agent id — drives the model selector. */
+  teamAgentId: string;
   canConfigure: boolean;
 }) {
   const userId = useAuthStore((s) => s.user?.id);
@@ -66,7 +73,12 @@ export function ProjectTeamAgentChat({
       <div className="flex-1 min-h-0 overflow-y-auto" data-tab-scroll-root>
         <TeamAgentStreamView comments={comments} tasks={tasks} currentUserId={userId} />
       </div>
-      <TeamAgentComposer projectId={projectId} wsId={wsId} canConfigure={canConfigure} />
+      <TeamAgentComposer
+        projectId={projectId}
+        wsId={wsId}
+        teamAgentId={teamAgentId}
+        canConfigure={canConfigure}
+      />
     </div>
   );
 }
@@ -261,19 +273,80 @@ function TaskExecutionCard({ task }: { task: AgentTask }) {
 export function TeamAgentComposer({
   projectId,
   wsId,
+  teamAgentId,
   canConfigure,
 }: {
   projectId: string;
   wsId: string;
+  /** The configured Team Agent's agent id, when the panel has one. */
+  teamAgentId?: string;
   /** Owner/admin — backend exempts them from the full-queue lock, so the
    *  composer never enters the disabled state for them. */
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
+  const qc = useQueryClient();
   const draftKey = projectChatDraftKey(projectId, "team_agent");
   const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
   const setDraft = useProjectChatStore((s) => s.setDraft);
   const { mutateAsync, isPending } = useSendProjectChatMessage(wsId, projectId);
+
+  // ─── Model selector state (CR-2026-006 TASK-05, TSUG-003) ───────────────
+  // The selector binds the Team Agent AGENT's `model` field, not a per-message
+  // override (the daemon reads agent.Model at claim time and ignores task-level
+  // overrides). Two disabled states are kept distinct per TSUG-003, decided in
+  // order: permission first (can this user edit the agent at all?), then
+  // runtime availability (did the daemon report any models?).
+  const { data: agents = [] } = useQuery({
+    ...agentListOptions(wsId),
+    enabled: !!teamAgentId,
+  });
+  const agent = teamAgentId
+    ? agents.find((a) => a.id === teamAgentId) ?? null
+    : null;
+  // Reuse the exact agent edit-permission rule the inspector uses — being a
+  // project owner/admin (`canConfigure`) does NOT imply edit rights on an
+  // agent someone else owns.
+  const { canEdit } = useAgentPermissions(agent, wsId);
+
+  const { data: runtimes = [] } = useQuery({
+    ...runtimeListOptions(wsId),
+    enabled: !!agent,
+  });
+  const runtime = agent?.runtime_id
+    ? runtimes.find((r) => r.id === agent.runtime_id) ?? null
+    : null;
+  const runtimeOnline = runtime?.status === "online";
+  const modelsQuery = useQuery(
+    runtimeModelsOptions(runtimeOnline ? agent?.runtime_id ?? null : null),
+  );
+  // Runtime is "ready" when online and the daemon has (or is still) reporting
+  // models. A resolved-empty list or an offline runtime → the guide state.
+  const runtimeReady =
+    runtimeOnline &&
+    (modelsQuery.isLoading || (modelsQuery.data?.models.length ?? 0) > 0);
+  // Only gate send on runtime once we actually have an agent to check.
+  const runtimeBlocked = agent != null && !runtimeReady;
+
+  const persistModel = async (model: string) => {
+    if (!agent) return;
+    const key = agentListOptions(wsId).queryKey;
+    const prev = agent.model ?? "";
+    // Optimistic field patch (CLAUDE.md: predictable, same screen, trivial
+    // rollback) so the chip flips immediately, matching agent-detail-page.
+    qc.setQueryData<Agent[]>(key, (old) =>
+      old?.map((a) => (a.id === agent.id ? { ...a, model } : a)),
+    );
+    try {
+      await api.updateAgent(agent.id, { model });
+      qc.invalidateQueries({ queryKey: key });
+    } catch {
+      qc.setQueryData<Agent[]>(key, (old) =>
+        old?.map((a) => (a.id === agent.id ? { ...a, model: prev } : a)),
+      );
+      toast.error(t(($) => $.chat.stream.model_update_failed));
+    }
+  };
 
   // Live shared-queue depth (CR-2026-004). Drives recovery out of the
   // full-queue lock: WS `task:*` invalidation refetches it, and once depth
@@ -296,7 +369,7 @@ export function TeamAgentComposer({
 
   const handleSend = async () => {
     const content = draft.trim();
-    if (!content || locked || isPending) return;
+    if (!content || locked || runtimeBlocked || isPending) return;
     try {
       await mutateAsync(content);
       setDraft(projectId, "team_agent", ""); // success → clear draft
@@ -344,11 +417,48 @@ export function TeamAgentComposer({
           </div>
         </div>
       )}
+      {agent && (
+        <div
+          data-testid="project-chat-model-row"
+          className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
+        >
+          <span className="shrink-0">{t(($) => $.chat.stream.model_label)}</span>
+          {/* Order (TSUG-003): permission gates interactivity; a non-editor
+              always gets the read-only badge — never the runtime guide — so
+              "you can't change this" is never misread as "the environment is
+              broken". Runtime availability then decides the editor's content. */}
+          {!canEdit.allowed ? (
+            <span data-testid="project-chat-model-readonly">
+              <ModelPicker
+                runtimeId={agent.runtime_id}
+                runtimeOnline={!!runtimeOnline}
+                value={agent.model ?? ""}
+                canEdit={false}
+                onChange={() => {}}
+              />
+            </span>
+          ) : runtimeReady ? (
+            <span data-testid="project-chat-model-picker">
+              <ModelPicker
+                runtimeId={agent.runtime_id}
+                runtimeOnline={!!runtimeOnline}
+                value={agent.model ?? ""}
+                canEdit
+                onChange={persistModel}
+              />
+            </span>
+          ) : (
+            <span data-testid="project-chat-model-runtime-guide">
+              {t(($) => $.chat.stream.runtime_guide)}
+            </span>
+          )}
+        </div>
+      )}
       <div className="relative flex items-end gap-2 rounded-lg border bg-card px-3 py-2 transition-colors focus-within:border-brand">
         <textarea
           data-testid="project-chat-composer-input"
           value={draft}
-          disabled={locked}
+          disabled={locked || runtimeBlocked}
           rows={1}
           placeholder={t(($) => $.chat.stream.composer_placeholder)}
           onChange={(e) => setDraft(projectId, "team_agent", e.target.value)}
@@ -364,7 +474,7 @@ export function TeamAgentComposer({
           type="button"
           size="icon-sm"
           data-testid="project-chat-send"
-          disabled={locked || isPending || !draft.trim()}
+          disabled={locked || runtimeBlocked || isPending || !draft.trim()}
           onClick={() => void handleSend()}
           aria-label={t(($) => $.chat.stream.send)}
         >

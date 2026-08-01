@@ -186,7 +186,10 @@
       "status_running": "Running",
       "status_done": "Done",
       "status_error": "Failed",
-      "status_interrupted": "Interrupted"
+      "status_interrupted": "Interrupted",
+      "model_label": "Model",
+      "runtime_guide": "Start a local Agent in Settings first",
+      "model_update_failed": "Failed to update the model, please try again"
     }
   }
 }
