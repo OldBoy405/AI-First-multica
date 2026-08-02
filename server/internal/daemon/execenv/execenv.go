@@ -85,6 +85,7 @@ type TaskContextForEnv struct {
 	ProjectDescription      string                  // durable project-level context, rendered into the brief's Project Context section
 	ProjectResources        []ProjectResourceForEnv // resources attached to the project
 	ChatSessionID           string                  // non-empty for chat tasks
+	AskOnly                 bool                    // CR-2026-008: project-bound Private Ask chat task — the brief omits the Repositories section (checkout is rejected daemon-side too)
 	AutopilotRunID          string                  // non-empty for autopilot run_only tasks
 	AutopilotID             string
 	AutopilotTitle          string

@@ -393,3 +393,45 @@ func assertActiveTaskCount(t *testing.T, h http.HandlerFunc, want int64) {
 		t.Errorf("active_task_count: got %d, want %d", resp.ActiveTaskCount, want)
 	}
 }
+
+// TestRepoCheckoutRejectedForAskOnlyTask pins the enforcement half of the
+// Private Ask read-only sandbox (CR-2026-008): a task registered as ask-only
+// gets a 403 from /repo/checkout regardless of the URL's origin, and the
+// rejection lifts once the task's registration is gone (task finished).
+func TestRepoCheckoutRejectedForAskOnlyTask(t *testing.T) {
+	t.Parallel()
+
+	const workspaceID = "ws-askonly"
+	const repoURL = "https://github.com/org/repo.git"
+	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
+	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
+
+	d.askOnlyTasks.Store("task-ask", struct{}{})
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-ask"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for ask-only task, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "read-only chat session") {
+		t.Fatalf("rejection should name the read-only chat session, got: %s", rec.Body.String())
+	}
+
+	// A different (non-ask-only) task on the same daemon checks out fine.
+	rec = httptest.NewRecorder()
+	body = strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-regular"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for regular task, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Registration is scoped to the task's lifetime.
+	d.askOnlyTasks.Delete("task-ask")
+	rec = httptest.NewRecorder()
+	body = strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-ask"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 after registration cleared, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

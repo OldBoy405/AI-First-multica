@@ -1839,6 +1839,11 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			resp.WorkspaceID = uuidToString(cs.WorkspaceID)
 			resp.ChatSessionID = uuidToString(cs.ID)
 			resp.ThreadName = cs.Title
+			// Project-bound sessions are the Private Ask pane: a personal
+			// read-only sandbox. The daemon enforces ask-only (no repo
+			// checkout); the global 1:1 chat (project_id NULL) stays
+			// unrestricted (CR-2026-008).
+			resp.AskOnly = cs.ProjectID.Valid
 			// An is_agent_intro session carries no user message: the agent opens
 			// the conversation by introducing itself. Flag it so the daemon builds
 			// a self-introduction prompt rather than a "reply to their message"

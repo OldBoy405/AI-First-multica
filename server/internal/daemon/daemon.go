@@ -198,6 +198,11 @@ type Daemon struct {
 	activeTasks   atomic.Int64       // number of tasks currently in handleTask; exposed via /health
 	ready         atomic.Bool        // false until preflight completes; gates /health status (starting -> running)
 
+	// askOnlyTasks tracks in-flight ask-only task IDs (project-bound Private
+	// Ask sessions, CR-2026-008) so repoCheckoutHandler can reject checkout
+	// requests from their agents. Entries live for the duration of handleTask.
+	askOnlyTasks sync.Map
+
 	// claimMu guards pauseClaims and claimsInFlight. It is held only for the
 	// microseconds it takes to make a decision; ClaimTask itself runs without
 	// the lock so a slow per-runtime claim cannot stall auto-update or any
@@ -2852,9 +2857,19 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		agentName = task.Agent.Name
 	}
 	if task.ChatSessionID != "" {
-		taskLog.Info("picked chat task", "chat_session", shortID(task.ChatSessionID), "agent", agentName, "provider", provider)
+		taskLog.Info("picked chat task", "chat_session", shortID(task.ChatSessionID), "agent", agentName, "provider", provider, "ask_only", task.AskOnly)
 	} else {
 		taskLog.Info("picked task", "issue", task.IssueID, "agent", agentName, "provider", provider)
+	}
+
+	// Ask-only tasks (project-bound Private Ask sessions, CR-2026-008) must
+	// not be able to materialize a repo worktree. The brief already omits the
+	// Repositories section for them; this registration backs that guidance
+	// with enforcement in repoCheckoutHandler, since the checkout URL could
+	// come from the user's message rather than the brief.
+	if task.AskOnly {
+		d.askOnlyTasks.Store(task.ID, struct{}{})
+		defer d.askOnlyTasks.Delete(task.ID)
 	}
 	taskLog.Debug("task context",
 		"workspace_id", task.WorkspaceID,
@@ -3542,6 +3557,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ProjectDescription:               task.ProjectDescription,
 		ProjectResources:                 convertProjectResourcesForEnv(task.ProjectResources),
 		ChatSessionID:                    task.ChatSessionID,
+		AskOnly:                          task.AskOnly,
 		AutopilotRunID:                   task.AutopilotRunID,
 		AutopilotID:                      task.AutopilotID,
 		AutopilotTitle:                   task.AutopilotTitle,

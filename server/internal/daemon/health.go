@@ -185,6 +185,15 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			return
 		}
 
+		// Ask-only tasks (project-bound Private Ask sessions, CR-2026-008)
+		// run in a read-only sandbox: no repo worktrees, regardless of where
+		// the URL came from. The brief already hides the Repositories
+		// section; this is the enforcement half.
+		if _, askOnly := d.askOnlyTasks.Load(strings.TrimSpace(req.TaskID)); askOnly {
+			http.Error(w, "read-only chat session: repo checkout is not available in Private Ask", http.StatusForbidden)
+			return
+		}
+
 		if err := d.ensureRepoReady(r.Context(), req.WorkspaceID, req.URL); err != nil {
 			statusCode := http.StatusInternalServerError
 			if errors.Is(err, ErrRepoNotConfigured) {
