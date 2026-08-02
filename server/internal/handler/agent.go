@@ -364,6 +364,12 @@ type AgentTaskResponse struct {
 	InitiatorID    string `json:"initiator_id,omitempty"`    // user UUID (member) or agent UUID
 	InitiatorName  string `json:"initiator_name,omitempty"`  // display name of the initiator
 	InitiatorEmail string `json:"initiator_email,omitempty"` // member email; empty for agent initiators
+	// OriginatorUserID is the top-of-chain human originator of this task
+	// (agent_task_queue.originator_user_id), surfaced so the UI can decide
+	// "did I start this?" — e.g. stop-button visibility on the running task
+	// card (CR-2026-007 DD-1). Empty (omitted) when no human is in the chain
+	// (autopilot, system-driven); read-only attribution, not a credential.
+	OriginatorUserID string `json:"originator_user_id,omitempty"`
 	Kind           string `json:"kind"`                      // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "direct" — used by the activity row to label tasks that have no linked issue
 	// AuthToken is the task-scoped `mat_` token the daemon must inject as
 	// MULTICA_TOKEN in the agent process environment. The server binds it to
@@ -480,9 +486,10 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		// Surface task source so the UI can distinguish issue-linked tasks
 		// from chat-spawned or autopilot-spawned ones; all three may arrive
 		// with issue_id = "" once a task has no linked issue.
-		ChatSessionID:  uuidToString(t.ChatSessionID),
-		AutopilotRunID: uuidToString(t.AutopilotRunID),
-		Kind:           computeTaskKind(t),
+		ChatSessionID:    uuidToString(t.ChatSessionID),
+		AutopilotRunID:   uuidToString(t.AutopilotRunID),
+		Kind:             computeTaskKind(t),
+		OriginatorUserID: uuidToString(t.OriginatorUserID),
 	}
 }
 

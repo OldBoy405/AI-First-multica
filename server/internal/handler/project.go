@@ -588,10 +588,70 @@ func (h *Handler) GetProjectQueueStatus(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to read queue status")
 		return
 	}
+	// Opt-in queue detail (CR-2026-007 DD-3): ?include=items appends the
+	// pending rows behind the depth number. The no-param response must stay
+	// byte-identical for existing consumers, so the items branch builds its
+	// own payload instead of extending the map below.
+	if r.URL.Query().Get("include") == "items" {
+		rows, err := h.Queries.ListProjectPendingTasks(r.Context(), project.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read queue items")
+			return
+		}
+		items := make([]QueueItemData, 0, len(rows))
+		for _, row := range rows {
+			item := QueueItemData{
+				TaskID:    uuidToString(row.ID),
+				Status:    row.Status,
+				Priority:  row.Priority,
+				CreatedAt: timestampToString(row.CreatedAt),
+				Summary:   row.TriggerSummary.String,
+			}
+			// Originator is null for autopilot/agent-sourced tasks (their
+			// originator_user_id is deliberately NULL); the UI shows a
+			// "system task" placeholder for those.
+			if row.OriginatorUserID.Valid {
+				item.Originator = &QueueItemOriginator{
+					ID:        uuidToString(row.OriginatorUserID),
+					Name:      row.OriginatorName.String,
+					AvatarURL: textToPtr(row.OriginatorAvatarUrl),
+				}
+			}
+			items = append(items, item)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"queue_depth": depth,
+			"queue_limit": limit,
+			"items":       items,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]int64{
 		"queue_depth": depth,
 		"queue_limit": limit,
 	})
+}
+
+// QueueItemData is one pending row in the project's shared Team Agent queue,
+// returned by GetProjectQueueStatus when ?include=items is set (CR-2026-007
+// DD-3). Summary carries the trigger_summary snapshot taken at enqueue time;
+// empty when the task had no trigger (quick-create, autopilot).
+type QueueItemData struct {
+	TaskID     string               `json:"task_id"`
+	Status     string               `json:"status"`
+	Priority   int32                `json:"priority"`
+	CreatedAt  string               `json:"created_at"`
+	Originator *QueueItemOriginator `json:"originator"`
+	Summary    string               `json:"summary"`
+}
+
+// QueueItemOriginator identifies the human who caused a queued task, for
+// display in the queue list. Nil on the wire (null) when no human is in the
+// chain.
+type QueueItemOriginator struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	AvatarURL *string `json:"avatar_url"`
 }
 
 func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
