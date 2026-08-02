@@ -20,7 +20,15 @@ export type InboxItemType =
   | "agent_completed"
   | "reaction_added"
   | "quick_create_done"
-  | "quick_create_failed";
+  | "quick_create_failed"
+  // CR-2026-010 presenter (single-writer control) transitions. Not added to
+  // notifTypeToGroup on the backend — permission notifications are always
+  // delivered, never muted.
+  | "presenter_requested"
+  | "presenter_approved"
+  | "presenter_rejected"
+  | "presenter_transferred"
+  | "presenter_revoked";
 
 /**
  * One workspace's unread inbox count in the cross-workspace summary

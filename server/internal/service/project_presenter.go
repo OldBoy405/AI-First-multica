@@ -2,15 +2,20 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // Presenter grant status values (project_presenter_grant.status). A grant
@@ -23,6 +28,19 @@ const (
 	PresenterStatusReleased    = "released"
 	PresenterStatusRevoked     = "revoked"
 	PresenterStatusTransferred = "transferred"
+)
+
+// Presenter activity actions (CR-2026-010 SDD §4.5/DD-8). Stamped on the
+// project's hidden chat container issue's activity_log so the message
+// stream can replay them, and used verbatim as the inbox notification type
+// for every action except "released" (no directed recipient).
+const (
+	PresenterActionRequested   = "presenter_requested"
+	PresenterActionApproved    = "presenter_approved"
+	PresenterActionRejected    = "presenter_rejected"
+	PresenterActionTransferred = "presenter_transferred"
+	PresenterActionRevoked     = "presenter_revoked"
+	PresenterActionReleased    = "presenter_released"
 )
 
 // Presenter transition error codes (CR-2026-010 SDD §4.2). Handlers map
@@ -118,7 +136,23 @@ func (s *TaskService) RequestPresenter(ctx context.Context, project db.Project, 
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	owners, lerr := s.Queries.ListMembers(ctx, project.WorkspaceID)
+	if lerr != nil {
+		slog.Warn("presenter request: failed to list members for owner notification", "project_id", util.UUIDToString(project.ID), "error", lerr)
+	}
+	var recipients []pgtype.UUID
+	for _, m := range owners {
+		if m.Role == "owner" {
+			recipients = append(recipients, m.UserID)
+		}
+	}
+	s.recordPresenterActivity(ctx, project, callerID, PresenterActionRequested,
+		map[string]string{"to_user_id": util.UUIDToString(callerID), "by_user_id": util.UUIDToString(callerID)},
+		recipients)
+	return grant, nil
 }
 
 // ApprovePresenter grants targetUserID's pending request, making them the
@@ -154,7 +188,13 @@ func (s *TaskService) ApprovePresenter(ctx context.Context, project db.Project, 
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	s.recordPresenterActivity(ctx, project, approverID, PresenterActionApproved,
+		map[string]string{"to_user_id": util.UUIDToString(targetUserID), "by_user_id": util.UUIDToString(approverID)},
+		[]pgtype.UUID{targetUserID})
+	return grant, nil
 }
 
 // RejectPresenter denies targetUserID's pending request, leaving the
@@ -180,7 +220,13 @@ func (s *TaskService) RejectPresenter(ctx context.Context, project db.Project, a
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	s.recordPresenterActivity(ctx, project, approverID, PresenterActionRejected,
+		map[string]string{"to_user_id": util.UUIDToString(targetUserID), "by_user_id": util.UUIDToString(approverID)},
+		[]pgtype.UUID{targetUserID})
+	return grant, nil
 }
 
 // TransferPresenter hands control from the current presenter (callerID)
@@ -220,7 +266,13 @@ func (s *TaskService) TransferPresenter(ctx context.Context, project db.Project,
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	s.recordPresenterActivity(ctx, project, callerID, PresenterActionTransferred,
+		map[string]string{"from_user_id": util.UUIDToString(callerID), "to_user_id": util.UUIDToString(targetUserID), "by_user_id": util.UUIDToString(callerID)},
+		[]pgtype.UUID{targetUserID})
+	return grant, nil
 }
 
 // RevokePresenter forcibly ends the active presenter's control (Owner only).
@@ -245,7 +297,13 @@ func (s *TaskService) RevokePresenter(ctx context.Context, project db.Project, a
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	s.recordPresenterActivity(ctx, project, approverID, PresenterActionRevoked,
+		map[string]string{"from_user_id": util.UUIDToString(grant.UserID), "by_user_id": util.UUIDToString(approverID)},
+		[]pgtype.UUID{grant.UserID})
+	return grant, nil
 }
 
 // ReleasePresenter lets the current presenter voluntarily give up control.
@@ -274,7 +332,15 @@ func (s *TaskService) ReleasePresenter(ctx context.Context, project db.Project, 
 		grant = g
 		return nil
 	})
-	return grant, err
+	if err != nil {
+		return grant, err
+	}
+	// No notifyDirect recipient (SDD §4.5): releasing has no directed target,
+	// every project member sees it from the activity card alone.
+	s.recordPresenterActivity(ctx, project, callerID, PresenterActionReleased,
+		map[string]string{"from_user_id": util.UUIDToString(callerID), "by_user_id": util.UUIDToString(callerID)},
+		nil)
+	return grant, nil
 }
 
 // GetPresenterState is the read side for GET /presenter (TSUG-003): the
@@ -319,4 +385,94 @@ func (s *TaskService) GetPresenterState(ctx context.Context, project db.Project,
 	}
 
 	return state, nil
+}
+
+// recordPresenterActivity is the shared notification tail for all six
+// transitions (SDD §4.5/DD-8/DD-9), called after the transition's own
+// transaction has committed: the grant row is the transition's authoritative
+// state, so a notification failure here must never roll it back — this only
+// logs and returns on any sub-step failure (CreateComment's existing
+// "notification is best-effort" precedent).
+//
+// It writes one activity_log row on the project's hidden chat container issue
+// (so the message stream can replay it) and publishes two bus events:
+// activity:created (for the message-stream card, carrying a "presenter_notify"
+// list of recipient user ids in its payload — inbox dispatch happens in
+// cmd/server's registerPresenterNotificationListeners, since notifyDirect
+// lives in package main and this service package cannot call it directly)
+// and project:presenter_changed (for the chat header, SDD §5.2 — published
+// unconditionally, even for request/reject which don't change who is active,
+// so the frontend's pending-request badge also refreshes).
+//
+// details is the activity/inbox details payload; project_id is injected into
+// it here (TSUG-002: inbox items for these types must route to the project's
+// Chat tab, not the hidden container issue, so the frontend needs project_id
+// in details regardless of action). notifyRecipients is empty for "released"
+// (SDD §4.5: no directed recipient, the activity card is enough).
+func (s *TaskService) recordPresenterActivity(ctx context.Context, project db.Project, actorID pgtype.UUID, action string, details map[string]string, notifyRecipients []pgtype.UUID) {
+	if details == nil {
+		details = map[string]string{}
+	}
+	details["project_id"] = util.UUIDToString(project.ID)
+	detailsJSON, err := json.Marshal(details)
+	if err != nil {
+		slog.Warn("presenter activity: failed to marshal details", "action", action, "error", err)
+		detailsJSON = []byte("{}")
+	}
+
+	issue, err := s.Queries.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{
+		ProjectID: project.ID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		slog.Warn("presenter activity skipped: project chat issue not found",
+			"project_id", util.UUIDToString(project.ID), "action", action, "error", err)
+	} else if activity, err := s.Queries.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: project.WorkspaceID,
+		IssueID:     issue.ID,
+		ActorType:   pgtype.Text{String: "member", Valid: true},
+		ActorID:     actorID,
+		Action:      action,
+		Details:     detailsJSON,
+	}); err != nil {
+		slog.Warn("presenter activity record failed", "action", action, "error", err)
+	} else {
+		notify := make([]string, len(notifyRecipients))
+		for i, r := range notifyRecipients {
+			notify[i] = util.UUIDToString(r)
+		}
+		s.Bus.Publish(events.Event{
+			Type:        protocol.EventActivityCreated,
+			WorkspaceID: util.UUIDToString(project.WorkspaceID),
+			ActorType:   "member",
+			ActorID:     util.UUIDToString(actorID),
+			Payload: map[string]any{
+				"issue_id": util.UUIDToString(issue.ID),
+				"entry": map[string]any{
+					"type":       "activity",
+					"id":         util.UUIDToString(activity.ID),
+					"actor_type": "member",
+					"actor_id":   util.UUIDToString(actorID),
+					"action":     activity.Action,
+					"details":    json.RawMessage(detailsJSON),
+					"created_at": activity.CreatedAt.Time.Format(time.RFC3339),
+				},
+				"presenter_notify": notify,
+			},
+		})
+	}
+
+	var presenterUserID any
+	if active, aerr := s.Queries.GetActivePresenterGrant(ctx, project.ID); aerr == nil {
+		presenterUserID = util.UUIDToString(active.UserID)
+	}
+	s.Bus.Publish(events.Event{
+		Type:        protocol.EventProjectPresenterChanged,
+		WorkspaceID: util.UUIDToString(project.WorkspaceID),
+		ActorType:   "member",
+		ActorID:     util.UUIDToString(actorID),
+		Payload: map[string]any{
+			"project_id":        util.UUIDToString(project.ID),
+			"presenter_user_id": presenterUserID,
+		},
+	})
 }
