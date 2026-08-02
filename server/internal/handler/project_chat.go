@@ -80,6 +80,89 @@ func projectTeamAgentID(settings []byte) string {
 	return ""
 }
 
+// GetProjectPrivateChat resolves (lazily creating on first use) the caller's
+// Private Ask session for this project (CR-2026-008): the latest active
+// chat_session bound to (project_id, creator_id). GET /api/projects/{id}/private-chat.
+//
+// The session is a personal read-only sandbox: it is created without a
+// work_dir, targets the project's bound Team Agent, and is only ever visible
+// to its creator (all /api/chat/sessions/{id}/* endpoints enforce
+// creator-only access; the realtime layer delivers its events per-user).
+//
+// Errors: 409 team_agent_not_configured when the project has no Team Agent
+// bound (the frontend renders the same setup CTA as the Team Agent pane).
+func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) {
+	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: projectUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+		ProjectID: project.ID, CreatorID: callerUUID,
+	})
+	if err == nil {
+		writeJSON(w, http.StatusOK, chatSessionToResponse(session))
+		return
+	}
+	if !isNotFound(err) {
+		writeError(w, http.StatusInternalServerError, "failed to resolve private chat session")
+		return
+	}
+
+	teamAgentID := projectTeamAgentID(project.Settings)
+	if teamAgentID == "" {
+		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+		return
+	}
+	agentUUID, err := util.ParseUUID(teamAgentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
+		return
+	}
+
+	session, err = h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
+		WorkspaceID: project.WorkspaceID,
+		AgentID:     agentUUID,
+		CreatorID:   callerUUID,
+		Title:       "Private Ask",
+		ProjectID:   project.ID,
+	})
+	if err != nil {
+		// Concurrent get-or-create (two tabs opening the pane at once): the
+		// partial unique index collapses the race; the loser reselects.
+		if isUniqueViolation(err) {
+			session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+				ProjectID: project.ID, CreatorID: callerUUID,
+			})
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create private chat session")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, chatSessionToResponse(session))
+}
+
 // SendProjectChatMessageRequest is the body of POST /api/projects/{id}/chat/messages.
 type SendProjectChatMessageRequest struct {
 	Content string `json:"content"`
