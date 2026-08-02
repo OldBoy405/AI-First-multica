@@ -300,7 +300,7 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedSessionID := uuidToString(updated.ID)
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
@@ -347,7 +347,7 @@ func (h *Handler) SetChatSessionPinned(w http.ResponseWriter, r *http.Request) {
 
 	resolvedSessionID := uuidToString(updated.ID)
 	pinned := updated.PinnedAt.Valid
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		Pinned:        &pinned,
@@ -396,7 +396,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 
 	resolvedSessionID := uuidToString(updated.ID)
 	status := updated.Status
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		Status:        &status,
@@ -486,7 +486,7 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	h.TaskService.BroadcastCancelledTasks(r.Context(), cancelled)
 
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionDeletedPayload{
+	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionDeletedPayload{
 		ChatSessionID: resolvedSessionID,
 	})
 
@@ -677,7 +677,7 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast the user message.
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatMessage, workspaceID, "member", userID, resolvedSessionID, protocol.ChatMessagePayload{
+	h.publishChat(protocol.EventChatMessage, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatMessagePayload{
 		ChatSessionID: resolvedSessionID,
 		MessageID:     uuidToString(msg.ID),
 		Role:          "user",
@@ -877,7 +877,7 @@ func (h *Handler) MarkChatSessionRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatSessionRead, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionReadPayload{
+	h.publishChat(protocol.EventChatSessionRead, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionReadPayload{
 		ChatSessionID: resolvedSessionID,
 	})
 

@@ -12,6 +12,8 @@ export const projectKeys = {
     [...projectKeys.all(wsId), "queue-status"] as const,
   chat: (wsId: string, id: string) =>
     [...projectKeys.all(wsId), "chat", id] as const,
+  privateChat: (wsId: string, id: string) =>
+    [...projectKeys.all(wsId), "private-chat", id] as const,
 };
 
 export function projectListOptions(wsId: string) {
@@ -44,5 +46,17 @@ export function projectChatOptions(wsId: string, id: string) {
   return queryOptions({
     queryKey: projectKeys.chat(wsId, id),
     queryFn: () => api.getProjectChat(id),
+  });
+}
+
+// The caller's Private Ask session for a project (CR-2026-008): get-or-create,
+// so the queryFn is only enabled once the panel knows a Team Agent is bound
+// (callers pass `enabled`). staleTime Infinity — the session id is stable for
+// the pane's lifetime; message/pending caches are what stay live.
+export function projectPrivateChatOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: projectKeys.privateChat(wsId, id),
+    queryFn: () => api.getProjectPrivateChat(id),
+    staleTime: Infinity,
   });
 }

@@ -222,3 +222,25 @@ func TestBackgroundTaskSafetySlimHardPins(t *testing.T) {
 		}
 	}
 }
+
+// TestAskOnlyChatBriefOmitsRepositories pins the guidance half of the
+// Private Ask read-only sandbox (CR-2026-008): an ask-only chat task's brief
+// must not advertise checkout-able repos (the daemon rejects the checkout
+// call anyway), while a regular chat task keeps the section.
+func TestAskOnlyChatBriefOmitsRepositories(t *testing.T) {
+	repos := []RepoContextForEnv{{URL: "https://example.com/x.git", Description: "x"}}
+
+	askOnly := buildMetaSkillContent("claude", TaskContextForEnv{
+		ChatSessionID: "c-1", AskOnly: true, AgentName: "Eve", AgentID: "eve-1", Repos: repos,
+	})
+	if strings.Contains(askOnly, "\n## Repositories\n") {
+		t.Errorf("ask-only chat brief must omit the Repositories section\n---\n%s", askOnly)
+	}
+
+	regular := buildMetaSkillContent("claude", TaskContextForEnv{
+		ChatSessionID: "c-1", AgentName: "Eve", AgentID: "eve-1", Repos: repos,
+	})
+	if !strings.Contains(regular, "\n## Repositories\n") {
+		t.Errorf("regular chat brief must keep the Repositories section\n---\n%s", regular)
+	}
+}

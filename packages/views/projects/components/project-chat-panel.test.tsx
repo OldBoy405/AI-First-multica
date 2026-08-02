@@ -30,6 +30,12 @@ vi.mock("./project-team-agent-chat", () => ({
   ),
 }));
 
+// Same reasoning for the Private Ask pane (CR-2026-008): its session
+// get-or-create, stream and composer are covered by project-private-ask.test.tsx.
+vi.mock("./project-private-ask", () => ({
+  ProjectPrivateAsk: () => <div data-testid="project-private-ask" />,
+}));
+
 import { ProjectChatPanel } from "./project-chat-panel";
 
 function renderPanel(canConfigure: boolean) {

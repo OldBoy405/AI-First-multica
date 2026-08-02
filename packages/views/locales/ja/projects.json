@@ -189,6 +189,15 @@
       "model_label": "モデル",
       "runtime_guide": "先に設定でローカル Agent を起動してください",
       "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
+    },
+    "private": {
+      "needs_team_agent": "Private Ask はプロジェクトの Team Agent を使用します。先に Team Agent タブで設定してください。",
+      "load_failed": "プライベートセッションの読み込みに失敗しました。再試行してください。",
+      "empty_hint": "このプロジェクトについて何でも質問できます。この会話はあなただけに表示され、エージェントはプロジェクトのファイルを変更できません。",
+      "composer_placeholder": "プライベートに質問…",
+      "stop": "停止",
+      "stop_failed": "停止に失敗しました。再試行してください。",
+      "model_follows_team_agent": "モデルは Team Agent の設定に従います"
     }
   }
 }

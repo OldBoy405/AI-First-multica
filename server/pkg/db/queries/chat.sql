@@ -1,7 +1,19 @@
 -- name: CreateChatSession :one
-INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro)
-VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5)
+-- project_id is NULL for the global 1:1 chat and non-NULL for a project's
+-- Private Ask session (CR-2026-008). Existing callers pass the zero value.
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id)
+VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, $6)
 RETURNING *;
+
+-- name: GetProjectChatSessionForCreator :one
+-- Private Ask get-or-create lookup: the latest active session for a
+-- (project, creator) pair. The partial unique index
+-- chat_session_project_creator_active_unique guarantees at most one row
+-- matches; ORDER BY is a belt-and-braces tiebreak, not a correctness need.
+SELECT * FROM chat_session
+WHERE project_id = $1 AND creator_id = $2 AND status = 'active'
+ORDER BY created_at DESC
+LIMIT 1;
 
 -- name: GetChatSession :one
 SELECT * FROM chat_session
@@ -33,6 +45,9 @@ LEFT JOIN LATERAL (
    LIMIT 1
 ) lm ON true
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2 AND cs.status = 'active'
+  -- Project-bound Private Ask sessions live in the project chat pane, never
+  -- in the global chat list (CR-2026-008).
+  AND cs.project_id IS NULL
 ORDER BY (cs.pinned_at IS NOT NULL) DESC, cs.pinned_at DESC, COALESCE(lm.created_at, cs.updated_at) DESC;
 
 -- name: ListAllChatSessionsByCreator :many
@@ -54,6 +69,8 @@ LEFT JOIN LATERAL (
    LIMIT 1
 ) lm ON true
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2
+  -- Same exclusion as ListChatSessionsByCreator (CR-2026-008).
+  AND cs.project_id IS NULL
 ORDER BY (cs.pinned_at IS NOT NULL) DESC, cs.pinned_at DESC, COALESCE(lm.created_at, cs.updated_at) DESC;
 
 -- name: UpdateChatSessionTitle :one
@@ -237,6 +254,10 @@ WHERE atq.chat_session_id IS NOT NULL
   AND atq.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
   AND cs.workspace_id = $1
   AND cs.creator_id = $2
+  -- Private Ask tasks surface in the project chat pane, not the global FAB
+  -- (CR-2026-008): a FAB hit here would deep-link to a session the global
+  -- chat list cannot show.
+  AND cs.project_id IS NULL
 ORDER BY atq.created_at DESC;
 
 -- name: HasPendingChatTasksByCreator :one
@@ -258,6 +279,8 @@ SELECT EXISTS (
     AND cs.workspace_id = sqlc.arg(workspace_id)
     AND cs.creator_id = sqlc.arg(creator_id)
     AND cs.agent_id = ANY(sqlc.arg(agent_ids)::uuid[])
+    -- Same exclusion as ListPendingChatTasksByCreator (CR-2026-008).
+    AND cs.project_id IS NULL
 ) AS has_pending;
 
 -- name: MarkChatSessionRead :exec
