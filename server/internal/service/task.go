@@ -743,9 +743,12 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:              issue.AssigneeID,
-		RuntimeID:            agent.RuntimeID,
-		IssueID:              issue.ID,
+		AgentID:   issue.AssigneeID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
+		// serialize this task against the project's shared worktree.
+		ProjectID:            issue.ProjectID,
 		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
@@ -845,9 +848,12 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:              agentID,
-		RuntimeID:            agent.RuntimeID,
-		IssueID:              issue.ID,
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
+		// serialize this task against the project's shared worktree.
+		ProjectID:            issue.ProjectID,
 		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
@@ -894,9 +900,12 @@ func (s *TaskService) EnqueueDeferredAssigneeFallback(ctx context.Context, issue
 
 	isLeader := squadID.Valid
 	task, err := s.Queries.CreateDeferredAgentTask(ctx, db.CreateDeferredAgentTaskParams{
-		AgentID:             agentID,
-		RuntimeID:           agent.RuntimeID,
-		IssueID:             issue.ID,
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so the promoted task can
+		// serialize against the project's shared worktree.
+		ProjectID:           issue.ProjectID,
 		Priority:            priorityToInt(issue.Priority),
 		TriggerCommentID:    triggerCommentID,
 		TriggerSummary:      s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
@@ -1383,6 +1392,54 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 		}
 
 		claimedTask := task
+
+		// AIFIRST: CR-2026-010 project-wide single-writer recheck.
+		// ClaimAgentTask's NOT EXISTS check runs under READ COMMITTED, so two
+		// agents claiming for the same project can both pass it before
+		// either commits (see agent.sql). Taking the advisory lock here,
+		// inside the same transaction as the UPDATE above, closes the race:
+		// a concurrent claimant for this project either already committed
+		// (and is visible to the recheck below) or is blocked on this same
+		// lock (and cannot commit until we do). Scoped to project-linked
+		// tasks only; the three pre-existing serialization branches are
+		// unaffected and never reach this block.
+		if claimedTask.ProjectID.Valid {
+			lockKey := strings.Join([]string{"claim-project", util.UUIDToString(claimedTask.ProjectID)}, "|")
+			if lockErr := qtx.LockIssueDuplicateKey(ctx, lockKey); lockErr != nil {
+				outcome = "error_claim_project_lock"
+				return fmt.Errorf("lock claim project key: %w", lockErr)
+			}
+			conflicts, cErr := qtx.CountActiveProjectTasksExcluding(ctx, db.CountActiveProjectTasksExcludingParams{
+				ProjectID: claimedTask.ProjectID,
+				ID:        claimedTask.ID,
+			})
+			if cErr != nil {
+				outcome = "error_claim_project_recheck"
+				return fmt.Errorf("recheck project claim: %w", cErr)
+			}
+			if conflicts > 0 {
+				// Lost the race: another agent's claim for this project
+				// committed first. Requeue; the daemon polls again next
+				// cycle and may pick up a different (or the same, now
+				// uncontested) task.
+				if _, rErr := qtx.RequeueAgentTaskAfterClaimFailure(ctx, db.RequeueAgentTaskAfterClaimFailureParams{
+					TaskID:       claimedTask.ID,
+					RuntimeID:    claimedTask.RuntimeID,
+					DispatchedAt: claimedTask.DispatchedAt,
+				}); rErr != nil {
+					outcome = "error_claim_project_requeue"
+					return fmt.Errorf("requeue after project claim conflict: %w", rErr)
+				}
+				slog.Info("task claim: lost project single-writer race, requeued",
+					"task_id", util.UUIDToString(claimedTask.ID),
+					"project_id", util.UUIDToString(claimedTask.ProjectID),
+					"agent_id", util.UUIDToString(agentID),
+				)
+				outcome = "project_claim_conflict"
+				return nil
+			}
+		}
+
 		claimed = &claimedTask
 		return nil
 	})

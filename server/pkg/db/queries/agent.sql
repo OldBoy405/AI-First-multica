@@ -167,10 +167,14 @@ ORDER BY created_at DESC;
 -- issues with no linked PR. Issue-linked tasks never hit quick-create context
 -- parsing (parseQuickCreateContext short-circuits on IssueID.Valid), so this
 -- key rides harmlessly alongside.
+--
+-- AIFIRST: CR-2026-010 stamps project_id (nullable, from the caller's
+-- issue.ProjectID) so ClaimAgentTask can serialize on it without joining
+-- issue on every claim attempt. NULL for issues outside any project.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
     coalesced_comment_ids, trigger_summary, force_fresh_session, is_leader_task, handoff_note,
-    squad_id, context, originator_user_id, runtime_mcp_overlay, runtime_connected_apps
+    squad_id, context, originator_user_id, runtime_mcp_overlay, runtime_connected_apps, project_id
 )
 VALUES (
     $1, $2, $3, 'queued', $4, sqlc.narg(trigger_comment_id),
@@ -187,7 +191,8 @@ VALUES (
     END,
     sqlc.narg(originator_user_id),
     sqlc.narg(runtime_mcp_overlay),
-    sqlc.narg(runtime_connected_apps)
+    sqlc.narg(runtime_connected_apps),
+    sqlc.narg(project_id)
 )
 RETURNING *;
 
@@ -211,9 +216,13 @@ RETURNING *;
 -- Deferred tasks are inert until PromoteDueDeferredTasksForRuntime flips them
 -- to queued. Used for comment-routing escalation: a thread-owner primary task
 -- gets a delayed assignee fallback without waking both agents at t=0.
+--
+-- AIFIRST: CR-2026-010 stamps project_id like CreateAgentTask, so a promoted
+-- fallback task is still subject to the project-wide single-writer claim
+-- branch instead of silently falling back to per-(agent,issue) serialization.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
-    trigger_summary, is_leader_task, squad_id, escalation_for_task_id, fire_at
+    trigger_summary, is_leader_task, squad_id, escalation_for_task_id, fire_at, project_id
 )
 VALUES (
     @agent_id, @runtime_id, @issue_id, 'deferred', @priority,
@@ -222,7 +231,8 @@ VALUES (
     COALESCE(sqlc.narg('is_leader_task')::boolean, FALSE),
     sqlc.narg(squad_id),
     @escalation_for_task_id,
-    @fire_at
+    @fire_at,
+    sqlc.narg(project_id)
 )
 RETURNING *;
 
@@ -254,12 +264,15 @@ WHERE id = $1 AND issue_id IS NULL;
 -- run has not changed. The Composio overlay follows the agent's invocation
 -- permission and uses the agent owner's connection (MUL-3963); originator is
 -- carried for A2A/audit, not as an originator == agent.owner_id gate.
+-- AIFIRST: CR-2026-010 inherits project_id from the parent row so a retried
+-- task keeps the project-wide single-writer claim branch instead of losing
+-- serialization on retry.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, trigger_comment_id, coalesced_comment_ids, trigger_summary, context,
     session_id, work_dir,
     attempt, max_attempts, parent_task_id, force_fresh_session, is_leader_task,
-    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps
+    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps, project_id
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -272,7 +285,8 @@ SELECT
     p.squad_id,
     p.originator_user_id,
     sqlc.narg(runtime_mcp_overlay),
-    sqlc.narg(runtime_connected_apps)
+    sqlc.narg(runtime_connected_apps),
+    p.project_id
 FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING *;
@@ -357,6 +371,17 @@ WHERE atq.id = $1 AND a.workspace_id = $2;
 -- "any other quick-create-shaped task" (all four FKs NULL) for the same agent —
 -- otherwise a user mashing the create button could fire concurrent quick-creates
 -- whose completion lookup would race over "most recent issue by this agent".
+--
+-- AIFIRST: CR-2026-010 adds one more branch for project-shared (Team Agent)
+-- tasks — presenter is a project-wide single-writer, so the project branch
+-- is deliberately NOT scoped to `active.agent_id = atq.agent_id` like the
+-- other three branches; two different agents must not run concurrent tasks
+-- against the same project's shared worktree. The three pre-existing
+-- branches (issue without a project, chat_session, quick-create) are
+-- unchanged. This row-level check has a known race window across agents
+-- (two agents' claims can both pass NOT EXISTS before either commits); the
+-- service layer closes it with an advisory-lock recheck after this UPDATE
+-- (see ClaimTask in internal/service/task.go).
 UPDATE agent_task_queue
 SET status = 'dispatched',
     dispatched_at = now(),
@@ -366,15 +391,22 @@ WHERE id = (
     WHERE atq.agent_id = $1 AND atq.status = 'queued'
       AND NOT EXISTS (
           SELECT 1 FROM agent_task_queue active
-          WHERE active.agent_id = atq.agent_id
-            AND active.status IN ('dispatched', 'running', 'waiting_local_directory')
+          WHERE active.status IN ('dispatched', 'running', 'waiting_local_directory')
             AND (
-              (atq.issue_id IS NOT NULL AND active.issue_id = atq.issue_id)
-              OR (atq.chat_session_id IS NOT NULL AND active.chat_session_id = atq.chat_session_id)
+              (atq.project_id IS NOT NULL AND active.project_id = atq.project_id)
+              OR (
+                atq.project_id IS NULL AND atq.issue_id IS NOT NULL
+                AND active.agent_id = atq.agent_id AND active.issue_id = atq.issue_id
+              )
+              OR (
+                atq.chat_session_id IS NOT NULL
+                AND active.agent_id = atq.agent_id AND active.chat_session_id = atq.chat_session_id
+              )
               OR (
                 atq.issue_id IS NULL
                 AND atq.chat_session_id IS NULL
                 AND atq.autopilot_run_id IS NULL
+                AND active.agent_id = atq.agent_id
                 AND active.issue_id IS NULL
                 AND active.chat_session_id IS NULL
                 AND active.autopilot_run_id IS NULL
@@ -1024,3 +1056,19 @@ SELECT count(*) FROM agent_task_queue atq
 JOIN issue i ON i.id = atq.issue_id
 WHERE i.project_id = $1
   AND atq.status IN ('queued', 'dispatched');
+
+-- name: CountActiveProjectTasksExcluding :one
+-- CR-2026-010: post-claim recheck for the project-wide single-writer
+-- guarantee. ClaimAgentTask's NOT EXISTS check runs under READ COMMITTED, so
+-- two agents claiming for the same project can both pass it before either
+-- commits. ClaimTask (internal/service/task.go) takes an advisory xact lock
+-- keyed on project_id before running this recheck: any other claimer for the
+-- same project either already committed (visible here) or is blocked behind
+-- the same lock (so it cannot race past this point). A nonzero count means
+-- this claim lost the race and must be requeued via
+-- RequeueAgentTaskAfterClaimFailure. Uses the project_id column directly
+-- (idx_atq_project_active, migration 162) rather than joining issue.
+SELECT count(*) FROM agent_task_queue
+WHERE project_id = $1
+  AND status IN ('dispatched', 'running', 'waiting_local_directory')
+  AND id != $2;
