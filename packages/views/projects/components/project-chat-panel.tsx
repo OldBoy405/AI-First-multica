@@ -2,9 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Lock, MessagesSquare, X } from "lucide-react";
+import { Bot, Lock, MessagesSquare, Users, X } from "lucide-react";
 import { toast } from "sonner";
-import { projectChatOptions } from "@multica/core/projects/queries";
+import { projectChatOptions, projectPresenterOptions } from "@multica/core/projects/queries";
 import {
   useProjectChatStore,
   useSetProjectTeamAgent,
@@ -12,6 +12,7 @@ import {
   type ProjectChatMode,
 } from "@multica/core/projects";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useActorName } from "@multica/core/workspace/hooks";
 import { agentListOptions } from "@multica/core/workspace/queries";
 import {
   Tabs,
@@ -61,6 +62,7 @@ export function ProjectChatPanel({
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
+  const wsId = useWorkspaceId();
   const activeMode =
     useProjectChatStore((s) => s.activeMode[projectId]) ?? "team_agent";
   const setActiveMode = useProjectChatStore((s) => s.setActiveMode);
@@ -90,6 +92,9 @@ export function ProjectChatPanel({
             </Tooltip>
           );
         })}
+        {activeMode === "team_agent" && (
+          <PresenterHeader wsId={wsId} projectId={projectId} />
+        )}
       </TabsList>
 
       {MODES.map((mode) => (
@@ -102,6 +107,49 @@ export function ProjectChatPanel({
         </TabsContent>
       ))}
     </Tabs>
+  );
+}
+
+// Presenter (single-writer control) display for the Team Agent tab
+// (CR-2026-010 SDD §5.2). Shows who currently holds control — or the
+// Owner/Admin default when no presenter is active — plus a trigger button
+// for the control panel (Sheet content is TASK-06's deliverable; this task
+// only places the trigger, tracking open state locally since the panel body
+// doesn't exist yet).
+function PresenterHeader({ wsId, projectId }: { wsId: string; projectId: string }) {
+  const { t } = useT("projects");
+  const { getActorName } = useActorName();
+  const { data } = useQuery(projectPresenterOptions(wsId, projectId));
+  const [, setPanelOpen] = useState(false);
+  const presenter = data?.presenter ?? null;
+
+  return (
+    <div className="ml-auto flex items-center gap-1.5 pr-1 text-xs text-muted-foreground">
+      <span className="truncate">
+        {presenter
+          ? t(($) => $.chat.presenter.current, {
+              name: getActorName("member", presenter.user_id),
+            })
+          : t(($) => $.chat.presenter.default)}
+      </span>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              onClick={() => setPanelOpen(true)}
+            >
+              <Users className="h-3.5 w-3.5" />
+            </Button>
+          }
+        />
+        <TooltipContent side="bottom">
+          {t(($) => $.chat.presenter.open_panel)}
+        </TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 

@@ -4,6 +4,7 @@ export {
   projectDetailOptions,
   projectChatOptions,
   projectQueueStatusOptions,
+  projectPresenterOptions,
 } from "./queries";
 export { useProjectChatStore, projectChatDraftKey, type ProjectChatMode } from "./project-chat-store";
 export {
@@ -12,6 +13,12 @@ export {
   useDeleteProject,
   useSendProjectChatMessage,
   useSetProjectTeamAgent,
+  useRequestPresenter,
+  useApprovePresenter,
+  useRejectPresenter,
+  useTransferPresenter,
+  useRevokePresenter,
+  useReleasePresenter,
 } from "./mutations";
 export { useProjectDraftStore } from "./draft-store";
 export {

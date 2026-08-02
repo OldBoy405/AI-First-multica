@@ -191,6 +191,11 @@
       "model_label": "Model",
       "runtime_guide": "Start a local Agent in Settings first",
       "model_update_failed": "Failed to update the model, please try again"
+    },
+    "presenter": {
+      "current": "Presenter: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "Presenter controls"
     }
   }
 }

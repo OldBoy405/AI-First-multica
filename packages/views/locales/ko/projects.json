@@ -189,6 +189,11 @@
       "model_label": "모델",
       "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
       "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
+    },
+    "presenter": {
+      "current": "현재 발표자: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "컨트롤 패널"
     }
   }
 }

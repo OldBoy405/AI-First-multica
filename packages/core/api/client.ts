@@ -172,6 +172,12 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
+  EMPTY_PROJECT_PRESENTER_STATE,
+  ProjectPresenterStateSchema,
+  type ProjectPresenterState,
+  EMPTY_PROJECT_PRESENTER_GRANT,
+  ProjectPresenterGrantSchema,
+  type ProjectPresenterGrant,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1992,6 +1998,58 @@ export class ApiClient {
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
     });
+  }
+
+  // Presenter (single-writer control) grant state for a project's Team Agent
+  // chat (CR-2026-010).
+  async getProjectPresenter(id: string): Promise<ProjectPresenterState> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter`);
+    return parseWithFallback(raw, ProjectPresenterStateSchema, EMPTY_PROJECT_PRESENTER_STATE, {
+      endpoint: "GET /api/projects/:id/presenter",
+    });
+  }
+
+  private async parsePresenterGrant(raw: unknown, endpoint: string): Promise<ProjectPresenterGrant> {
+    return parseWithFallback(raw, ProjectPresenterGrantSchema, EMPTY_PROJECT_PRESENTER_GRANT, { endpoint });
+  }
+
+  async requestPresenter(id: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/request`, { method: "POST" });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/request");
+  }
+
+  async approvePresenter(id: string, userId: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/approve`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/approve");
+  }
+
+  async rejectPresenter(id: string, userId: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/reject`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/reject");
+  }
+
+  async transferPresenter(id: string, userId: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/transfer`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/transfer");
+  }
+
+  async revokePresenter(id: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/revoke`, { method: "POST" });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/revoke");
+  }
+
+  async releasePresenter(id: string): Promise<ProjectPresenterGrant> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/presenter/release`, { method: "POST" });
+    return this.parsePresenterGrant(raw, "POST /api/projects/:id/presenter/release");
   }
 
   async createProject(data: CreateProjectRequest): Promise<Project> {

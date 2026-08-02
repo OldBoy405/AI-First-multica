@@ -10,15 +10,21 @@ import enProjects from "../../locales/en/projects.json";
 const TEST_RESOURCES = { en: { common: enCommon, projects: enProjects } };
 
 const mockGetProjectChat = vi.hoisted(() => vi.fn());
+const mockGetProjectPresenter = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
   api: {
     getProjectChat: (...args: unknown[]) => mockGetProjectChat(...args),
+    getProjectPresenter: (...args: unknown[]) => mockGetProjectPresenter(...args),
   },
 }));
 
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
+}));
+
+vi.mock("@multica/core/workspace/hooks", () => ({
+  useActorName: () => ({ getActorName: () => "Presenting Member" }),
 }));
 
 // The panel only gates on config state; the Team Agent stream + composer are
@@ -46,6 +52,8 @@ function renderPanel(canConfigure: boolean) {
 describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
   beforeEach(() => {
     mockGetProjectChat.mockReset();
+    mockGetProjectPresenter.mockReset();
+    mockGetProjectPresenter.mockResolvedValue({ presenter: null, pending_requests: [], my_request: null });
     useProjectChatStore.setState({ drafts: {}, activeMode: {}, tutorialSeen: {} });
     localStorage.clear();
   });
@@ -89,5 +97,35 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
       expect(screen.getByTestId("project-team-agent-chat")).toBeTruthy(),
     );
     expect(screen.getByTestId("project-team-agent-chat").getAttribute("data-issue")).toBe("i1");
+  });
+
+  // CR-2026-010 TASK-05: presenter header on the Team Agent tab.
+  it("shows the Owner/Admin default when no presenter is active", async () => {
+    mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
+    mockGetProjectPresenter.mockResolvedValue({ presenter: null, pending_requests: [], my_request: null });
+    renderPanel(true);
+    await waitFor(() => expect(mockGetProjectPresenter).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("Owner/Admin")).toBeTruthy();
+  });
+
+  it("shows the current presenter's name when a presenter is active", async () => {
+    mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
+    mockGetProjectPresenter.mockResolvedValue({
+      presenter: { user_id: "u-1", status: "active", granted_by: "u-2", created_at: "2026-01-01T00:00:00Z" },
+      pending_requests: [],
+      my_request: null,
+    });
+    renderPanel(true);
+    expect(await screen.findByText("Presenter: Presenting Member")).toBeTruthy();
+  });
+
+  it("hides the presenter header on non-Team-Agent tabs", async () => {
+    mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
+    mockGetProjectPresenter.mockResolvedValue({ presenter: null, pending_requests: [], my_request: null });
+    renderPanel(true);
+    await screen.findByText("Owner/Admin");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Private Ask/ }));
+    expect(screen.queryByText("Owner/Admin")).toBeNull();
   });
 });

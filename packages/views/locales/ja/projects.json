@@ -189,6 +189,11 @@
       "model_label": "モデル",
       "runtime_guide": "先に設定でローカル Agent を起動してください",
       "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
+    },
+    "presenter": {
+      "current": "現在のプレゼンター: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "コントロールパネル"
     }
   }
 }
