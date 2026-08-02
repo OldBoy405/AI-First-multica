@@ -41,6 +41,7 @@ var knownEventKinds = map[string]bool{
 	"merge": true, "archive": true, "inbox": true,
 	"audit":    true, // TASK-10: activity_log rows, bypasses the cr ledger
 	"snapshot": true, // TASK-07: daemon-mode reconcile, bypasses the cr ledger
+	"review":   true, // CR-2026-011 TASK-03: review-verdict visibility (blocked/passed), not a status transition
 }
 
 // ledgerlessKinds carry no commit sha (the ledger's idempotency key) and may
@@ -215,6 +216,8 @@ func (s *SyncService) apply(ctx context.Context, workspaceID string, ev OutboxEv
 	switch ev.EventKind {
 	case "status", "archive":
 		return s.applyStatus(ctx, workspaceID, ev)
+	case "review":
+		return s.applyReview(ctx, workspaceID, ev)
 	case "checkpoint":
 		// Fills projected_commit; also the completion channel for --embedded
 		// status events that carried an empty commit_sha (source design §A.5 —

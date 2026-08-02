@@ -15,6 +15,7 @@ package governance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -235,4 +236,62 @@ func (s *SyncService) cancelActiveRuns(ctx context.Context, workspaceID, crID st
 		WHERE workspace_id = $1::uuid AND cr_id = $2 AND status IN ('running', 'waiting_approval')`,
 		workspaceID, crID)
 	return err
+}
+
+// reviewEventPayload mirrors the JSON built by the daemon's
+// buildReviewPayload (crevents.go, TASK-03).
+type reviewEventPayload struct {
+	Stage   string `json:"stage"`
+	Verdict string `json:"verdict"`
+	Attempt int    `json:"attempt"`
+}
+
+// applyReview projects a review-verdict event (TASK-03's fifth commit-scan
+// contract) onto the review skill node's pipeline_node_run row. Unlike
+// approval-node projection, each reviewLoop round gets its OWN row —
+// attempt is part of the table's uniqueness key (P0 §3.4) — so a blocked
+// round 1 followed by a passing round 2 leaves both rows queryable, matching
+// "reviewLoop attempt N/3" (D7 FR-5) needing the whole history, not just the
+// latest verdict.
+//
+// This does not touch cr.status or pipeline_run.status: a blocked review
+// does not advance (or regress) the CR — the status machine's own
+// review-requirement:block -> write-requirement-prd transition is a
+// separate "[cr] status" event on a different commit. Publishing cr:updated
+// here (SDD DD-6) is purely a UI refresh signal for the blocked-list card.
+func (s *SyncService) applyReview(ctx context.Context, workspaceID string, ev OutboxEvent) error {
+	var p reviewEventPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		return err
+	}
+	node, ok := ReviewGateNodes[p.Stage]
+	if !ok {
+		return nil // dev-start has no review node; unknown stage: nothing to project
+	}
+	runID, err := s.findOrCreateRun(ctx, workspaceID, ev.CRID, node.PipelineID)
+	if err != nil {
+		return err
+	}
+	status := "passed"
+	if p.Verdict == "block" {
+		status = "blocked"
+	}
+	attempt := p.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
+	detail := ev.Payload
+	if len(detail) == 0 {
+		detail = json.RawMessage(`{}`)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO pipeline_node_run (run_id, node_id, ref, kind, seq, status, attempt, started_at, completed_at, detail)
+		VALUES ($1::uuid, $2::uuid, NULL, $3, $4, $5, $6, now(), now(), $7)
+		ON CONFLICT (run_id, node_id, attempt) DO UPDATE
+		  SET status = $5, completed_at = now(), detail = $7`,
+		runID, node.NodeID, node.Kind, node.Seq, status, attempt, detail); err != nil {
+		return err
+	}
+	s.publish(ctx, workspaceID, ev.CRID)
+	return nil
 }
