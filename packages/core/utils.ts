@@ -38,6 +38,17 @@ export function createRequestId(length = 8): string {
   return createSafeId().replace(/-/g, "").slice(0, length);
 }
 
+/** Up to 2 uppercase initials from a display name, for avatar fallbacks. */
+export function nameToInitials(name: string): string {
+  return name
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
+
 /**
  * True when the keyboard event fires while an IME is composing a multi-key
  * input (e.g. Chinese pinyin, Japanese kana). The Enter that commits the

@@ -6,6 +6,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@multica/core/api";
 import { projectQueueItemsOptions, useCancelProjectQueueTask } from "@multica/core/projects";
+import { nameToInitials } from "@multica/core/utils";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import type { QueueItem } from "@multica/core/api/schemas";
 import { ActorAvatar as ActorAvatarBase } from "@multica/ui/components/common/actor-avatar";
@@ -123,13 +124,7 @@ function QueueBarItem({
   const originator = item.originator;
   const name = originator?.name || t(($) => $.chat.queue_bar.system_task);
   const summary = item.summary || t(($) => $.chat.queue_bar.no_summary);
-  const initials = (originator?.name ?? "")
-    .split(" ")
-    .filter(Boolean)
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
+  const initials = nameToInitials(originator?.name ?? "");
   const canCancel =
     canConfigure || (currentUserId != null && originator?.id === currentUserId);
 
