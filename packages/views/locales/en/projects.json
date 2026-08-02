@@ -198,6 +198,16 @@
       "withdrawn": "Withdrawn",
       "copy": "Copy",
       "copied": "Copied"
+    },
+    "queue_bar": {
+      "count_one": "{{count}} task queued",
+      "count_other": "{{count}} tasks queued",
+      "cancel": "Clear conversation",
+      "status_queued": "Queued",
+      "status_dispatched": "Dispatched",
+      "system_task": "System task",
+      "no_summary": "(No message summary)",
+      "cancel_already_finished": "This task has already finished and can't be cancelled"
     }
   }
 }

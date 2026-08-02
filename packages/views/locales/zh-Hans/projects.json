@@ -196,6 +196,15 @@
       "withdrawn": "已撤回",
       "copy": "复制",
       "copied": "已复制"
+    },
+    "queue_bar": {
+      "count_other": "{{count}} 条排队",
+      "cancel": "清除对话",
+      "status_queued": "排队中",
+      "status_dispatched": "已派发",
+      "system_task": "系统任务",
+      "no_summary": "（无消息摘要）",
+      "cancel_already_finished": "任务已结束，无法撤回"
     }
   }
 }

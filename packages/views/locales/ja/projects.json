@@ -196,6 +196,15 @@
       "withdrawn": "撤回済み",
       "copy": "コピー",
       "copied": "コピーしました"
+    },
+    "queue_bar": {
+      "count_other": "{{count}} 件がキュー待ち",
+      "cancel": "会話をクリア",
+      "status_queued": "キュー待ち",
+      "status_dispatched": "ディスパッチ済み",
+      "system_task": "システムタスク",
+      "no_summary": "（メッセージの要約なし）",
+      "cancel_already_finished": "このタスクはすでに終了しているため、キャンセルできません"
     }
   }
 }

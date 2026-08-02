@@ -196,6 +196,15 @@
       "withdrawn": "철회됨",
       "copy": "복사",
       "copied": "복사했습니다"
+    },
+    "queue_bar": {
+      "count_other": "{{count}}건 대기 중",
+      "cancel": "대화 지우기",
+      "status_queued": "대기 중",
+      "status_dispatched": "전달됨",
+      "system_task": "시스템 작업",
+      "no_summary": "(메시지 요약 없음)",
+      "cancel_already_finished": "이 작업은 이미 종료되어 취소할 수 없습니다"
     }
   }
 }
