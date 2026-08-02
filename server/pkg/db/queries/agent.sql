@@ -254,12 +254,18 @@ WHERE id = $1 AND issue_id IS NULL;
 -- run has not changed. The Composio overlay follows the agent's invocation
 -- permission and uses the agent owner's connection (MUL-3963); originator is
 -- carried for A2A/audit, not as an originator == agent.owner_id gate.
+--
+-- cr_id / pipeline_node_run_id (AIFIRST, CR-2026-011) are inherited alongside
+-- attempt/parent_task_id: a retry is the same gate-node work re-attempted, not
+-- a new task, so its CR/pipeline attribution carries over unchanged. Omitting
+-- these here would silently drop attribution on every auto-retry.
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, trigger_comment_id, coalesced_comment_ids, trigger_summary, context,
     session_id, work_dir,
     attempt, max_attempts, parent_task_id, force_fresh_session, is_leader_task,
-    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps
+    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps,
+    cr_id, pipeline_node_run_id
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -272,7 +278,8 @@ SELECT
     p.squad_id,
     p.originator_user_id,
     sqlc.narg(runtime_mcp_overlay),
-    sqlc.narg(runtime_connected_apps)
+    sqlc.narg(runtime_connected_apps),
+    p.cr_id, p.pipeline_node_run_id
 FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING *;

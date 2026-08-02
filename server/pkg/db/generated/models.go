@@ -127,6 +127,8 @@ type AgentTaskQueue struct {
 	RuntimeConnectedApps []byte        `json:"runtime_connected_apps"`
 	CoalescedCommentIds  []pgtype.UUID `json:"coalesced_comment_ids"`
 	DeliveredCommentIds  []pgtype.UUID `json:"delivered_comment_ids"`
+	CrID                 pgtype.Text   `json:"cr_id"`
+	PipelineNodeRunID    pgtype.UUID   `json:"pipeline_node_run_id"`
 }
 
 type ApprovalRecord struct {
@@ -734,6 +736,36 @@ type PinnedItem struct {
 	ItemID      pgtype.UUID        `json:"item_id"`
 	Position    float64            `json:"position"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type PipelineNodeRun struct {
+	ID          pgtype.UUID        `json:"id"`
+	RunID       pgtype.UUID        `json:"run_id"`
+	NodeID      pgtype.UUID        `json:"node_id"`
+	Ref         pgtype.Text        `json:"ref"`
+	Kind        string             `json:"kind"`
+	Seq         int32              `json:"seq"`
+	Status      string             `json:"status"`
+	Attempt     int32              `json:"attempt"`
+	ApprovalID  pgtype.UUID        `json:"approval_id"`
+	OutputNote  pgtype.Text        `json:"output_note"`
+	Detail      []byte             `json:"detail"`
+	StartedAt   pgtype.Timestamptz `json:"started_at"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+}
+
+type PipelineRun struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	PipelineID       string             `json:"pipeline_id"`
+	CrID             pgtype.Text        `json:"cr_id"`
+	IssueID          pgtype.UUID        `json:"issue_id"`
+	Status           string             `json:"status"`
+	Inputs           []byte             `json:"inputs"`
+	ExecutionContext []byte             `json:"execution_context"`
+	StartedBy        pgtype.UUID        `json:"started_by"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
 }
 
 type Project struct {

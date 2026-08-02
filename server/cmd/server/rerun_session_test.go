@@ -296,6 +296,104 @@ func TestCreateRetryTaskKeepsOrdinaryTimeoutSession(t *testing.T) {
 	}
 }
 
+// TestCreateRetryTaskInheritsCrAttribution is the CR-2026-011 TASK-01
+// regression: cr_id/pipeline_node_run_id are attribution columns written
+// out-of-band (StartTask callback, not enqueue-time params), so
+// CreateRetryTask's explicit INSERT...SELECT column list is the only place
+// that can silently drop them on auto-retry. Without p.cr_id/
+// p.pipeline_node_run_id in both the column list and the SELECT, a gate-node
+// task that fails and retries would lose its CR attribution forever.
+func TestCreateRetryTaskInheritsCrAttribution(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+
+	var runID, nodeRunID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO pipeline_run (workspace_id, pipeline_id, cr_id, started_by)
+		VALUES ($1, 'requirement-authoring', 'CR-2026-011', $2)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&runID); err != nil {
+		t.Fatalf("insert pipeline_run fixture: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM pipeline_run WHERE id = $1`, runID) })
+
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO pipeline_node_run (run_id, node_id, kind, seq, status)
+		VALUES ($1, gen_random_uuid(), 'human_approval', 1, 'running')
+		RETURNING id
+	`, runID).Scan(&nodeRunID); err != nil {
+		t.Fatalf("insert pipeline_node_run fixture: %v", err)
+	}
+
+	var parentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, issue_id, status, priority, failure_reason,
+			attempt, max_attempts, cr_id, pipeline_node_run_id
+		)
+		VALUES ($1, $2, $3, 'failed', 0, 'timeout', 1, 2, 'CR-2026-011', $4)
+		RETURNING id
+	`, agentID, runtimeID, issueID, nodeRunID).Scan(&parentID); err != nil {
+		t.Fatalf("insert cr-attributed parent task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	child, err := queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{ID: pgtype.UUID{Bytes: parseUUIDBytes(parentID), Valid: true}})
+	if err != nil {
+		t.Fatalf("CreateRetryTask failed: %v", err)
+	}
+	if !child.CrID.Valid || child.CrID.String != "CR-2026-011" {
+		t.Fatalf("expected retry child to inherit cr_id, got %+v", child.CrID)
+	}
+	if !child.PipelineNodeRunID.Valid || child.PipelineNodeRunID.String() != nodeRunID {
+		t.Fatalf("expected retry child to inherit pipeline_node_run_id, got %+v", child.PipelineNodeRunID)
+	}
+}
+
+// TestCreateRetryTaskLeavesNonCrTaskAttributionNull is the NULL-side
+// counterpart: an ordinary (non-pipeline) task's retry child must not
+// acquire cr_id/pipeline_node_run_id out of nowhere.
+func TestCreateRetryTaskLeavesNonCrTaskAttributionNull(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+
+	var parentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, issue_id, status, priority, failure_reason,
+			attempt, max_attempts
+		)
+		VALUES ($1, $2, $3, 'failed', 0, 'timeout', 1, 2)
+		RETURNING id
+	`, agentID, runtimeID, issueID).Scan(&parentID); err != nil {
+		t.Fatalf("insert plain parent task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	child, err := queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{ID: pgtype.UUID{Bytes: parseUUIDBytes(parentID), Valid: true}})
+	if err != nil {
+		t.Fatalf("CreateRetryTask failed: %v", err)
+	}
+	if child.CrID.Valid {
+		t.Fatalf("expected non-CR retry child cr_id to stay NULL, got %q", child.CrID.String)
+	}
+	if child.PipelineNodeRunID.Valid {
+		t.Fatalf("expected non-CR retry child pipeline_node_run_id to stay NULL, got %v", child.PipelineNodeRunID)
+	}
+}
+
 // TestGetLastTaskSessionExcludesLegacyAPI400 is the MUL-1921 legacy
 // regression: pre-fix rows are tagged failure_reason='agent_error' even
 // though their error text contains the canonical Anthropic 400
