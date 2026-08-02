@@ -22,6 +22,7 @@ import {
   chatKeys,
   isTaskMessageTaskId,
   sortChatSessions,
+  sortAgentsByRecentChat,
 } from "@multica/core/chat/queries";
 import {
   useCreateChatSession,
@@ -262,8 +263,12 @@ export function useChatController(opts?: { isActive?: boolean }) {
 
   const currentMember = members.find((m) => m.user_id === user?.id);
   const memberRole = currentMember?.role;
-  const availableAgents = agents.filter(
-    (a) => !a.archived_at && canAssignAgent(a, user?.id, memberRole),
+  // Recency-biased ordering (most recently chatted-with agent first) — a
+  // suggestion for pickers such as NewChatButton, never a silent default;
+  // no-op when nobody has chatted with any agent yet.
+  const availableAgents = sortAgentsByRecentChat(
+    agents.filter((a) => !a.archived_at && canAssignAgent(a, user?.id, memberRole)),
+    sessions,
   );
 
   // The agent bound to the OPEN session, resolved from the full agent list
@@ -279,12 +284,14 @@ export function useChatController(opts?: { isActive?: boolean }) {
     : null;
   const isAgentArchived = !!sessionAgent?.archived_at;
 
-  // Resolve selected agent: open session's agent → stored preference → first
-  // available. New chats have no session, so they fall through to the picker.
+  // Resolve selected agent: open session's agent → stored preference → none.
+  // No silent "first available" fallback (mirrors the floating window's fix)
+  // — the desktop/mobile layouts only render this conversation pane once a
+  // session exists or `NewChatButton` picked an agent explicitly, so `null`
+  // here is expected and handled by every consumer below.
   const activeAgent =
     sessionAgent ??
     availableAgents.find((a) => a.id === selectedAgentId) ??
-    availableAgents[0] ??
     null;
 
   const agentAvailability = useWorkspaceAgentAvailability();
