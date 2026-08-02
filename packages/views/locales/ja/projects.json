@@ -218,6 +218,38 @@
       "stop": "停止",
       "stop_failed": "停止に失敗しました。再試行してください。",
       "model_follows_team_agent": "モデルは Team Agent の設定に従います"
+    },
+    "presenter": {
+      "label": "プレゼンター",
+      "current": "現在のプレゼンター: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "コントロールパネル",
+      "locked_title": "{{name}} がプレゼンター中です。送信するにはアクセス権をリクエストしてください",
+      "locked_title_default": "送信するにはアクセス権をリクエストしてください",
+      "request_cta": "アクセスをリクエスト",
+      "requested": "リクエスト済み"
+    },
+    "control": {
+      "title": "コントロールパネル",
+      "presenter_badge": "プレゼンター",
+      "pending_badge": "リクエスト中",
+      "request_cta": "Agent アクセスをリクエスト",
+      "requested": "リクエスト済み",
+      "approve": "承認",
+      "reject": "却下",
+      "revoke": "取り消し",
+      "transfer": "移譲",
+      "transfer_to": "移譲先を選択…",
+      "release": "コントロールを解放",
+      "action_failed": "操作に失敗しました。もう一度お試しください"
+    },
+    "notices": {
+      "presenter_requested": "{{user}} がプレゼンターをリクエストしました",
+      "presenter_approved": "{{approver}} が {{user}} のリクエストを承認しました",
+      "presenter_rejected": "{{approver}} が {{user}} のリクエストを却下しました",
+      "presenter_transferred": "{{from}} がプレゼンターを {{to}} に移譲しました",
+      "presenter_revoked": "{{approver}} が {{user}} のプレゼンター権限を取り消しました",
+      "presenter_released": "{{user}} がプレゼンターを解放しました"
     }
   }
 }

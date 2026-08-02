@@ -50,7 +50,12 @@
     "agent_completed": "智能体已完成",
     "reaction_added": "添加了表情反应",
     "quick_create_done": "通过智能体创建",
-    "quick_create_failed": "通过智能体创建失败"
+    "quick_create_failed": "通过智能体创建失败",
+    "presenter_requested": "申请主持人",
+    "presenter_approved": "主持人申请已批准",
+    "presenter_rejected": "主持人申请已拒绝",
+    "presenter_transferred": "主持人已转让",
+    "presenter_revoked": "主持人已被撤销"
   },
   "labels": {
     "set_status_to": "状态设为",

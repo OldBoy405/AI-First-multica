@@ -40,6 +40,11 @@ vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn() },
 }));
 
+vi.mock("@multica/core/auth", () => ({
+  useAuthStore: (selector: (s: { user: { id: string } }) => unknown) =>
+    selector({ user: { id: "member-1" } }),
+}));
+
 // ─── Model-selector seams (CR-2026-006 TASK-05 / TSUG-003) ─────────────────
 // A single mutable config drives the four permission×runtime combos. Mutated
 // per test, read lazily inside the mock factories (same pattern as `sendMock`).
@@ -130,6 +135,15 @@ const projectChatState = {
 const sendMock = { mutateAsync: vi.fn(), isPending: false };
 // CR-2026-007 T05: stop/cancel mutation shared instance, mirroring sendMock.
 const cancelMock = { mutateAsync: vi.fn(), isPending: false };
+const requestPresenterMock = { mutate: vi.fn(), isPending: false };
+// CR-2026-010: resolves to "no presenter" by default so existing tests (which
+// predate the presenter guard) keep seeing an unlocked composer; the
+// presenter-guard describe block below overrides this per test.
+let presenterStateMock: {
+  presenter: { user_id: string } | null;
+  pending_requests: unknown[];
+  my_request: unknown | null;
+} = { presenter: null, pending_requests: [], my_request: null };
 
 vi.mock("@multica/core/projects", () => ({
   projectChatDraftKey: (projectId: string, mode: string) => `${projectId}:${mode}`,
@@ -140,11 +154,16 @@ vi.mock("@multica/core/projects", () => ({
   ),
   useSendProjectChatMessage: () => sendMock,
   useCancelProjectQueueTask: () => cancelMock,
+  useRequestPresenter: () => requestPresenterMock,
   // Never resolves — keeps `queue` undefined so the live-queue path never
   // interferes with the tests that drive the 429 latch explicitly.
   projectQueueStatusOptions: (_wsId: string, id: string) => ({
     queryKey: ["queue-status", id],
     queryFn: () => new Promise(() => {}),
+  }),
+  projectPresenterOptions: (_wsId: string, id: string) => ({
+    queryKey: ["presenter", id],
+    queryFn: async () => presenterStateMock,
   }),
 }));
 
@@ -175,6 +194,30 @@ function comment(id: string, at: string): TimelineEntry {
     created_at: at,
     content: `msg-${id}`,
   };
+}
+
+function activity(
+  id: string,
+  action: string,
+  details: Record<string, string>,
+  at: string,
+): TimelineEntry {
+  return {
+    type: "activity",
+    id,
+    actor_type: "member",
+    actor_id: details.by_user_id ?? "member-1",
+    action,
+    details,
+    created_at: at,
+  };
+}
+
+// useActorName is globally stubbed in this file to always return "Someone"
+// regardless of the id passed, so every {{var}} in a notice template resolves
+// to the same name — this fills the template the same way for assertions.
+function fillNoticeTemplate(tpl: string): string {
+  return tpl.replace(/\{\{\w+\}\}/g, "Someone");
 }
 
 function task(id: string, at: string, overrides: Partial<AgentTask> = {}): AgentTask {
@@ -210,6 +253,9 @@ beforeEach(() => {
   cfg.canEdit = true;
   cfg.runtimeStatus = "online";
   cfg.agent = null;
+  requestPresenterMock.mutate.mockClear();
+  requestPresenterMock.isPending = false;
+  presenterStateMock = { presenter: null, pending_requests: [], my_request: null };
 });
 
 afterEach(() => {
@@ -766,5 +812,140 @@ describe("UserBubble copy button (FR-7)", () => {
 
     expect(writeText).toHaveBeenCalledWith("msg-c1");
     expect(toast.success).toHaveBeenCalledWith(enProjects.chat.stream.copied);
+  });
+});
+
+// CR-2026-010 TASK-06 AC2: six activity actions each render a distinct notice
+// card with matching copy; existing comment/task cards are unaffected.
+describe("TeamAgentStreamView presenter notices", () => {
+  const NOTICES = [
+    activity("a1", "presenter_requested", { to_user_id: "u1", by_user_id: "u1" }, "2026-01-01T00:00:00Z"),
+    activity("a2", "presenter_approved", { to_user_id: "u1", by_user_id: "u2" }, "2026-01-01T00:00:01Z"),
+    activity("a3", "presenter_rejected", { to_user_id: "u1", by_user_id: "u2" }, "2026-01-01T00:00:02Z"),
+    activity("a4", "presenter_transferred", { from_user_id: "u1", to_user_id: "u2", by_user_id: "u1" }, "2026-01-01T00:00:03Z"),
+    activity("a5", "presenter_revoked", { from_user_id: "u1", by_user_id: "u2" }, "2026-01-01T00:00:04Z"),
+    activity("a6", "presenter_released", { from_user_id: "u1", by_user_id: "u1" }, "2026-01-01T00:00:05Z"),
+  ];
+
+  it("renders one notice card per action, with copy matching chat.notices[action]", () => {
+    renderWithProviders(
+      <TeamAgentStreamView {...streamBaseProps} comments={[]} tasks={[]} presenterNotices={NOTICES} />,
+    );
+
+    const cards = screen.getAllByTestId("project-chat-presenter-notice");
+    expect(cards).toHaveLength(6);
+    expect(cards.map((c) => c.getAttribute("data-action"))).toEqual([
+      "presenter_requested",
+      "presenter_approved",
+      "presenter_rejected",
+      "presenter_transferred",
+      "presenter_revoked",
+      "presenter_released",
+    ]);
+    for (const [i, card] of cards.entries()) {
+      const action = NOTICES[i]!.action as keyof typeof enProjects.chat.notices;
+      expect(card.textContent).toContain(fillNoticeTemplate(enProjects.chat.notices[action]));
+    }
+  });
+
+  it("does not disturb existing comment/task card rendering when notices are interleaved", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[comment("c1", "2026-01-01T00:00:01.500Z")]}
+        tasks={[task("t1", "2026-01-01T00:00:01.000Z")]}
+        presenterNotices={[activity("a1", "presenter_released", {}, "2026-01-01T00:00:02.000Z")]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(container.querySelectorAll('[data-testid="project-chat-user-bubble"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="project-chat-task-card"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="project-chat-presenter-notice"]')).toHaveLength(1);
+  });
+});
+
+// CR-2026-010 TASK-06 AC3: presenter_required must be a distinct rejection
+// from 429 project_queue_full — separate banner, separate copy, never
+// conflated even though both share the "locked" state.
+describe("TeamAgentComposer presenter guard", () => {
+  const props = { projectId: "proj-1", wsId: "ws-1", canConfigure: false };
+
+  it("locks the composer and names the current presenter", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "blocked send";
+    sendMock.mutateAsync = vi.fn().mockRejectedValue(
+      new ApiError("forbidden", 403, "Forbidden", {
+        code: "presenter_required",
+        presenter_user_id: "u-presenter",
+      }),
+    );
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-presenter-required")).toBeTruthy(),
+    );
+    expect(projectChatState.drafts["proj-1:team_agent"]).toBe("blocked send");
+    expect(screen.getByTestId("project-chat-composer-input")).toBeDisabled();
+    expect(screen.queryByTestId("project-chat-queue-full")).toBeNull();
+    expect(screen.getByTestId("project-chat-presenter-required").textContent).toContain(
+      fillNoticeTemplate(enProjects.chat.presenter.locked_title),
+    );
+  });
+
+  it("shows the no-active-presenter copy when presenter_user_id is empty", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "blocked send";
+    sendMock.mutateAsync = vi.fn().mockRejectedValue(
+      new ApiError("forbidden", 403, "Forbidden", { code: "presenter_required", presenter_user_id: "" }),
+    );
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-presenter-required").textContent).toContain(
+        enProjects.chat.presenter.locked_title_default,
+      ),
+    );
+  });
+
+  it("requests presenter access on click, and disables the button once a request is pending", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "blocked send";
+    sendMock.mutateAsync = vi.fn().mockRejectedValue(
+      new ApiError("forbidden", 403, "Forbidden", { code: "presenter_required", presenter_user_id: "u-presenter" }),
+    );
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    await waitFor(() => screen.getByTestId("project-chat-presenter-required"));
+
+    const requestButton = screen.getByRole("button", { name: enProjects.chat.presenter.request_cta });
+    await act(async () => {
+      requestButton.click();
+    });
+    expect(requestPresenterMock.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("presenter_required never renders the 429 queue-full banner (distinct rejection reasons)", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "send 1";
+    sendMock.mutateAsync = vi.fn().mockRejectedValue(
+      new ApiError("forbidden", 403, "Forbidden", { code: "presenter_required", presenter_user_id: "u-presenter" }),
+    );
+    renderWithProviders(<TeamAgentComposer {...props} />);
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    await waitFor(() => screen.getByTestId("project-chat-presenter-required"));
+    expect(screen.queryByTestId("project-chat-queue-full")).toBeNull();
+    // Distinct copy from the queue-full banner's title, not a shared string.
+    expect(screen.getByTestId("project-chat-presenter-required").textContent).not.toContain(
+      enProjects.chat.stream.queue_full_title,
+    );
   });
 });

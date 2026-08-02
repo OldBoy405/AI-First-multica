@@ -445,6 +445,56 @@ export const EMPTY_QUEUE_STATUS_WITH_ITEMS: QueueStatusWithItems = {
   items: [],
 };
 
+// Presenter (single-writer control) grant state for a project's Team Agent
+// chat (CR-2026-010). One grant row shape reused for the active presenter,
+// each pending request, and the caller's own request.
+export interface ProjectPresenterGrant {
+  user_id: string;
+  status: string;
+  granted_by: string;
+  created_at: string;
+}
+
+export const ProjectPresenterGrantSchema = z
+  .object({
+    user_id: z.string().default(""),
+    status: z.string().default(""),
+    granted_by: z.string().default(""),
+    created_at: z.string().default(""),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_PRESENTER_GRANT: ProjectPresenterGrant = {
+  user_id: "",
+  status: "",
+  granted_by: "",
+  created_at: "",
+};
+
+// pending_requests is only populated by the backend for owner/admin callers;
+// my_request is populated for any caller with a pending request of their own
+// (TSUG-003) so a plain member can render "request pending" without the
+// owner-only list.
+export interface ProjectPresenterState {
+  presenter: ProjectPresenterGrant | null;
+  pending_requests: ProjectPresenterGrant[];
+  my_request: ProjectPresenterGrant | null;
+}
+
+export const ProjectPresenterStateSchema = z
+  .object({
+    presenter: ProjectPresenterGrantSchema.nullable().default(null),
+    pending_requests: z.array(ProjectPresenterGrantSchema).default([]),
+    my_request: ProjectPresenterGrantSchema.nullable().default(null),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_PRESENTER_STATE: ProjectPresenterState = {
+  presenter: null,
+  pending_requests: [],
+  my_request: null,
+};
+
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),
   matched_snippet: z.string().optional(),

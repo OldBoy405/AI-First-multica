@@ -21,6 +21,8 @@ export const projectKeys = {
     [...projectKeys.all(wsId), "private-chat", id] as const,
   discussion: (wsId: string, id: string) =>
     [...projectKeys.all(wsId), "discussion", id] as const,
+  presenter: (wsId: string, id: string) =>
+    [...projectKeys.all(wsId), "presenter", id] as const,
 };
 
 export function projectListOptions(wsId: string) {
@@ -84,5 +86,16 @@ export function projectDiscussionOptions(wsId: string, id: string) {
   return queryOptions({
     queryKey: projectKeys.discussion(wsId, id),
     queryFn: () => api.getProjectDiscussion(id),
+  });
+}
+
+// Presenter (single-writer control) grant state for a project's Team Agent
+// chat (CR-2026-010). WS updates arrive via project:presenter_changed, which
+// the realtime layer's "project:" prefix invalidation already covers — no
+// dedicated WS handler needed here.
+export function projectPresenterOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: projectKeys.presenter(wsId, id),
+    queryFn: () => api.getProjectPresenter(id),
   });
 }

@@ -99,6 +99,67 @@ export function useCancelProjectQueueTask(wsId: string, projectId: string) {
 // accepting it, so the outcome isn't locally predictable (CLAUDE.md's
 // optimistic-update rule). Invalidating projectKeys.chat is what flips the
 // panel from the unconfigured guide to the live message stream.
+// Presenter (single-writer control) mutations (CR-2026-010). Not optimistic:
+// presenter grants are cross-user permission state, not a locally-predictable
+// patch (CLAUDE.md's optimistic-update rule). onSettled invalidates both the
+// presenter query and the chat query — a transition can flip who is allowed
+// to send, so the send-guard state the chat panel reads must refresh too.
+function usePresenterInvalidation(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return () => {
+    qc.invalidateQueries({ queryKey: projectKeys.presenter(wsId, projectId) });
+    qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+  };
+}
+
+export function useRequestPresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: () => api.requestPresenter(projectId),
+    onSettled: invalidate,
+  });
+}
+
+export function useApprovePresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: (userId: string) => api.approvePresenter(projectId, userId),
+    onSettled: invalidate,
+  });
+}
+
+export function useRejectPresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: (userId: string) => api.rejectPresenter(projectId, userId),
+    onSettled: invalidate,
+  });
+}
+
+export function useTransferPresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: (userId: string) => api.transferPresenter(projectId, userId),
+    onSettled: invalidate,
+  });
+}
+
+export function useRevokePresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: () => api.revokePresenter(projectId),
+    onSettled: invalidate,
+  });
+}
+
+export function useReleasePresenter(wsId: string, projectId: string) {
+  const invalidate = usePresenterInvalidation(wsId, projectId);
+  return useMutation({
+    mutationFn: () => api.releasePresenter(projectId),
+    onSettled: invalidate,
+  });
+}
+
 export function useSetProjectTeamAgent(wsId: string, projectId: string) {
   const qc = useQueryClient();
   return useMutation({

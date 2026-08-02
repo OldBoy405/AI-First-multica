@@ -221,6 +221,38 @@
       "stop": "Stop",
       "stop_failed": "Failed to stop. Please retry.",
       "model_follows_team_agent": "Model follows the Team Agent configuration"
+    },
+    "presenter": {
+      "label": "Presenter",
+      "current": "Presenter: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "Presenter controls",
+      "locked_title": "{{name}} is presenting — request access to send",
+      "locked_title_default": "Request access to send",
+      "request_cta": "Request access",
+      "requested": "Requested"
+    },
+    "control": {
+      "title": "Presenter controls",
+      "presenter_badge": "Presenter",
+      "pending_badge": "Requested",
+      "request_cta": "Request Agent access",
+      "requested": "Requested",
+      "approve": "Approve",
+      "reject": "Reject",
+      "revoke": "Revoke",
+      "transfer": "Transfer",
+      "transfer_to": "Transfer to…",
+      "release": "Release control",
+      "action_failed": "Action failed, please try again"
+    },
+    "notices": {
+      "presenter_requested": "{{user}} requested presenter access",
+      "presenter_approved": "{{approver}} approved {{user}}'s request",
+      "presenter_rejected": "{{approver}} rejected {{user}}'s request",
+      "presenter_transferred": "{{from}} transferred presenter control to {{to}}",
+      "presenter_revoked": "{{approver}} revoked {{user}}'s presenter access",
+      "presenter_released": "{{user}} released presenter control"
     }
   }
 }
