@@ -237,6 +237,14 @@ export interface AgentTask {
   /** Set when an issue comment triggered this task (@mention or assignee comment). */
   trigger_comment_id?: string;
   /**
+   * User id of the human who caused this task (CR-2026-007 TSUG-002). The
+   * canonical "started by me" check is `originator_user_id === currentUserId`;
+   * do NOT infer authorship via trigger_comment_id → timeline mapping, which
+   * drifts under comment coalescing (MUL-4195 re-stamp). Omitted by older
+   * backends and for tasks with no human originator (autopilot, agents).
+   */
+  originator_user_id?: string;
+  /**
    * Earlier comment IDs folded into this run before it was claimed. This does
    * not include `trigger_comment_id`, which remains the run's newest trigger.
    * Their unique union is the queued coverage plan; claimed-task consumers

@@ -94,6 +94,7 @@
     "my_agents": "My agents",
     "others": "Others",
     "no_agents": "No agents",
+    "choose_agent": "Choose an agent",
     "history_group": "Chat history",
     "agent_filter_placeholder": "Search agents..."
   },

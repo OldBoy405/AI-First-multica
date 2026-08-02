@@ -617,3 +617,126 @@ func TestCancelTaskByUser_PrivateAgent_PlainMember_Returns403(t *testing.T) {
 		t.Fatalf("task was mutated: status = %q", got)
 	}
 }
+
+// createOriginatedTask seeds a task on the given agent with originator_user_id
+// stamped, mirroring what the shared-queue send path records. No issue / chat /
+// autopilot link is needed: CancelTaskByUser authorizes through the owning
+// agent alone.
+func createOriginatedTask(t *testing.T, agentID, originatorUserID, status string) string {
+	t.Helper()
+	var taskID string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, originator_user_id)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), $2, 0, $3)
+		RETURNING id
+	`, agentID, status, originatorUserID).Scan(&taskID); err != nil {
+		t.Fatalf("create originated task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+	return taskID
+}
+
+// TestCancelTaskByUser_PrivateAgent_Originator_Succeeds is the CR-2026-007
+// regression target: a plain member who enqueued a task on a private Team
+// Agent could send it but got 403 trying to cancel it ("can send, cannot
+// withdraw"). The originator fast-path must let them cancel their own task
+// without passing canAccessPrivateAgent.
+func TestCancelTaskByUser_PrivateAgent_Originator_Succeeds(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	agentID, _, memberID := privateAgentTestFixture(t)
+	taskID := createOriginatedTask(t, agentID, memberID, "queued")
+
+	w := httptest.NewRecorder()
+	testHandler.CancelTaskByUser(w, cancelTaskByUserRequest(t, memberID, taskID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp CancelTaskByUserResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode cancel response: %v", err)
+	}
+	if resp.Status != "cancelled" {
+		t.Fatalf("expected response status cancelled, got %q", resp.Status)
+	}
+	if got := taskStatus(t, taskID); got != "cancelled" {
+		t.Fatalf("task not cancelled: status = %q", got)
+	}
+}
+
+// TestCancelTaskByUser_PrivateAgent_NonOriginatorMember_Returns403 verifies
+// the CR-2026-007 originator fast-path only widens, never loosens: a plain
+// member who did NOT originate the task still hits the private-agent access
+// gate and is rejected.
+func TestCancelTaskByUser_PrivateAgent_NonOriginatorMember_Returns403(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	agentID, _, memberID := privateAgentTestFixture(t)
+	taskID := createOriginatedTask(t, agentID, memberID, "queued")
+	bystanderID := createWorkspaceMemberUser(t, "Cancel Bystander", "cancel-private-bystander@multica.test")
+
+	w := httptest.NewRecorder()
+	testHandler.CancelTaskByUser(w, cancelTaskByUserRequest(t, bystanderID, taskID))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := taskStatus(t, taskID); got != "queued" {
+		t.Fatalf("task was mutated: status = %q", got)
+	}
+}
+
+// TestCancelTaskByUser_PrivateAgent_WorkspaceOwner_Succeeds pins the original
+// behavior around the CR-2026-007 reorder: a workspace owner may still cancel
+// any member's task (CR-2026-004 "owner stops any").
+func TestCancelTaskByUser_PrivateAgent_WorkspaceOwner_Succeeds(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	agentID, _, memberID := privateAgentTestFixture(t)
+	taskID := createOriginatedTask(t, agentID, memberID, "queued")
+
+	// testUserID holds the 'owner' role in the test workspace.
+	w := httptest.NewRecorder()
+	testHandler.CancelTaskByUser(w, cancelTaskByUserRequest(t, testUserID, taskID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := taskStatus(t, taskID); got != "cancelled" {
+		t.Fatalf("task not cancelled: status = %q", got)
+	}
+}
+
+// TestCancelTaskByUser_CompletedTask_IdempotentKeepsStatus pins the race
+// semantics the CR-2026-007 frontend three-way branch depends on: cancelling
+// an already-finished task is an idempotent 200 that returns the task with its
+// original status, never an error. If someone "fixes" this into a 4xx the
+// double-click / late-cancel UX breaks.
+func TestCancelTaskByUser_CompletedTask_IdempotentKeepsStatus(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	agentID := createHandlerTestAgent(t, "CancelCompletedAgent", []byte("[]"))
+	taskID := createOriginatedTask(t, agentID, testUserID, "completed")
+
+	w := httptest.NewRecorder()
+	testHandler.CancelTaskByUser(w, cancelTaskByUserRequest(t, testUserID, taskID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected idempotent 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp CancelTaskByUserResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode cancel response: %v", err)
+	}
+	if resp.Status != "completed" {
+		t.Fatalf("expected response status completed (original status), got %q", resp.Status)
+	}
+	if got := taskStatus(t, taskID); got != "completed" {
+		t.Fatalf("completed task was mutated: status = %q", got)
+	}
+}

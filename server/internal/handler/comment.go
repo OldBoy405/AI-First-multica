@@ -1577,6 +1577,18 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 }
 
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
+	// CR-2026-009 red line: the Discussion container is the pure-human message
+	// surface — no comment on it may ever enqueue an agent run, regardless of
+	// mentions or reply targets. This is the single choke point all agent
+	// triggers pass through (explicit @agent/@squad mentions, the member-mention
+	// no-op branch, the assigned-squad-leader fallback, and parent-author
+	// continuation all live below), so short-circuiting here covers every
+	// caller — including a comment created directly against the API, not just
+	// through the Discussion tab's own send path.
+	if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
+		return nil
+	}
+
 	if isNoteComment(content) {
 		return nil
 	}

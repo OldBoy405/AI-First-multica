@@ -300,7 +300,7 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedSessionID := uuidToString(updated.ID)
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
@@ -347,7 +347,7 @@ func (h *Handler) SetChatSessionPinned(w http.ResponseWriter, r *http.Request) {
 
 	resolvedSessionID := uuidToString(updated.ID)
 	pinned := updated.PinnedAt.Valid
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		Pinned:        &pinned,
@@ -396,7 +396,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 
 	resolvedSessionID := uuidToString(updated.ID)
 	status := updated.Status
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: resolvedSessionID,
 		Title:         updated.Title,
 		Status:        &status,
@@ -486,7 +486,7 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	h.TaskService.BroadcastCancelledTasks(r.Context(), cancelled)
 
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionDeletedPayload{
+	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionDeletedPayload{
 		ChatSessionID: resolvedSessionID,
 	})
 
@@ -677,7 +677,7 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Broadcast the user message.
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatMessage, workspaceID, "member", userID, resolvedSessionID, protocol.ChatMessagePayload{
+	h.publishChat(protocol.EventChatMessage, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatMessagePayload{
 		ChatSessionID: resolvedSessionID,
 		MessageID:     uuidToString(msg.ID),
 		Role:          "user",
@@ -877,7 +877,7 @@ func (h *Handler) MarkChatSessionRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedSessionID := uuidToString(session.ID)
-	h.publishChat(protocol.EventChatSessionRead, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionReadPayload{
+	h.publishChat(protocol.EventChatSessionRead, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionReadPayload{
 		ChatSessionID: resolvedSessionID,
 	})
 
@@ -1119,7 +1119,16 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "not your task")
 			return
 		}
-	} else {
+	} else if uuidToString(task.OriginatorUserID) != userID {
+		// CR-2026-007: the task originator may always cancel their own task,
+		// so originator == caller skips the checks below entirely. Under a
+		// private Team Agent a member can enqueue a task (send path) but the
+		// canAccessPrivateAgent gate used to 403 the cancel — a "can send,
+		// cannot withdraw" asymmetry. The originator is inherently aware of
+		// their own task and the response only describes it, so this leaks
+		// nothing. Every non-originator caller still goes through the
+		// original access + owner/admin checks below, unchanged.
+		//
 		// Issue / autopilot / quick_create tasks are all visible on the
 		// agent Activity tab + workspace snapshot, which gate private
 		// agents. Mirror that gate here.
@@ -1137,15 +1146,14 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Shared-queue stop rule (CR-2026-004 FR-4, P2 "sender stops own,
-		// owner stops any"): plain members may only cancel tasks they
-		// originated; workspace owners/admins may cancel any. The cancelled
-		// row is kept (soft delete) so the withdrawal stays auditable.
-		if uuidToString(task.OriginatorUserID) != userID {
-			member, merr := h.getWorkspaceMember(r.Context(), userID, workspaceID)
-			if merr != nil || (member.Role != "owner" && member.Role != "admin") {
-				writeErrorCode(w, http.StatusForbidden, "not_task_originator", "only the task originator or a workspace owner/admin can cancel this task")
-				return
-			}
+		// owner stops any"): the outer `else if` already established the
+		// caller isn't the originator, so only workspace owners/admins may
+		// cancel here. The cancelled row is kept (soft delete) so the
+		// withdrawal stays auditable.
+		member, merr := h.getWorkspaceMember(r.Context(), userID, workspaceID)
+		if merr != nil || (member.Role != "owner" && member.Role != "admin") {
+			writeErrorCode(w, http.StatusForbidden, "not_task_originator", "only the task originator or a workspace owner/admin can cancel this task")
+			return
 		}
 	}
 

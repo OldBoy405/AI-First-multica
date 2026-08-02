@@ -3,8 +3,11 @@ export {
   projectListOptions,
   projectDetailOptions,
   projectChatOptions,
+  projectPrivateChatOptions,
+  projectDiscussionOptions,
   projectQueueStatusOptions,
   projectGatesOptions,
+  projectQueueItemsOptions,
 } from "./queries";
 export { useProjectChatStore, projectChatDraftKey, type ProjectChatMode } from "./project-chat-store";
 export {
@@ -14,6 +17,7 @@ export {
   useSendProjectChatMessage,
   useSetProjectTeamAgent,
   useApproveCr,
+  useCancelProjectQueueTask,
 } from "./mutations";
 export { useProjectDraftStore } from "./draft-store";
 export {

@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/service"
@@ -33,5 +36,51 @@ func TestProjectTeamAgentID(t *testing.T) {
 				t.Fatalf("projectTeamAgentID(%q) = %q, want %q", c.settings, got, c.want)
 			}
 		})
+	}
+}
+
+// TestGetProjectDiscussion covers the CR-2026-009 entry endpoint: it must
+// lazily create the Discussion container issue on first call and return the
+// same issue_id on every subsequent call for the same project (idempotent
+// lazy creation, mirroring GetProjectChat's contract).
+func TestGetProjectDiscussion(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	var projectID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO project (workspace_id, title) VALUES ($1, $2) RETURNING id
+	`, testWorkspaceID, "GetProjectDiscussion Test Project").Scan(&projectID); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE project_id = $1`, projectID)
+		testPool.Exec(context.Background(), `DELETE FROM project WHERE id = $1`, projectID)
+	})
+
+	call := func() ProjectDiscussionResponse {
+		t.Helper()
+		req := withURLParam(newRequest("GET", "/api/projects/"+projectID+"/discussion", nil), "id", projectID)
+		rr := httptest.NewRecorder()
+		testHandler.GetProjectDiscussion(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+		}
+		var resp ProjectDiscussionResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.IssueID == "" {
+			t.Fatalf("expected a non-empty issue_id")
+		}
+		return resp
+	}
+
+	first := call()
+	second := call()
+	if second.IssueID != first.IssueID {
+		t.Fatalf("GetProjectDiscussion is not idempotent: first=%s second=%s", first.IssueID, second.IssueID)
 	}
 }

@@ -175,6 +175,10 @@
     "unconfigured_admin_cta": "Team Agent 설정",
     "unconfigured_member": "프로젝트 소유자에게 Team Agent 설정을 요청하세요.",
     "team_agent_setup_failed": "Team Agent 설정에 실패했습니다. 다시 시도해 주세요",
+    "discussion": {
+      "sub": "메시지를 보내 논의를 시작하세요.",
+      "composer_placeholder": "팀에게 메시지…"
+    },
     "stream": {
       "no_earlier": "이전 메시지가 없습니다",
       "composer_placeholder": "Team Agent에 메시지…",
@@ -188,7 +192,32 @@
       "status_interrupted": "중단됨",
       "model_label": "모델",
       "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
-      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
+      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요",
+      "stop": "중지",
+      "cancel_already_finished": "이 작업은 이미 종료되어 취소할 수 없습니다",
+      "agent_requests_only": "Agent 요청만 보기",
+      "no_text_reply": "(텍스트 응답 없음)",
+      "withdrawn": "철회됨",
+      "copy": "복사",
+      "copied": "복사했습니다"
+    },
+    "queue_bar": {
+      "count_other": "{{count}}건 대기 중",
+      "cancel": "대화 지우기",
+      "status_queued": "대기 중",
+      "status_dispatched": "전달됨",
+      "system_task": "시스템 작업",
+      "no_summary": "(메시지 요약 없음)",
+      "cancel_already_finished": "이 작업은 이미 종료되어 취소할 수 없습니다"
+    },
+    "private": {
+      "needs_team_agent": "Private Ask는 프로젝트의 Team Agent를 사용합니다. 먼저 Team Agent 탭에서 설정해 주세요.",
+      "load_failed": "프라이빗 세션을 불러오지 못했습니다. 다시 시도해 주세요.",
+      "empty_hint": "이 프로젝트에 대해 무엇이든 물어보세요. 이 대화는 본인만 볼 수 있으며, 에이전트는 프로젝트 파일을 수정할 수 없습니다.",
+      "composer_placeholder": "비공개로 질문…",
+      "stop": "중지",
+      "stop_failed": "중지하지 못했습니다. 다시 시도해 주세요.",
+      "model_follows_team_agent": "모델은 Team Agent 설정을 따릅니다"
     }
   },
   "governance": {

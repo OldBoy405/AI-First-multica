@@ -552,7 +552,10 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeCommentFormatting(&b)
 	}
 
-	if kind != kindQuickCreate {
+	// Ask-only chat tasks (project-bound Private Ask sessions, CR-2026-008)
+	// are a read-only sandbox: advertising checkout-able repos would only
+	// steer the agent into a guaranteed-rejected daemon call.
+	if kind != kindQuickCreate && !ctx.AskOnly {
 		writeRepositories(&b, ctx)
 	}
 

@@ -177,6 +177,10 @@
     "unconfigured_admin_cta": "Configure Team Agent",
     "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
     "team_agent_setup_failed": "Failed to set the Team Agent, please try again",
+    "discussion": {
+      "sub": "Send a message to start discussing.",
+      "composer_placeholder": "Message the team…"
+    },
     "stream": {
       "no_earlier": "No earlier messages",
       "composer_placeholder": "Message Team Agent…",
@@ -190,7 +194,33 @@
       "status_interrupted": "Interrupted",
       "model_label": "Model",
       "runtime_guide": "Start a local Agent in Settings first",
-      "model_update_failed": "Failed to update the model, please try again"
+      "model_update_failed": "Failed to update the model, please try again",
+      "stop": "Stop",
+      "cancel_already_finished": "This task has already finished and can't be cancelled",
+      "agent_requests_only": "Agent requests only",
+      "no_text_reply": "(No text reply)",
+      "withdrawn": "Withdrawn",
+      "copy": "Copy",
+      "copied": "Copied"
+    },
+    "queue_bar": {
+      "count_one": "{{count}} task queued",
+      "count_other": "{{count}} tasks queued",
+      "cancel": "Clear conversation",
+      "status_queued": "Queued",
+      "status_dispatched": "Dispatched",
+      "system_task": "System task",
+      "no_summary": "(No message summary)",
+      "cancel_already_finished": "This task has already finished and can't be cancelled"
+    },
+    "private": {
+      "needs_team_agent": "Private Ask uses the project's Team Agent. Configure one in the Team Agent tab first.",
+      "load_failed": "Failed to load your private session. Please retry.",
+      "empty_hint": "Ask anything about this project — only you can see this conversation, and the agent cannot modify project files.",
+      "composer_placeholder": "Ask privately…",
+      "stop": "Stop",
+      "stop_failed": "Failed to stop. Please retry.",
+      "model_follows_team_agent": "Model follows the Team Agent configuration"
     }
   },
   "governance": {

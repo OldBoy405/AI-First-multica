@@ -1085,6 +1085,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					if approvalSvc != nil {
 						r.Get("/gates", approvalSvc.HandleProjectGates)
 					}
+					r.Get("/private-chat", h.GetProjectPrivateChat)
+					r.Get("/discussion", h.GetProjectDiscussion)
 					r.Get("/resources", h.ListProjectResources)
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)

@@ -19,6 +19,15 @@ type Event struct {
 	// without re-deserializing Payload. See MUL-1138 phase 1.
 	TaskID        string
 	ChatSessionID string
+
+	// ChatRecipientID is the chat session creator's user id. Chat sessions
+	// are creator-private (the HTTP layer and ScopeAuthorizer both enforce
+	// creator-only access), so the WS bridge delivers every event that
+	// carries a ChatSessionID exclusively to this user via SendToUser —
+	// never on the workspace fanout (CR-2026-008). Producers that set
+	// ChatSessionID MUST set this too; the bridge fails closed (drops the
+	// event with an ERROR log) rather than fall back to broadcasting.
+	ChatRecipientID string
 }
 
 // Handler is a function that processes an event.

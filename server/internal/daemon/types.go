@@ -85,6 +85,7 @@ type Task struct {
 	ChatMessage              string                `json:"chat_message,omitempty"`                // user message content for chat tasks
 	ChatMessageAttachments   []ChatAttachmentMeta  `json:"chat_message_attachments,omitempty"`    // attachments linked to the chat message; agent uses these to `multica attachment download <id>`
 	ChatIntro                bool                  `json:"chat_intro,omitempty"`                  // true for the agent's proactive self-introduction chat (no user message); selects the self-introduction prompt in buildChatPrompt
+	AskOnly                  bool                  `json:"ask_only,omitempty"`                    // CR-2026-008: project-bound Private Ask chat task — read-only sandbox: no Repositories brief section, `multica repo checkout` rejected
 	AutopilotRunID           string                `json:"autopilot_run_id,omitempty"`            // non-empty for autopilot run_only tasks
 	AutopilotID              string                `json:"autopilot_id,omitempty"`                // autopilot that spawned this run
 	AutopilotTitle           string                `json:"autopilot_title,omitempty"`             // autopilot title used as task context

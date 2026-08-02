@@ -72,6 +72,29 @@ export function useSendProjectChatMessage(wsId: string, projectId: string) {
   });
 }
 
+// Cancel ("clear" / "stop") a task in the project's shared Team Agent queue
+// (CR-2026-007 DD-2). Same pattern as useSendProjectChatMessage: the caller
+// awaits mutateAsync and branches on the outcome. The server answers terminal
+// tasks with an idempotent 200 carrying the task's real status, so the three
+// UI branches (TSUG-007) are:
+//   1. result.status === "cancelled" → silent success — this includes a
+//      repeat cancel of an already-cancelled task (double click), no toast;
+//   2. any other terminal status (completed/failed) → "task already finished,
+//      cannot cancel" toast;
+//   3. thrown ApiError (403 etc.) → toast err.message.
+// This hook only owns the cross-cutting side effect: invalidating the
+// queue-status prefix on settle, which also covers the items list because its
+// key extends the same prefix (DD-3/TSUG-006).
+export function useCancelProjectQueueTask(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => api.cancelTaskById(taskId),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.queueStatus(wsId, projectId) });
+    },
+  });
+}
+
 // Bind a Team Agent to the project's group chat (CR-2026-006 FR-4/DD-4). Not
 // optimistic: the backend validates the agent exists in the workspace before
 // accepting it, so the outcome isn't locally predictable (CLAUDE.md's

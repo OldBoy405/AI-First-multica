@@ -96,9 +96,11 @@ func (q *Queries) CountCreatedIssueAssignees(ctx context.Context, arg CountCreat
 const countIssues = `-- name: CountIssues :one
 SELECT count(*) FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue from all
-  -- issue-listing surfaces (board/list/swimlane/gantt/my-issues route here).
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues from all issue-listing surfaces
+  -- (board/list/swimlane/gantt/my-issues route here).
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND ($2::text IS NULL OR i.status = $2)
   AND ($3::text IS NULL OR i.priority = $3)
   AND ($4::uuid IS NULL OR i.assignee_id = $4)
@@ -751,6 +753,51 @@ func (q *Queries) GetProjectChatIssue(ctx context.Context, arg GetProjectChatIss
 	return i, err
 }
 
+const getProjectDiscussionIssue = `-- name: GetProjectDiscussionIssue :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage FROM issue
+WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_discussion'
+`
+
+type GetProjectDiscussionIssueParams struct {
+	ProjectID   pgtype.UUID `json:"project_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// CR-2026-009: fetch the hidden per-project Discussion container issue.
+// At most one row exists per project (partial unique index issue_project_discussion_unique).
+func (q *Queries) GetProjectDiscussionIssue(ctx context.Context, arg GetProjectDiscussionIssueParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, getProjectDiscussionIssue, arg.ProjectID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+	)
+	return i, err
+}
+
 const listChildIssues = `-- name: ListChildIssues :many
 SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage FROM issue
 WHERE parent_issue_id = $1
@@ -880,9 +927,11 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue from all
-  -- issue-listing surfaces (board/list/swimlane/gantt/my-issues route here).
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues from all issue-listing surfaces
+  -- (board/list/swimlane/gantt/my-issues route here).
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND ($4::text IS NULL OR i.status = $4)
   AND ($5::text IS NULL OR i.priority = $5)
   AND ($6::uuid IS NULL OR i.assignee_id = $6)
@@ -1039,8 +1088,10 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue.
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues.
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND i.status NOT IN ('done', 'cancelled')
   AND ($2::text IS NULL OR i.priority = $2)
   AND ($3::uuid IS NULL OR i.assignee_id = $3)

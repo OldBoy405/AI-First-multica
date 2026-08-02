@@ -27,6 +27,11 @@
     "edit_advanced": "고급 양식으로 수정",
     "archive": "보관"
   },
+  "container_jump": {
+    "team_agent": "이 메시지는 프로젝트의 Team Agent 채팅 일부입니다.",
+    "discussion": "이 메시지는 프로젝트의 Discussion 일부입니다.",
+    "cta": "프로젝트 채팅으로 이동"
+  },
   "types": {
     "issue_assigned": "할당됨",
     "issue_subscribed": "구독됨",

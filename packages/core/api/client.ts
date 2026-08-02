@@ -179,6 +179,12 @@ import {
   ApproveCrResponseSchema,
   type ApproveCrResponse,
   type ApproveCrRequest,
+  EMPTY_QUEUE_STATUS_WITH_ITEMS,
+  QueueStatusWithItemsSchema,
+  type QueueStatusWithItems,
+  EMPTY_PROJECT_DISCUSSION,
+  ProjectDiscussionSchema,
+  type ProjectDiscussion,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1975,6 +1981,16 @@ export class ApiClient {
     return this.fetch(`/api/projects/${id}/queue-status`);
   }
 
+  // Same endpoint with ?include=items (CR-2026-007 DD-3): depth/limit plus
+  // the pending rows behind the number. A separate method (not an optional
+  // parameter) so existing depth-only consumers keep their exact return type.
+  async getProjectQueueItems(id: string): Promise<QueueStatusWithItems> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/queue-status?include=items`);
+    return parseWithFallback(raw, QueueStatusWithItemsSchema, EMPTY_QUEUE_STATUS_WITH_ITEMS, {
+      endpoint: "GET /api/projects/:id/queue-status?include=items",
+    });
+  }
+
   // Project group-chat context (CR-2026-006 TASK-01): the backing issue id and
   // the configured Team Agent id (empty string when unconfigured).
   async getProjectChat(id: string): Promise<ProjectChat> {
@@ -1982,6 +1998,16 @@ export class ApiClient {
     return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
       endpoint: "GET /api/projects/:id/chat",
     });
+  }
+
+  // Get-or-create the caller's Private Ask session for a project
+  // (CR-2026-008): the latest active project-bound chat_session, lazily
+  // created against the project's Team Agent. Throws a structured ApiError
+  // with code team_agent_not_configured (409) when the project has no agent
+  // bound — callers gate on projectChatOptions first, so that only fires on
+  // config drift.
+  async getProjectPrivateChat(id: string): Promise<ChatSession> {
+    return this.fetch(`/api/projects/${id}/private-chat`);
   }
 
   // Post a message to the project's Team Agent (CR-2026-006 TASK-02). On
@@ -2036,6 +2062,15 @@ export class ApiClient {
     );
     return parseWithFallback(raw, ApproveCrResponseSchema, EMPTY_APPROVE_CR_RESPONSE, {
       endpoint: "POST /api/workspaces/:wid/crs/:crId/approve",
+    });
+  }
+
+  // Project Discussion context (CR-2026-009): the backing container issue id,
+  // lazily created on first call. No agent binding — Discussion never drives one.
+  async getProjectDiscussion(id: string): Promise<ProjectDiscussion> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/discussion`);
+    return parseWithFallback(raw, ProjectDiscussionSchema, EMPTY_PROJECT_DISCUSSION, {
+      endpoint: "GET /api/projects/:id/discussion",
     });
   }
 

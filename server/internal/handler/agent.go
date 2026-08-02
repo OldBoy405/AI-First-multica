@@ -326,6 +326,7 @@ type AgentTaskResponse struct {
 	ChatMessage              string               `json:"chat_message,omitempty"`                // user message for chat tasks
 	ChatMessageAttachments   []ChatAttachmentMeta `json:"chat_message_attachments,omitempty"`    // attachments on the user message — agent calls `multica attachment download <id>` per entry
 	ChatIntro                bool                 `json:"chat_intro,omitempty"`                  // true for the agent's proactive self-introduction chat (is_agent_intro session, no user message); the daemon builds an intro prompt instead of a reply prompt
+	AskOnly                  bool                 `json:"ask_only,omitempty"`                    // CR-2026-008: project-bound Private Ask chat task — the daemon omits the Repositories brief section and rejects `multica repo checkout`. Optional field: old daemons ignore it (degrades to guidance-only)
 	AutopilotRunID           string               `json:"autopilot_run_id,omitempty"`            // non-empty for autopilot-spawned tasks
 	AutopilotID              string               `json:"autopilot_id,omitempty"`                // autopilot that spawned this task
 	AutopilotTitle           string               `json:"autopilot_title,omitempty"`             // autopilot title used as task context
@@ -364,6 +365,12 @@ type AgentTaskResponse struct {
 	InitiatorID    string `json:"initiator_id,omitempty"`    // user UUID (member) or agent UUID
 	InitiatorName  string `json:"initiator_name,omitempty"`  // display name of the initiator
 	InitiatorEmail string `json:"initiator_email,omitempty"` // member email; empty for agent initiators
+	// OriginatorUserID is the top-of-chain human originator of this task
+	// (agent_task_queue.originator_user_id), surfaced so the UI can decide
+	// "did I start this?" — e.g. stop-button visibility on the running task
+	// card (CR-2026-007 DD-1). Empty (omitted) when no human is in the chain
+	// (autopilot, system-driven); read-only attribution, not a credential.
+	OriginatorUserID string `json:"originator_user_id,omitempty"`
 	Kind           string `json:"kind"`                      // discriminator: "comment" | "autopilot" | "chat" | "quick_create" | "direct" — used by the activity row to label tasks that have no linked issue
 	// AuthToken is the task-scoped `mat_` token the daemon must inject as
 	// MULTICA_TOKEN in the agent process environment. The server binds it to
@@ -480,9 +487,10 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		// Surface task source so the UI can distinguish issue-linked tasks
 		// from chat-spawned or autopilot-spawned ones; all three may arrive
 		// with issue_id = "" once a task has no linked issue.
-		ChatSessionID:  uuidToString(t.ChatSessionID),
-		AutopilotRunID: uuidToString(t.AutopilotRunID),
-		Kind:           computeTaskKind(t),
+		ChatSessionID:    uuidToString(t.ChatSessionID),
+		AutopilotRunID:   uuidToString(t.AutopilotRunID),
+		Kind:             computeTaskKind(t),
+		OriginatorUserID: uuidToString(t.OriginatorUserID),
 	}
 }
 

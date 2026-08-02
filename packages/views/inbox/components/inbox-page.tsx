@@ -12,6 +12,7 @@ import {
   deduplicateInboxItems,
   useInboxUnreadCount,
 } from "@multica/core/inbox/queries";
+import { issueDetailOptions } from "@multica/core/issues/queries";
 import {
   useMarkInboxRead,
   useArchiveInbox,
@@ -54,6 +55,7 @@ import { PageHeader } from "../../layout/page-header";
 import { InboxListItem, useTimeAgo } from "./inbox-list-item";
 import { useTypeLabels } from "./inbox-detail-label";
 import { getInboxDisplayTitle } from "./inbox-display";
+import { ContainerJumpBanner } from "./container-jump-banner";
 import { useT } from "../../i18n";
 
 export function InboxPage() {
@@ -74,6 +76,20 @@ export function InboxPage() {
   const items = useMemo(() => deduplicateInboxItems(rawItems), [rawItems]);
 
   const selected = items.find((i) => (i.issue_id ?? i.id) === selectedKey) ?? null;
+
+  // Detect a Team Agent chat / Discussion container issue (CR-2026-009):
+  // same query IssueDetail itself makes for this issue_id, so React Query
+  // dedupes it — this doesn't add a second network round-trip.
+  const { data: selectedIssueDetail } = useQuery({
+    ...issueDetailOptions(wsId, selected?.issue_id ?? ""),
+    enabled: !!selected?.issue_id,
+  });
+  const containerMode: "team_agent" | "discussion" | null =
+    selectedIssueDetail?.origin_type === "project_chat"
+      ? "team_agent"
+      : selectedIssueDetail?.origin_type === "project_discussion"
+        ? "discussion"
+        : null;
 
   // Track the last key we actually resolved against the inbox list. Lets the
   // fallback effect distinguish "shared-link to a notification not in our
@@ -286,7 +302,12 @@ export function InboxPage() {
     </div>
   );
 
-  const detailContent = selected?.issue_id ? (
+  const detailContent = containerMode && selectedIssueDetail?.project_id ? (
+    <ContainerJumpBanner
+      projectHref={`${wsPaths.projectDetail(selectedIssueDetail.project_id)}?tab=chat&mode=${containerMode}`}
+      mode={containerMode}
+    />
+  ) : selected?.issue_id ? (
     // Key by issue_id (not inbox-item id): a new comment/reaction generates a
     // new inbox notification for the same issue, and the dedup helper picks the
     // newest one — keying on its id would remount IssueDetail on every event,

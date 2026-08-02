@@ -24,10 +24,15 @@ vi.mock("../../chat/components/chat-message-list", () => ({
 vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({ getActorName: () => "Someone" }),
 }));
+// taskId -> messages, mutated per test (default: no messages, matching the
+// original hardcoded stub) so the DD-4 filter tests can prove TimelineView
+// really is gated on `filterOn` rather than just always-empty.
+const messagesByTask: Record<string, unknown[]> = {};
+
 vi.mock("@multica/core/chat/queries", () => ({
   taskMessagesOptions: (taskId: string) => ({
     queryKey: ["task-messages", taskId],
-    queryFn: async () => [],
+    queryFn: async () => messagesByTask[taskId] ?? [],
     enabled: true,
   }),
 }));
@@ -113,14 +118,20 @@ vi.mock("@multica/core/api", async (importActual) => {
 // convention used elsewhere in this repo (see chat-input.test.tsx).
 const projectChatState = {
   drafts: {} as Record<string, string>,
+  agentRequestFilter: {} as Record<string, boolean>,
   setDraft: vi.fn((projectId: string, mode: string, text: string) => {
     const key = `${projectId}:${mode}`;
     if (text) projectChatState.drafts[key] = text;
     else delete projectChatState.drafts[key];
   }),
+  setAgentRequestFilter: vi.fn((projectId: string, value: boolean) => {
+    projectChatState.agentRequestFilter[projectId] = value;
+  }),
 };
 const sendMock = { mutateAsync: vi.fn(), isPending: false };
 const approveMock = { mutateAsync: vi.fn(), isPending: false };
+// CR-2026-007 T05: stop/cancel mutation shared instance, mirroring sendMock.
+const cancelMock = { mutateAsync: vi.fn(), isPending: false };
 
 vi.mock("@multica/core/projects", () => ({
   projectChatDraftKey: (projectId: string, mode: string) => `${projectId}:${mode}`,
@@ -132,6 +143,7 @@ vi.mock("@multica/core/projects", () => ({
   useSendProjectChatMessage: () => sendMock,
   // CR-2026-011 TASK-06: CrGateCard's ApprovalCard variant calls this.
   useApproveCr: () => approveMock,
+  useCancelProjectQueueTask: () => cancelMock,
   // Never resolves — keeps `queue` undefined so the live-queue path never
   // interferes with the tests that drive the 429 latch explicitly.
   projectQueueStatusOptions: (_wsId: string, id: string) => ({
@@ -169,7 +181,7 @@ function comment(id: string, at: string): TimelineEntry {
   };
 }
 
-function task(id: string, at: string): AgentTask {
+function task(id: string, at: string, overrides: Partial<AgentTask> = {}): AgentTask {
   return {
     id,
     agent_id: "agent-1",
@@ -183,6 +195,7 @@ function task(id: string, at: string): AgentTask {
     result: null,
     error: null,
     created_at: at,
+    ...overrides,
   };
 }
 
@@ -217,9 +230,16 @@ function gateCR(overrides: Partial<ProjectGateCR> & { nodeAt: string; nodeStatus
 
 beforeEach(() => {
   for (const k of Object.keys(projectChatState.drafts)) delete projectChatState.drafts[k];
+  for (const k of Object.keys(projectChatState.agentRequestFilter)) {
+    delete projectChatState.agentRequestFilter[k];
+  }
+  for (const k of Object.keys(messagesByTask)) delete messagesByTask[k];
   projectChatState.setDraft.mockClear();
+  projectChatState.setAgentRequestFilter.mockClear();
   sendMock.mutateAsync = vi.fn();
   sendMock.isPending = false;
+  cancelMock.mutateAsync = vi.fn().mockResolvedValue({ status: "cancelled" });
+  cancelMock.isPending = false;
   cfg.canEdit = true;
   cfg.runtimeStatus = "online";
   cfg.agent = null;
@@ -229,10 +249,18 @@ afterEach(() => {
   cleanup();
 });
 
+const streamBaseProps = {
+  wsId: "ws-1",
+  projectId: "proj-1",
+  canConfigure: false,
+  filterOn: false,
+};
+
 describe("TeamAgentStreamView", () => {
   it("coalesces comments and task execution cards in chronological order", () => {
     const { container } = renderWithProviders(
       <TeamAgentStreamView
+        {...streamBaseProps}
         comments={[comment("c1", "2026-01-01T00:00:01.500Z")]}
         tasks={[
           task("t1", "2026-01-01T00:00:01.000Z"),
@@ -262,6 +290,7 @@ describe("TeamAgentStreamView", () => {
   it("interleaves gate-node cards from crs by timestamp (CR-2026-011 TASK-06)", () => {
     const { container } = renderWithProviders(
       <TeamAgentStreamView
+        {...streamBaseProps}
         comments={[comment("c1", "2026-01-01T00:00:02.000Z")]}
         tasks={[task("t1", "2026-01-01T00:00:01.000Z")]}
         crs={[
@@ -273,8 +302,6 @@ describe("TeamAgentStreamView", () => {
             nodeKind: "skill",
           }),
         ]}
-        wsId="ws-1"
-        projectId="proj-1"
         currentUserId="member-1"
       />,
     );
@@ -292,18 +319,6 @@ describe("TeamAgentStreamView", () => {
       "project-chat-user-bubble",
       "cr-gate-blocked-card",
     ]);
-  });
-
-  it("does not render gate cards when wsId/projectId are not provided", () => {
-    renderWithProviders(
-      <TeamAgentStreamView
-        comments={[]}
-        tasks={[]}
-        crs={[gateCR({ nodeAt: "2026-01-01T00:00:00.000Z", nodeStatus: "running" })]}
-        currentUserId="member-1"
-      />,
-    );
-    expect(screen.queryByTestId("cr-gate-approval-card")).toBeNull();
   });
 });
 
@@ -496,5 +511,327 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
         model: "claude-opus",
       }),
     );
+  });
+});
+
+// ─── CR-2026-007 T05: stop button, filter summary, withdrawn badge, copy ───
+
+describe("TaskExecutionCard stop button (DD-1)", () => {
+  it("shows Stop for the task's own originator on a running task", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.getByTestId("project-chat-task-stop")).toBeTruthy();
+  });
+
+  it("hides Stop on a running task started by someone else", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-2",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.queryByTestId("project-chat-task-stop")).toBeNull();
+  });
+
+  it("shows Stop for workspace owner/admin even when they aren't the originator", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        canConfigure
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-2",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.getByTestId("project-chat-task-stop")).toBeTruthy();
+  });
+
+  it("hides Stop once the task has left the running status (queued/completed)", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "queued",
+            originator_user_id: "member-1",
+          }),
+          task("t2", "2026-01-01T00:00:01Z", {
+            status: "completed",
+            originator_user_id: "member-1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.queryByTestId("project-chat-task-stop")).toBeNull();
+  });
+
+  it("calls the cancel mutation with the task id and stays silent on a cancelled result", async () => {
+    const { toast } = await import("sonner");
+    // `toast.error` is a single module-level mock shared across every test in
+    // this file (see the `vi.mock("sonner", …)` above); clear its call log so
+    // this "no toast" assertion isn't tripped by an earlier, unrelated test.
+    vi.mocked(toast.error).mockClear();
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+
+    await act(async () => {
+      screen.getByTestId("project-chat-task-stop").click();
+    });
+
+    expect(cancelMock.mutateAsync).toHaveBeenCalledWith("t1");
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("toasts 'already finished' when the settled status isn't cancelled (TSUG-007)", async () => {
+    cancelMock.mutateAsync = vi.fn().mockResolvedValue({ status: "completed" });
+    const { toast } = await import("sonner");
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+
+    await act(async () => {
+      screen.getByTestId("project-chat-task-stop").click();
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(enProjects.chat.stream.cancel_already_finished);
+  });
+
+  it("toasts the server message when cancel throws an ApiError", async () => {
+    cancelMock.mutateAsync = vi
+      .fn()
+      .mockRejectedValue(new ApiError("no access to this agent", 403, "Forbidden"));
+    const { toast } = await import("sonner");
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "running",
+            originator_user_id: "member-1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+
+    await act(async () => {
+      screen.getByTestId("project-chat-task-stop").click();
+    });
+
+    expect(toast.error).toHaveBeenCalledWith("no access to this agent");
+  });
+});
+
+describe("TaskExecutionCard agent-requests-only filter (DD-4)", () => {
+  it("renders TimelineView when the filter is off", async () => {
+    messagesByTask["t1"] = [
+      { task_id: "t1", issue_id: "issue-1", seq: 1, type: "text", content: "hi" },
+    ];
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        filterOn={false}
+        comments={[]}
+        tasks={[task("t1", "2026-01-01T00:00:00Z", { status: "completed" })]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(await screen.findByTestId("timeline-view")).toBeTruthy();
+    expect(container.querySelector('[data-testid="project-chat-task-summary-output"]')).toBeNull();
+  });
+
+  it("hides TimelineView and renders only result.output as plain text when the filter is on", async () => {
+    messagesByTask["t1"] = [
+      { task_id: "t1", issue_id: "issue-1", seq: 1, type: "text", content: "hi" },
+    ];
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        filterOn
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", {
+            status: "completed",
+            result: {
+              output: "All done.",
+              pr_url: "https://example.com/pr/1",
+              tool_calls: [{ name: "bash" }],
+            },
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+
+    // Give the (disabled) messages query a tick — it must not populate
+    // TimelineView even if it somehow resolved.
+    await Promise.resolve();
+    expect(container.querySelector('[data-testid="timeline-view"]')).toBeNull();
+
+    const summary = screen.getByTestId("project-chat-task-summary-output");
+    expect(summary.textContent).toBe("All done.");
+    // The whole `result` object must never be dumped into the DOM.
+    expect(container.textContent).not.toContain("pr_url");
+    expect(container.textContent).not.toContain("tool_calls");
+    expect(container.textContent).not.toContain("bash");
+  });
+
+  it("shows the empty-output placeholder when result.output is an empty string", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        filterOn
+        comments={[]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:00Z", { status: "completed", result: { output: "" } }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.getByTestId("project-chat-task-summary-output").textContent).toBe(
+      enProjects.chat.stream.no_text_reply,
+    );
+  });
+
+  it("round-trips: toggling the filter on then off restores the original render", () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const tasks = [task("t1", "2026-01-01T00:00:00Z", { status: "completed" })];
+    const tree = (filterOn: boolean) => (
+      <QueryClientProvider client={qc}>
+        <I18nProvider locale="en" resources={RESOURCES}>
+          <TeamAgentStreamView
+            {...streamBaseProps}
+            filterOn={filterOn}
+            comments={[]}
+            tasks={tasks}
+            currentUserId="member-1"
+          />
+        </I18nProvider>
+      </QueryClientProvider>
+    );
+
+    const { rerender, container } = render(tree(false));
+    const before = container.innerHTML;
+
+    rerender(tree(true));
+    expect(screen.getByTestId("project-chat-task-summary-output")).toBeTruthy();
+
+    rerender(tree(false));
+    expect(container.innerHTML).toBe(before);
+  });
+});
+
+describe("UserBubble withdrawn badge (DD-5)", () => {
+  it("badges a comment whose id is the trigger_comment_id of a cancelled task", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[comment("c1", "2026-01-01T00:00:00Z")]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:01Z", {
+            status: "cancelled",
+            trigger_comment_id: "c1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.getByTestId("project-chat-withdrawn-badge")).toBeTruthy();
+  });
+
+  it("does not badge a comment unrelated to any cancelled task", () => {
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[comment("c1", "2026-01-01T00:00:00Z")]}
+        tasks={[
+          task("t1", "2026-01-01T00:00:01Z", {
+            status: "completed",
+            trigger_comment_id: "c1",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+    expect(screen.queryByTestId("project-chat-withdrawn-badge")).toBeNull();
+  });
+});
+
+describe("UserBubble copy button (FR-7)", () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+
+  beforeEach(() => {
+    writeText.mockClear();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+  });
+
+  it("copies the bubble's full text via the Clipboard API and toasts success", async () => {
+    const { toast } = await import("sonner");
+    renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[comment("c1", "2026-01-01T00:00:00Z")]}
+        tasks={[]}
+        currentUserId="member-1"
+      />,
+    );
+
+    await act(async () => {
+      screen.getByTestId("project-chat-copy").click();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith("msg-c1");
+    expect(toast.success).toHaveBeenCalledWith(enProjects.chat.stream.copied);
   });
 });
