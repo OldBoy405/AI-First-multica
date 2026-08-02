@@ -190,7 +190,14 @@
       "status_interrupted": "Interrupted",
       "model_label": "Model",
       "runtime_guide": "Start a local Agent in Settings first",
-      "model_update_failed": "Failed to update the model, please try again"
+      "model_update_failed": "Failed to update the model, please try again",
+      "stop": "Stop",
+      "cancel_already_finished": "This task has already finished and can't be cancelled",
+      "agent_requests_only": "Agent requests only",
+      "no_text_reply": "(No text reply)",
+      "withdrawn": "Withdrawn",
+      "copy": "Copy",
+      "copied": "Copied"
     }
   }
 }

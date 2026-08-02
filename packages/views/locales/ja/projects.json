@@ -188,7 +188,14 @@
       "status_interrupted": "中断",
       "model_label": "モデル",
       "runtime_guide": "先に設定でローカル Agent を起動してください",
-      "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
+      "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください",
+      "stop": "停止",
+      "cancel_already_finished": "このタスクはすでに終了しているため、キャンセルできません",
+      "agent_requests_only": "Agent リクエストのみ表示",
+      "no_text_reply": "（テキスト回答なし）",
+      "withdrawn": "撤回済み",
+      "copy": "コピー",
+      "copied": "コピーしました"
     }
   }
 }

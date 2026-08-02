@@ -188,7 +188,14 @@
       "status_interrupted": "중단됨",
       "model_label": "모델",
       "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
-      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
+      "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요",
+      "stop": "중지",
+      "cancel_already_finished": "이 작업은 이미 종료되어 취소할 수 없습니다",
+      "agent_requests_only": "Agent 요청만 보기",
+      "no_text_reply": "(텍스트 응답 없음)",
+      "withdrawn": "철회됨",
+      "copy": "복사",
+      "copied": "복사했습니다"
     }
   }
 }
