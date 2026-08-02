@@ -144,6 +144,32 @@ describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
     );
   });
 
+  it("shows a pending-message bubble while the send is in flight (CLAUDE.md pending-message pattern)", async () => {
+    let resolveSend!: (v: unknown) => void;
+    mocks.sendChatMessage.mockReturnValue(new Promise((resolve) => { resolveSend = resolve; }));
+    renderPane();
+    await waitFor(() => expect(screen.getByTestId("private-ask-composer-input")).toBeTruthy());
+
+    fireEvent.change(screen.getByTestId("private-ask-composer-input"), {
+      target: { value: "still thinking?" },
+    });
+    fireEvent.click(screen.getByTestId("private-ask-send"));
+
+    // Visible pending state appears immediately — not silent optimism, and
+    // not just a spinner on the button.
+    const bubble = await screen.findByTestId("private-ask-pending-message");
+    expect(bubble.textContent).toContain("still thinking?");
+    // The empty-state greeting must not still be showing behind the bubble.
+    expect(screen.queryByText(enProjects.chat.greetings.private_ask)).toBeNull();
+    // Composer disabled while a send is in flight.
+    expect(
+      (screen.getByTestId("private-ask-composer-input") as HTMLTextAreaElement).disabled,
+    ).toBe(true);
+
+    resolveSend({ message: { id: "m1" } });
+    await waitFor(() => expect(screen.queryByTestId("private-ask-pending-message")).toBeNull());
+  });
+
   it("keeps the draft when sending fails", async () => {
     mocks.sendChatMessage.mockRejectedValue(new Error("boom"));
     renderPane();

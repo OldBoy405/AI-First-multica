@@ -55,16 +55,25 @@ export function ProjectPrivateAsk({
 
   // Gate on the panel's chat context: only ask for (and lazily create) the
   // private session once a Team Agent is bound. Unconfigured projects show
-  // a hint instead of surfacing a 409 from the get-or-create.
-  const { data: chat } = useQuery(projectChatOptions(wsId, projectId));
-  const configured = chat !== undefined && chat.team_agent_id !== "";
+  // a hint instead of surfacing a 409 from the get-or-create. isLoading on
+  // THIS query is checked before reading `configured` — same order
+  // TeamAgentPane uses for its identical projectChatOptions query — so a
+  // fresh mount doesn't flash "needs Team Agent" before the config loads.
+  const { data: chat, isLoading: chatLoading } = useQuery(projectChatOptions(wsId, projectId));
 
-  const { data: session, isLoading, isError } = useQuery({
+  const { data: session, isLoading: sessionLoading, isError } = useQuery({
     ...projectPrivateChatOptions(wsId, projectId),
-    enabled: configured,
+    enabled: chat !== undefined && chat.team_agent_id !== "",
   });
 
-  if (!configured) {
+  if (chatLoading || sessionLoading) {
+    return (
+      <Centered>
+        <p className="text-xs text-muted-foreground">{t(($) => $.chat.loading)}</p>
+      </Centered>
+    );
+  }
+  if (chat === undefined || chat.team_agent_id === "") {
     return (
       <Centered>
         <p
@@ -73,13 +82,6 @@ export function ProjectPrivateAsk({
         >
           {t(($) => $.chat.private.needs_team_agent)}
         </p>
-      </Centered>
-    );
-  }
-  if (isLoading) {
-    return (
-      <Centered>
-        <p className="text-xs text-muted-foreground">{t(($) => $.chat.loading)}</p>
       </Centered>
     );
   }
@@ -125,6 +127,13 @@ function PrivateAskSession({
   const { t } = useT("projects");
   const { data: messages = [] } = useQuery(chatMessagesOptions(sessionId));
   const { data: pendingTask } = useQuery(pendingChatTaskOptions(sessionId));
+  // CLAUDE.md pending-message pattern (mirrors TeamAgentComposer's
+  // pendingMessage): render the just-sent text immediately with a visible
+  // pending state, not silent optimism. Lifted here (rather than local to
+  // the composer) so the empty-state greeting below also treats "I just
+  // sent something" as non-empty. The real message lands via WS invalidate
+  // + refetch of chatMessagesOptions; this local bubble only covers the gap.
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
 
   const presence = useAgentPresenceDetail(wsId, agentId);
   const availability = presence === "loading" ? undefined : presence.availability;
@@ -135,7 +144,7 @@ function PrivateAskSession({
       data-testid="private-ask-session"
     >
       <div className="min-h-0 flex-1">
-        {messages.length === 0 && !pendingTask?.task_id ? (
+        {messages.length === 0 && !pendingTask?.task_id && !pendingMessage ? (
           <Centered>
             <p className="text-sm font-medium">
               {t(($) => $.chat.greetings.private_ask)}
@@ -158,6 +167,8 @@ function PrivateAskSession({
         sessionId={sessionId}
         agentId={agentId}
         pendingTaskId={pendingTask?.task_id ?? null}
+        pendingMessage={pendingMessage}
+        setPendingMessage={setPendingMessage}
       />
     </div>
   );
@@ -169,12 +180,16 @@ function PrivateAskComposer({
   sessionId,
   agentId,
   pendingTaskId,
+  pendingMessage,
+  setPendingMessage,
 }: {
   projectId: string;
   wsId: string;
   sessionId: string;
   agentId: string;
   pendingTaskId: string | null;
+  pendingMessage: string | null;
+  setPendingMessage: (message: string | null) => void;
 }) {
   const { t } = useT("projects");
   const qc = useQueryClient();
@@ -193,6 +208,7 @@ function PrivateAskComposer({
     const content = draft.trim();
     if (!content || sending || running) return;
     setSending(true);
+    setPendingMessage(content);
     try {
       await api.sendChatMessage(sessionId, content);
       setDraft(projectId, "private_ask", "");
@@ -202,6 +218,7 @@ function PrivateAskComposer({
       toast.error(t(($) => $.chat.stream.send_failed));
     } finally {
       setSending(false);
+      setPendingMessage(null);
     }
   };
 
@@ -219,6 +236,14 @@ function PrivateAskComposer({
 
   return (
     <div className="shrink-0 border-t px-4 py-3">
+      {pendingMessage && (
+        <div data-testid="private-ask-pending-message" className="mb-2 flex justify-end">
+          <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+            <span className="break-words">{pendingMessage}</span>
+          </div>
+        </div>
+      )}
       {/* Read-only model badge (SDD-SUG-003): the model follows the Team
           Agent's configuration; Private Ask deliberately offers no editing
           entry point (a personal pane must not mutate the shared agent). */}
@@ -245,6 +270,7 @@ function PrivateAskComposer({
           data-testid="private-ask-composer-input"
           value={draft}
           rows={1}
+          disabled={running || sending}
           placeholder={t(($) => $.chat.private.composer_placeholder)}
           onChange={(e) => setDraft(projectId, "private_ask", e.target.value)}
           onKeyDown={(e) => {
@@ -253,7 +279,7 @@ function PrivateAskComposer({
               void handleSend();
             }
           }}
-          className="max-h-32 min-h-[24px] flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          className="max-h-32 min-h-[24px] flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
         />
         {running ? (
           <Button

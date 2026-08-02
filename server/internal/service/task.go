@@ -59,11 +59,14 @@ type TaskService struct {
 	analyticsContextOrder []string
 
 	// chatCreators memoizes chat_session.id -> creator_id for the per-user
-	// realtime delivery of chat events (CR-2026-008). The mapping is
-	// immutable (a session's creator never changes), so entries never
-	// invalidate; sessions are bounded per workspace so unbounded growth is
-	// not a practical concern.
-	chatCreators sync.Map
+	// realtime delivery of chat events (CR-2026-008). Entries are immutable
+	// (a session's creator never changes) but the cache is process-lifetime,
+	// so it's bounded FIFO — same shape as analyticsContextCache/
+	// analyticsContextOrder above — rather than left to grow with the
+	// server's total chat session count over its uptime.
+	chatCreatorsMu    sync.Mutex
+	chatCreatorsCache map[string]string
+	chatCreatorsOrder []string
 }
 
 // ComposioOverlayBuilder is the seam TaskService uses to build the per-task
@@ -124,6 +127,12 @@ func truncateForSummary(s string, maxRunes int) string {
 
 const (
 	taskAnalyticsContextCacheMax = 4096
+	// chatCreatorCacheMax bounds TaskService.chatCreators the same way
+	// taskAnalyticsContextCacheMax bounds analyticsContextCache below — a
+	// process-lifetime FIFO cap, not a per-workspace one (CR-2026-008 code
+	// review CODE-BLOCK-003: chat sessions accumulate across the server's
+	// whole uptime, not just one workspace).
+	chatCreatorCacheMax = 4096
 	// claimResponseRecoveryWindow must exceed daemon client.Timeout for
 	// /tasks/claim (30s) plus /tasks/{id}/start (30s) plus scheduling slack.
 	// Longer pre-start work is protected by prepareLeaseDuration instead of
@@ -2776,16 +2785,43 @@ func (s *TaskService) ChatSessionCreatorID(ctx context.Context, sessionID pgtype
 		return ""
 	}
 	key := util.UUIDToString(sessionID)
-	if v, ok := s.chatCreators.Load(key); ok {
-		return v.(string)
+	if creator, ok := s.cachedChatSessionCreator(key); ok {
+		return creator
 	}
 	sess, err := s.Queries.GetChatSession(ctx, sessionID)
 	if err != nil {
 		return ""
 	}
 	creator := util.UUIDToString(sess.CreatorID)
-	s.chatCreators.Store(key, creator)
+	s.storeChatSessionCreator(key, creator)
 	return creator
+}
+
+func (s *TaskService) cachedChatSessionCreator(key string) (string, bool) {
+	s.chatCreatorsMu.Lock()
+	defer s.chatCreatorsMu.Unlock()
+	if s.chatCreatorsCache == nil {
+		return "", false
+	}
+	creator, ok := s.chatCreatorsCache[key]
+	return creator, ok
+}
+
+func (s *TaskService) storeChatSessionCreator(key, creator string) {
+	s.chatCreatorsMu.Lock()
+	defer s.chatCreatorsMu.Unlock()
+	if s.chatCreatorsCache == nil {
+		s.chatCreatorsCache = make(map[string]string)
+	}
+	if _, ok := s.chatCreatorsCache[key]; !ok {
+		s.chatCreatorsOrder = append(s.chatCreatorsOrder, key)
+		if len(s.chatCreatorsOrder) > chatCreatorCacheMax {
+			oldest := s.chatCreatorsOrder[0]
+			s.chatCreatorsOrder = s.chatCreatorsOrder[1:]
+			delete(s.chatCreatorsCache, oldest)
+		}
+	}
+	s.chatCreatorsCache[key] = creator
 }
 
 func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, task db.AgentTaskQueue) {

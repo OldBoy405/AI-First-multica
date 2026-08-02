@@ -150,6 +150,13 @@ type repoCacheBackend interface {
 }
 
 // Daemon is the local agent runtime that polls for and executes tasks.
+// activeTaskAuth is the per-task checkout-authorization record held in
+// Daemon.activeTaskAuth for the duration of handleTask. See that field's doc.
+type activeTaskAuth struct {
+	authToken string
+	askOnly   bool
+}
+
 type Daemon struct {
 	cfg        Config
 	client     *Client
@@ -198,10 +205,18 @@ type Daemon struct {
 	activeTasks   atomic.Int64       // number of tasks currently in handleTask; exposed via /health
 	ready         atomic.Bool        // false until preflight completes; gates /health status (starting -> running)
 
-	// askOnlyTasks tracks in-flight ask-only task IDs (project-bound Private
-	// Ask sessions, CR-2026-008) so repoCheckoutHandler can reject checkout
-	// requests from their agents. Entries live for the duration of handleTask.
-	askOnlyTasks sync.Map
+	// activeTaskAuth tracks every in-flight task's checkout-authorization info
+	// (task.ID -> activeTaskAuth), keyed for the duration of handleTask. It
+	// backs repoCheckoutHandler's per-task identity check: a checkout request
+	// must present the AuthToken the daemon actually issued to that task's own
+	// process env (MULTICA_TOKEN) — the same credential the CLI already reads
+	// to call the main server API, reused here instead of minting a second
+	// secret. This closes CR-2026-008's ask-only gap: req.TaskID alone is
+	// client-supplied and trivially spoofed/omitted by the very agent process
+	// being restricted; requiring the matching token means an ask-only task's
+	// agent cannot impersonate a different (non-restricted) task on the same
+	// daemon, because it never sees that task's distinct token.
+	activeTaskAuth sync.Map
 
 	// claimMu guards pauseClaims and claimsInFlight. It is held only for the
 	// microseconds it takes to make a decision; ClaimTask itself runs without
@@ -2862,14 +2877,16 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		taskLog.Info("picked task", "issue", task.IssueID, "agent", agentName, "provider", provider)
 	}
 
+	// Register this task's checkout-authorization info for the duration of
+	// handleTask (all tasks, not just ask-only — see activeTaskAuth doc).
 	// Ask-only tasks (project-bound Private Ask sessions, CR-2026-008) must
-	// not be able to materialize a repo worktree. The brief already omits the
-	// Repositories section for them; this registration backs that guidance
-	// with enforcement in repoCheckoutHandler, since the checkout URL could
-	// come from the user's message rather than the brief.
-	if task.AskOnly {
-		d.askOnlyTasks.Store(task.ID, struct{}{})
-		defer d.askOnlyTasks.Delete(task.ID)
+	// not be able to materialize a repo worktree; the brief already omits the
+	// Repositories section for them, and this registration backs that
+	// guidance with enforcement in repoCheckoutHandler, since the checkout
+	// URL could come from the user's message rather than the brief.
+	if task.AuthToken != "" {
+		d.activeTaskAuth.Store(task.ID, activeTaskAuth{authToken: task.AuthToken, askOnly: task.AskOnly})
+		defer d.activeTaskAuth.Delete(task.ID)
 	}
 	taskLog.Debug("task context",
 		"workspace_id", task.WorkspaceID,

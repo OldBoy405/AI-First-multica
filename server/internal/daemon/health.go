@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,12 @@ type repoCheckoutRequest struct {
 	Ref         string `json:"ref,omitempty"`
 	AgentName   string `json:"agent_name"`
 	TaskID      string `json:"task_id"`
+	// AuthToken must equal the MULTICA_TOKEN the daemon issued to this
+	// task's own process env (CR-2026-008) — proves the caller actually is
+	// the task it claims to be via TaskID, since TaskID alone is an
+	// unauthenticated client-supplied field an agent process could otherwise
+	// spoof to impersonate a different in-flight task on the same daemon.
+	AuthToken string `json:"auth_token"`
 }
 
 // healthHandler returns the /health HTTP handler. Extracted from serveHealth
@@ -185,11 +192,24 @@ func (d *Daemon) repoCheckoutHandler() http.HandlerFunc {
 			return
 		}
 
-		// Ask-only tasks (project-bound Private Ask sessions, CR-2026-008)
-		// run in a read-only sandbox: no repo worktrees, regardless of where
-		// the URL came from. The brief already hides the Repositories
-		// section; this is the enforcement half.
-		if _, askOnly := d.askOnlyTasks.Load(strings.TrimSpace(req.TaskID)); askOnly {
+		// Verify the caller actually is the task it claims to be (task_id +
+		// its own auth token, CR-2026-008 code review CODE-BLOCK-001) before
+		// consulting that task's ask-only flag — otherwise an ask-only
+		// agent could simply omit task_id (or name a different, unrestricted
+		// in-flight task) to bypass the read-only sandbox below. Applies to
+		// every task, not just ask-only ones, so "don't send a token" is
+		// never itself a bypass.
+		rawAuth, identified := d.activeTaskAuth.Load(strings.TrimSpace(req.TaskID))
+		if !identified {
+			http.Error(w, "unknown or completed task", http.StatusForbidden)
+			return
+		}
+		auth := rawAuth.(activeTaskAuth)
+		if subtle.ConstantTimeCompare([]byte(auth.authToken), []byte(req.AuthToken)) != 1 {
+			http.Error(w, "task auth token mismatch", http.StatusForbidden)
+			return
+		}
+		if auth.askOnly {
 			http.Error(w, "read-only chat session: repo checkout is not available in Private Ask", http.StatusForbidden)
 			return
 		}
