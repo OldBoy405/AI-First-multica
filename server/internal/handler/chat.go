@@ -1119,7 +1119,16 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "not your task")
 			return
 		}
-	} else {
+	} else if uuidToString(task.OriginatorUserID) != userID {
+		// CR-2026-007: the task originator may always cancel their own task,
+		// so originator == caller skips the checks below entirely. Under a
+		// private Team Agent a member can enqueue a task (send path) but the
+		// canAccessPrivateAgent gate used to 403 the cancel — a "can send,
+		// cannot withdraw" asymmetry. The originator is inherently aware of
+		// their own task and the response only describes it, so this leaks
+		// nothing. Every non-originator caller still goes through the
+		// original access + owner/admin checks below, unchanged.
+		//
 		// Issue / autopilot / quick_create tasks are all visible on the
 		// agent Activity tab + workspace snapshot, which gate private
 		// agents. Mirror that gate here.
