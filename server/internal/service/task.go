@@ -57,6 +57,13 @@ type TaskService struct {
 	analyticsContextMu    sync.Mutex
 	analyticsContextCache map[string]analytics.TaskContext
 	analyticsContextOrder []string
+
+	// chatCreators memoizes chat_session.id -> creator_id for the per-user
+	// realtime delivery of chat events (CR-2026-008). The mapping is
+	// immutable (a session's creator never changes), so entries never
+	// invalidate; sessions are bounded per workspace so unbounded growth is
+	// not a practical concern.
+	chatCreators sync.Map
 }
 
 // ComposioOverlayBuilder is the seam TaskService uses to build the per-task
@@ -2416,10 +2423,11 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 		}
 
 		if workspaceID != "" {
-			s.Bus.Publish(events.Event{
+			evt := events.Event{
 				Type:        protocol.EventTaskFailed,
 				WorkspaceID: workspaceID,
 				ActorType:   "system",
+				TaskID:      util.UUIDToString(t.ID),
 				Payload: map[string]any{
 					"task_id":        util.UUIDToString(t.ID),
 					"agent_id":       util.UUIDToString(t.AgentID),
@@ -2427,7 +2435,12 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 					"status":         "failed",
 					"failure_reason": failureReason,
 				},
-			})
+			}
+			if t.ChatSessionID.Valid {
+				evt.ChatSessionID = util.UUIDToString(t.ChatSessionID)
+				evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, t.ChatSessionID)
+			}
+			s.Bus.Publish(evt)
 		}
 
 		affectedAgents[util.UUIDToString(t.AgentID)] = t.AgentID
@@ -2457,9 +2470,12 @@ func (s *TaskService) runInTx(ctx context.Context, fn func(*db.Queries) error) e
 	return tx.Commit(ctx)
 }
 
-// ReportProgress broadcasts a progress update via the event bus.
-func (s *TaskService) ReportProgress(ctx context.Context, taskID string, workspaceID string, summary string, step, total int) {
-	s.Bus.Publish(events.Event{
+// ReportProgress broadcasts a progress update via the event bus. The task row
+// is passed (not just its id) so chat-task progress can be routed per-user
+// instead of on the workspace fanout (CR-2026-008).
+func (s *TaskService) ReportProgress(ctx context.Context, task db.AgentTaskQueue, workspaceID string, summary string, step, total int) {
+	taskID := util.UUIDToString(task.ID)
+	evt := events.Event{
 		Type:        protocol.EventTaskProgress,
 		WorkspaceID: workspaceID,
 		ActorType:   "system",
@@ -2471,7 +2487,12 @@ func (s *TaskService) ReportProgress(ctx context.Context, taskID string, workspa
 			Step:    step,
 			Total:   total,
 		},
-	})
+	}
+	if task.ChatSessionID.Valid {
+		evt.ChatSessionID = util.UUIDToString(task.ChatSessionID)
+		evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+	}
+	s.Bus.Publish(evt)
 }
 
 // ReconcileAgentStatus refreshes agent status from the current active task set.
@@ -2731,13 +2752,40 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 	if workspaceID == "" {
 		return
 	}
-	s.Bus.Publish(events.Event{
+	evt := events.Event{
 		Type:        protocol.EventTaskDispatch,
 		WorkspaceID: workspaceID,
 		ActorType:   "system",
 		ActorID:     "",
+		TaskID:      util.UUIDToString(task.ID),
 		Payload:     payload,
-	})
+	}
+	if task.ChatSessionID.Valid {
+		evt.ChatSessionID = util.UUIDToString(task.ChatSessionID)
+		evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+	}
+	s.Bus.Publish(evt)
+}
+
+// ChatSessionCreatorID resolves (and memoizes) the creator of a chat session,
+// for use as events.Event.ChatRecipientID. Returns "" when the session cannot
+// be loaded — the WS bridge then fails closed (drops the event) instead of
+// broadcasting private content to the workspace.
+func (s *TaskService) ChatSessionCreatorID(ctx context.Context, sessionID pgtype.UUID) string {
+	if !sessionID.Valid {
+		return ""
+	}
+	key := util.UUIDToString(sessionID)
+	if v, ok := s.chatCreators.Load(key); ok {
+		return v.(string)
+	}
+	sess, err := s.Queries.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return ""
+	}
+	creator := util.UUIDToString(sess.CreatorID)
+	s.chatCreators.Store(key, creator)
+	return creator
 }
 
 func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, task db.AgentTaskQueue) {
@@ -2751,16 +2799,22 @@ func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, 
 		"issue_id": util.UUIDToString(task.IssueID),
 		"status":   task.Status,
 	}
-	if task.ChatSessionID.Valid {
-		payload["chat_session_id"] = util.UUIDToString(task.ChatSessionID)
-	}
-	s.Bus.Publish(events.Event{
+	evt := events.Event{
 		Type:        eventType,
 		WorkspaceID: workspaceID,
 		ActorType:   "system",
 		ActorID:     "",
+		TaskID:      util.UUIDToString(task.ID),
 		Payload:     payload,
-	})
+	}
+	if task.ChatSessionID.Valid {
+		payload["chat_session_id"] = util.UUIDToString(task.ChatSessionID)
+		// Chat-task lifecycle events carry private-session context and are
+		// delivered per-user, never on the workspace fanout (CR-2026-008).
+		evt.ChatSessionID = util.UUIDToString(task.ChatSessionID)
+		evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+	}
+	s.Bus.Publish(evt)
 }
 
 // ResolveTaskWorkspaceID determines the workspace ID for a task.
@@ -2816,12 +2870,13 @@ func (s *TaskService) broadcastChatDone(ctx context.Context, task db.AgentTaskQu
 		}
 	}
 	s.Bus.Publish(events.Event{
-		Type:          protocol.EventChatDone,
-		WorkspaceID:   workspaceID,
-		ActorType:     "system",
-		ActorID:       "",
-		ChatSessionID: util.UUIDToString(task.ChatSessionID),
-		Payload:       payload,
+		Type:            protocol.EventChatDone,
+		WorkspaceID:     workspaceID,
+		ActorType:       "system",
+		ActorID:         "",
+		ChatSessionID:   util.UUIDToString(task.ChatSessionID),
+		ChatRecipientID: s.ChatSessionCreatorID(ctx, task.ChatSessionID),
+		Payload:         payload,
 	})
 }
 

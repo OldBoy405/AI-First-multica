@@ -101,7 +101,7 @@ func (h *Handler) maybeGenerateChatTitleAsync(workspaceID, userID string, sessio
 		// Reuse the existing chat:session_updated realtime channel so the
 		// frontend refreshes the title in place, identical to a manual rename.
 		resolvedSessionID := uuidToString(updated.ID)
-		h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, protocol.ChatSessionUpdatedPayload{
+		h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionUpdatedPayload{
 			ChatSessionID: resolvedSessionID,
 			Title:         updated.Title,
 			UpdatedAt:     timestampToString(updated.UpdatedAt),
