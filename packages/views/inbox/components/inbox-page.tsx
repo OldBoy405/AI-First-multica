@@ -56,9 +56,36 @@ import { useTypeLabels } from "./inbox-detail-label";
 import { getInboxDisplayTitle } from "./inbox-display";
 import { useT } from "../../i18n";
 
+// CR-2026-010 (TSUG-002): these 5 inbox types point at the project's hidden
+// Team Agent chat container issue, which every issue-listing surface filters
+// out — routing them through the default issue_id path would land on a
+// blank/404 page. They carry details.project_id instead, deep-linking to the
+// project's Chat tab.
+const PRESENTER_INBOX_TYPES = new Set([
+  "presenter_requested",
+  "presenter_approved",
+  "presenter_rejected",
+  "presenter_transferred",
+  "presenter_revoked",
+]);
+
+// Pure so the routing decision is unit-testable without mounting the full
+// InboxPage tree (same rationale as projects/components/surface-tab.ts).
+// Returns null for every item that should keep the default embedded-issue
+// selection behavior.
+export function resolveInboxItemHref(
+  item: Pick<InboxItem, "type" | "details">,
+  projectDetailPath: (id: string) => string,
+): string | null {
+  if (!PRESENTER_INBOX_TYPES.has(item.type)) return null;
+  const projectId = item.details?.project_id;
+  if (!projectId) return null;
+  return `${projectDetailPath(projectId)}?tab=chat`;
+}
+
 export function InboxPage() {
   const { t } = useT("inbox");
-  const { searchParams, replace } = useNavigation();
+  const { searchParams, replace, push } = useNavigation();
   const urlIssue = searchParams.get("issue") ?? "";
   const wsPaths = useWorkspacePaths();
 
@@ -146,6 +173,11 @@ export function InboxPage() {
   }, [selectedId, selectedRead, markReadMutate, t]);
 
   const handleSelect = (item: InboxItem) => {
+    const presenterHref = resolveInboxItemHref(item, wsPaths.projectDetail);
+    if (presenterHref) {
+      push(presenterHref);
+      return;
+    }
     setSelectedKey(item.issue_id ?? item.id);
   };
 

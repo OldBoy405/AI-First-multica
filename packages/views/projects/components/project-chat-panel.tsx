@@ -34,6 +34,7 @@ import {
   PickerEmpty,
 } from "../../issues/components/pickers/property-picker";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
+import { PresenterControlSheet } from "./presenter-control-sheet";
 import { useT } from "../../i18n";
 
 const MODES: readonly ProjectChatMode[] = [
@@ -111,16 +112,14 @@ export function ProjectChatPanel({
 }
 
 // Presenter (single-writer control) display for the Team Agent tab
-// (CR-2026-010 SDD §5.2). Shows who currently holds control — or the
+// (CR-2026-010 SDD §5.2/§5.3). Shows who currently holds control — or the
 // Owner/Admin default when no presenter is active — plus a trigger button
-// for the control panel (Sheet content is TASK-06's deliverable; this task
-// only places the trigger, tracking open state locally since the panel body
-// doesn't exist yet).
+// that opens the control panel Sheet.
 function PresenterHeader({ wsId, projectId }: { wsId: string; projectId: string }) {
   const { t } = useT("projects");
   const { getActorName } = useActorName();
   const { data } = useQuery(projectPresenterOptions(wsId, projectId));
-  const [, setPanelOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
   const presenter = data?.presenter ?? null;
 
   return (
@@ -149,6 +148,12 @@ function PresenterHeader({ wsId, projectId }: { wsId: string; projectId: string 
           {t(($) => $.chat.presenter.open_panel)}
         </TooltipContent>
       </Tooltip>
+      <PresenterControlSheet
+        open={panelOpen}
+        onOpenChange={setPanelOpen}
+        wsId={wsId}
+        projectId={projectId}
+      />
     </div>
   );
 }

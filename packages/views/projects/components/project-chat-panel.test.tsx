@@ -27,6 +27,25 @@ vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({ getActorName: () => "Presenting Member" }),
 }));
 
+vi.mock("@multica/core/workspace/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@multica/core/workspace/queries")>();
+  return {
+    ...actual,
+    memberListOptions: (_wsId: string) => ({
+      queryKey: ["members"],
+      queryFn: async () => [],
+    }),
+  };
+});
+
+// PresenterHeader always mounts PresenterControlSheet (Sheet content, closed
+// by default) alongside the trigger button, so its dependencies need the
+// same seams even though these tests never open the panel.
+vi.mock("@multica/core/auth", () => ({
+  useAuthStore: (selector: (s: { user: { id: string } }) => unknown) =>
+    selector({ user: { id: "u-1" } }),
+}));
+
 // The panel only gates on config state; the Team Agent stream + composer are
 // covered by project-team-agent-chat.test.tsx. Stub the child so this test
 // stays focused on the delegation and doesn't pull in the timeline/WS stack.

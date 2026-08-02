@@ -191,9 +191,36 @@
       "model_update_failed": "模型更新失败，请重试"
     },
     "presenter": {
+      "label": "主持人",
       "current": "当前主持人：{{name}}",
       "default": "Owner/Admin",
-      "open_panel": "控制权面板"
+      "open_panel": "控制权面板",
+      "locked_title": "{{name}} 正在主持——请求权限后可发送",
+      "locked_title_default": "请求权限后可发送",
+      "request_cta": "请求权限",
+      "requested": "已申请"
+    },
+    "control": {
+      "title": "控制权面板",
+      "presenter_badge": "主持人",
+      "pending_badge": "已申请",
+      "request_cta": "请求 Agent 访问权限",
+      "requested": "已申请",
+      "approve": "批准",
+      "reject": "拒绝",
+      "revoke": "撤销",
+      "transfer": "转让",
+      "transfer_to": "转让给…",
+      "release": "释放控制权",
+      "action_failed": "操作失败，请重试"
+    },
+    "notices": {
+      "presenter_requested": "{{user}} 申请了主持人权限",
+      "presenter_approved": "{{approver}} 批准了 {{user}} 的申请",
+      "presenter_rejected": "{{approver}} 拒绝了 {{user}} 的申请",
+      "presenter_transferred": "{{from}} 将主持人转让给了 {{to}}",
+      "presenter_revoked": "{{approver}} 撤销了 {{user}} 的主持人权限",
+      "presenter_released": "{{user}} 释放了主持人权限"
     }
   }
 }
