@@ -27,9 +27,16 @@ interface ProjectChatStore {
   activeMode: Record<string, ProjectChatMode>;
   /** `${projectId}:${mode}` → true once the first-entry tutorial bubble is dismissed. */
   tutorialSeen: Record<string, boolean>;
+  /**
+   * projectId → "agent requests only" filter toggle (CR-2026-007 DD-4).
+   * Absent key = off. Older persisted snapshots lack this field entirely;
+   * the `{}` initial value below is what they rehydrate onto.
+   */
+  agentRequestFilter: Record<string, boolean>;
   setDraft: (projectId: string, mode: ProjectChatMode, text: string) => void;
   setActiveMode: (projectId: string, mode: ProjectChatMode) => void;
   dismissTutorial: (projectId: string, mode: ProjectChatMode) => void;
+  setAgentRequestFilter: (projectId: string, value: boolean) => void;
 }
 
 // A dedicated store — deliberately NOT the global chat store, whose
@@ -41,6 +48,7 @@ export const useProjectChatStore = create<ProjectChatStore>()(
       drafts: {},
       activeMode: {},
       tutorialSeen: {},
+      agentRequestFilter: {},
       setDraft: (projectId, mode, text) =>
         set((s) => {
           const key = projectChatDraftKey(projectId, mode);
@@ -57,6 +65,10 @@ export const useProjectChatStore = create<ProjectChatStore>()(
             ...s.tutorialSeen,
             [projectChatDraftKey(projectId, mode)]: true,
           },
+        })),
+      setAgentRequestFilter: (projectId, value) =>
+        set((s) => ({
+          agentRequestFilter: { ...s.agentRequestFilter, [projectId]: value },
         })),
     }),
     {

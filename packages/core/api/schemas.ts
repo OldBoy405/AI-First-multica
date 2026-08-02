@@ -372,6 +372,63 @@ export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
   task_id: "",
 };
 
+// Queue detail rows (CR-2026-007 DD-3): GET /api/projects/:id/queue-status
+// ?include=items. `originator` is null for tasks with no human in the chain
+// (autopilot / agent-sourced) — the UI renders a "system task" placeholder.
+export interface QueueItemOriginator {
+  id: string;
+  name: string;
+  avatar_url?: string | null;
+}
+
+export interface QueueItem {
+  task_id: string;
+  status: string;
+  priority: number;
+  created_at: string;
+  originator: QueueItemOriginator | null;
+  summary: string;
+}
+
+export interface QueueStatusWithItems {
+  queue_depth: number;
+  queue_limit: number;
+  items: QueueItem[];
+}
+
+const QueueItemSchema = z
+  .object({
+    task_id: z.string(),
+    status: z.string().default("queued"),
+    priority: z.number().default(0),
+    created_at: z.string().default(""),
+    originator: z
+      .object({
+        id: z.string(),
+        name: z.string().default(""),
+        avatar_url: z.string().nullable().optional(),
+      })
+      .loose()
+      .nullable()
+      .default(null),
+    summary: z.string().default(""),
+  })
+  .loose();
+
+export const QueueStatusWithItemsSchema = z
+  .object({
+    queue_depth: z.number().default(0),
+    queue_limit: z.number().default(0),
+    items: z.array(QueueItemSchema).default([]),
+  })
+  .loose();
+
+export const EMPTY_QUEUE_STATUS_WITH_ITEMS: QueueStatusWithItems = {
+  queue_depth: 0,
+  queue_limit: 0,
+  items: [],
+};
+
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),
   matched_snippet: z.string().optional(),
@@ -592,6 +649,10 @@ export const AgentTaskSchema = z.object({
   parent_task_id: z.string().optional(),
   attempt: z.number().optional(),
   trigger_comment_id: z.string().optional(),
+  // "Started by me" identity check (CR-2026-007 TSUG-002): compare against
+  // the current user id. Omitted by older backends and for tasks with no
+  // human originator.
+  originator_user_id: z.string().optional(),
   // Coverage is additive display metadata. A mixed-version or partially
   // upgraded server must not make one malformed optional field erase the
   // entire execution log, so degrade that field to "absent" independently.
