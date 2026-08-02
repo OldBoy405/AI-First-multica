@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, CheckCircle2, Loader2, SendHorizontal, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, Copy, Loader2, SendHorizontal, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
@@ -10,6 +10,7 @@ import { taskMessagesOptions } from "@multica/core/chat/queries";
 import {
   projectChatDraftKey,
   projectQueueStatusOptions,
+  useCancelProjectQueueTask,
   useProjectChatStore,
   useSendProjectChatMessage,
 } from "@multica/core/projects";
@@ -20,13 +21,16 @@ import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes
 import { useAgentPermissions } from "@multica/core/permissions";
 import type { Agent, AgentTask, TimelineEntry } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
+import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { ReadonlyContent } from "../../editor";
 import { buildTimeline } from "../../common/task-transcript";
 import { TimelineView } from "../../chat/components/chat-message-list";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
+import { ProjectQueueBar } from "./project-queue-bar";
 import { useT } from "../../i18n";
 
 // ─── Container ───────────────────────────────────────────────────────────
@@ -52,6 +56,7 @@ export function ProjectTeamAgentChat({
   teamAgentId: string;
   canConfigure: boolean;
 }) {
+  const { t } = useT("projects");
   const userId = useAuthStore((s) => s.user?.id);
   // WS `comment:created` already writes new comments straight into this cache.
   const { timeline } = useIssueTimeline(issueId, userId);
@@ -68,11 +73,50 @@ export function ProjectTeamAgentChat({
     [timeline],
   );
 
+  // "Agent requests only" filter (CR-2026-007 DD-4). Read/write happens here
+  // so the switch below is the single owner of the store round-trip; the
+  // stream view underneath just receives the resolved boolean and stays a
+  // pure render branch.
+  const agentRequestFilter = useProjectChatStore(
+    (s) => s.agentRequestFilter[projectId] === true,
+  );
+  const setAgentRequestFilter = useProjectChatStore((s) => s.setAgentRequestFilter);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <div className="flex-1 min-h-0 overflow-y-auto" data-tab-scroll-root>
-        <TeamAgentStreamView comments={comments} tasks={tasks} currentUserId={userId} />
+      <div className="flex shrink-0 justify-end border-b px-4 py-1.5">
+        <label
+          data-testid="project-chat-agent-filter"
+          className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"
+        >
+          <span>{t(($) => $.chat.stream.agent_requests_only)}</span>
+          <Switch
+            size="sm"
+            data-testid="project-chat-agent-filter-switch"
+            checked={agentRequestFilter}
+            onCheckedChange={(checked: boolean) =>
+              setAgentRequestFilter(projectId, checked)
+            }
+          />
+        </label>
       </div>
+      <div className="flex-1 min-h-0 overflow-y-auto" data-tab-scroll-root>
+        <TeamAgentStreamView
+          comments={comments}
+          tasks={tasks}
+          currentUserId={userId}
+          wsId={wsId}
+          projectId={projectId}
+          canConfigure={canConfigure}
+          filterOn={agentRequestFilter}
+        />
+      </div>
+      <ProjectQueueBar
+        wsId={wsId}
+        projectId={projectId}
+        currentUserId={userId}
+        canConfigure={canConfigure}
+      />
       <TeamAgentComposer
         projectId={projectId}
         wsId={wsId}
@@ -89,12 +133,35 @@ export function TeamAgentStreamView({
   comments,
   tasks,
   currentUserId,
+  wsId,
+  projectId,
+  canConfigure,
+  filterOn,
 }: {
   comments: TimelineEntry[];
   tasks: AgentTask[];
   currentUserId?: string;
+  wsId: string;
+  projectId: string;
+  /** Workspace owner/admin — can stop any running task, not just their own (DD-1). */
+  canConfigure: boolean;
+  /** "Agent requests only" filter (DD-4): switches task cards to summary form. */
+  filterOn: boolean;
 }) {
   const { t } = useT("projects");
+
+  // "Withdrawn" join (DD-5): a cancelled task's trigger_comment_id maps back
+  // to the comment bubble that spawned it. Pure lookup over data already in
+  // the react-query cache (the tasks list) — no new request.
+  const withdrawnCommentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const task of tasks) {
+      if (task.status === "cancelled" && task.trigger_comment_id) {
+        ids.add(task.trigger_comment_id);
+      }
+    }
+    return ids;
+  }, [tasks]);
 
   const items = useMemo(() => {
     const merged: { key: string; at: number; node: React.ReactNode }[] = [];
@@ -102,20 +169,37 @@ export function TeamAgentStreamView({
       merged.push({
         key: `c:${c.id}`,
         at: new Date(c.created_at).getTime(),
-        node: <UserBubble key={`c:${c.id}`} entry={c} currentUserId={currentUserId} />,
+        node: (
+          <UserBubble
+            key={`c:${c.id}`}
+            entry={c}
+            currentUserId={currentUserId}
+            withdrawn={withdrawnCommentIds.has(c.id)}
+          />
+        ),
       });
     }
     for (const task of tasks) {
       merged.push({
         key: `t:${task.id}`,
         at: new Date(task.created_at).getTime(),
-        node: <TaskExecutionCard key={`t:${task.id}`} task={task} />,
+        node: (
+          <TaskExecutionCard
+            key={`t:${task.id}`}
+            task={task}
+            currentUserId={currentUserId}
+            canConfigure={canConfigure}
+            filterOn={filterOn}
+            wsId={wsId}
+            projectId={projectId}
+          />
+        ),
       });
     }
     // Stable order: by timestamp, then key so equal timestamps don't jitter.
     merged.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
     return merged;
-  }, [comments, tasks, currentUserId]);
+  }, [comments, tasks, currentUserId, withdrawnCommentIds, canConfigure, filterOn, wsId, projectId]);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-3">
@@ -133,16 +217,48 @@ export function TeamAgentStreamView({
 function UserBubble({
   entry,
   currentUserId,
+  withdrawn,
 }: {
   entry: TimelineEntry;
   currentUserId?: string;
+  /** "Withdrawn" badge (DD-5): a cancelled task's trigger comment. */
+  withdrawn: boolean;
 }) {
+  const { t } = useT("projects");
   const { getActorName } = useActorName();
   const isOwn = entry.actor_type === "member" && entry.actor_id === currentUserId;
 
+  const handleCopy = () => {
+    void navigator.clipboard.writeText(entry.content ?? "").then(() => {
+      toast.success(t(($) => $.chat.stream.copied));
+    });
+  };
+
+  const copyButton = (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+      data-testid="project-chat-copy"
+      aria-label={t(($) => $.chat.stream.copy)}
+      onClick={handleCopy}
+    >
+      <Copy className="h-3 w-3" />
+    </Button>
+  );
+
+  const withdrawnBadge = withdrawn && (
+    <Badge variant="secondary" data-testid="project-chat-withdrawn-badge">
+      {t(($) => $.chat.stream.withdrawn)}
+    </Badge>
+  );
+
   if (isOwn) {
     return (
-      <div className="flex justify-end" data-testid="project-chat-user-bubble">
+      <div className="group flex items-center justify-end gap-1.5" data-testid="project-chat-user-bubble">
+        {withdrawnBadge}
+        {copyButton}
         <div className="max-w-[80%] break-words rounded-2xl bg-muted px-3.5 py-2 text-sm">
           <ReadonlyContent content={entry.content ?? ""} attachments={entry.attachments} />
         </div>
@@ -151,7 +267,7 @@ function UserBubble({
   }
 
   return (
-    <div className="flex items-start gap-2.5" data-testid="project-chat-user-bubble">
+    <div className="group flex items-start gap-2.5" data-testid="project-chat-user-bubble">
       <ActorAvatar
         actorType={entry.actor_type}
         actorId={entry.actor_id}
@@ -159,11 +275,15 @@ function UserBubble({
         className="mt-0.5 shrink-0"
       />
       <div className="min-w-0 flex-1">
-        <div className="mb-0.5 text-xs font-medium text-muted-foreground">
-          {getActorName(entry.actor_type, entry.actor_id)}
+        <div className="mb-0.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <span>{getActorName(entry.actor_type, entry.actor_id)}</span>
+          {withdrawnBadge}
         </div>
-        <div className="text-sm leading-relaxed text-foreground/85">
-          <ReadonlyContent content={entry.content ?? ""} attachments={entry.attachments} />
+        <div className="flex items-start gap-1.5">
+          <div className="min-w-0 flex-1 text-sm leading-relaxed text-foreground/85">
+            <ReadonlyContent content={entry.content ?? ""} attachments={entry.attachments} />
+          </div>
+          {copyButton}
         </div>
       </div>
     </div>
@@ -194,14 +314,66 @@ function formatDurationMs(ms: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-function TaskExecutionCard({ task }: { task: AgentTask }) {
+// `result` is `unknown` on the wire ({ output, pr_url, tool_calls, … } —
+// daemon.go:2470-2509). The summary form (DD-4) only ever surfaces the
+// `output` string; rendering the whole object would dump raw JSON in the UI.
+function taskResultOutput(result: unknown): string {
+  if (result && typeof result === "object" && "output" in result) {
+    const output = (result as { output?: unknown }).output;
+    if (typeof output === "string") return output;
+  }
+  return "";
+}
+
+function TaskExecutionCard({
+  task,
+  currentUserId,
+  canConfigure,
+  filterOn,
+  wsId,
+  projectId,
+}: {
+  task: AgentTask;
+  currentUserId?: string;
+  /** Workspace owner/admin — can stop any running task, not just their own (DD-1). */
+  canConfigure: boolean;
+  /** "Agent requests only" filter (DD-4): summary form, no TimelineView. */
+  filterOn: boolean;
+  wsId: string;
+  projectId: string;
+}) {
   const { t } = useT("projects");
   const { getActorName } = useActorName();
-  const { data: messages } = useQuery(taskMessagesOptions(task.id));
+  // AC-4: the filter must not cause a network request for the timeline it no
+  // longer renders.
+  const { data: messages } = useQuery({ ...taskMessagesOptions(task.id), enabled: !filterOn });
   const items = useMemo(() => buildTimeline(messages ?? []), [messages]);
+  const cancelTask = useCancelProjectQueueTask(wsId, projectId);
 
   const kind = taskStatusKind(task.status);
   const running = kind === "running";
+  // DD-1: visible only on the literal `running` status (queued/dispatched
+  // are the queue-bar's "clear" affordance, not this card's), and only for
+  // the task's originator or a workspace owner/admin. `originator_user_id`
+  // is the canonical check (TSUG-002) — NOT trigger_comment_id → timeline
+  // authorship, which drifts under comment coalescing.
+  const isOriginator =
+    task.originator_user_id != null && task.originator_user_id === currentUserId;
+  const canStop = task.status === "running" && (isOriginator || canConfigure);
+
+  const handleStop = async () => {
+    try {
+      const res = await cancelTask.mutateAsync(task.id);
+      // TSUG-007: repeat-cancel of an already-cancelled task is a silent
+      // success (idempotent 200) — only a *different* terminal status means
+      // the stop request came too late.
+      if (res.status !== "cancelled") {
+        toast.error(t(($) => $.chat.stream.cancel_already_finished));
+      }
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t(($) => $.chat.stream.send_failed));
+    }
+  };
   // ponytail: elapsed is computed once at render, so a running card shows an
   // approximate (non-ticking) duration. A live timer would need a per-card
   // interval — not worth it until product asks for second-by-second feedback.
@@ -258,8 +430,32 @@ function TaskExecutionCard({ task }: { task: AgentTask }) {
           {duration && !running && (
             <span className="tabular-nums text-muted-foreground/70">{duration}</span>
           )}
+          {canStop && (
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="ml-auto"
+              data-testid="project-chat-task-stop"
+              disabled={cancelTask.isPending}
+              onClick={() => void handleStop()}
+            >
+              {t(($) => $.chat.stream.stop)}
+            </Button>
+          )}
         </div>
-        {items.length > 0 && <TimelineView items={items} isStreaming={running} />}
+        {filterOn ? (
+          kind === "done" && (
+            <div
+              className="text-sm leading-relaxed text-foreground/85"
+              data-testid="project-chat-task-summary-output"
+            >
+              {taskResultOutput(task.result) || t(($) => $.chat.stream.no_text_reply)}
+            </div>
+          )
+        ) : (
+          items.length > 0 && <TimelineView items={items} isStreaming={running} />
+        )}
         {kind === "error" && task.error && (
           <div className="text-xs text-destructive/90">{task.error}</div>
         )}

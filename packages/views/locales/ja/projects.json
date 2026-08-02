@@ -192,7 +192,23 @@
       "status_interrupted": "中断",
       "model_label": "モデル",
       "runtime_guide": "先に設定でローカル Agent を起動してください",
-      "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
+      "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください",
+      "stop": "停止",
+      "cancel_already_finished": "このタスクはすでに終了しているため、キャンセルできません",
+      "agent_requests_only": "Agent リクエストのみ表示",
+      "no_text_reply": "（テキスト回答なし）",
+      "withdrawn": "撤回済み",
+      "copy": "コピー",
+      "copied": "コピーしました"
+    },
+    "queue_bar": {
+      "count_other": "{{count}} 件がキュー待ち",
+      "cancel": "会話をクリア",
+      "status_queued": "キュー待ち",
+      "status_dispatched": "ディスパッチ済み",
+      "system_task": "システムタスク",
+      "no_summary": "（メッセージの要約なし）",
+      "cancel_already_finished": "このタスクはすでに終了しているため、キャンセルできません"
     },
     "private": {
       "needs_team_agent": "Private Ask はプロジェクトの Team Agent を使用します。先に Team Agent タブで設定してください。",

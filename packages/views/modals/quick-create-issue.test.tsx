@@ -370,7 +370,7 @@ describe("AgentCreatePanel", () => {
   it("shows the structured queue-full error in-modal on 429 project_queue_full (CR-2026-004)", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    const err = new ApiError("project queue full");
+    const err = new ApiError("project queue full", 429, "Too Many Requests");
     (err as { body?: unknown }).body = {
       code: "project_queue_full",
       queue_depth: 2,

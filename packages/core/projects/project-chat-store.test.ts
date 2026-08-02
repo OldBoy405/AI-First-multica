@@ -9,6 +9,7 @@ function reset() {
     drafts: {},
     activeMode: {},
     tutorialSeen: {},
+    agentRequestFilter: {},
   });
 }
 
@@ -64,5 +65,19 @@ describe("useProjectChatStore (CR-2026-006)", () => {
     expect(
       tutorialSeen[projectChatDraftKey("p1", "private_ask")],
     ).toBeUndefined();
+  });
+
+  it("tracks the agent-request filter per project, defaulting to off (CR-2026-007)", () => {
+    // Absent key = filter off; older persisted snapshots rehydrate onto {}.
+    expect(useProjectChatStore.getState().agentRequestFilter["p1"]).toBeUndefined();
+
+    const { setAgentRequestFilter } = useProjectChatStore.getState();
+    setAgentRequestFilter("p1", true);
+    expect(useProjectChatStore.getState().agentRequestFilter["p1"]).toBe(true);
+    // Other projects stay unaffected.
+    expect(useProjectChatStore.getState().agentRequestFilter["p2"]).toBeUndefined();
+
+    setAgentRequestFilter("p1", false);
+    expect(useProjectChatStore.getState().agentRequestFilter["p1"]).toBe(false);
   });
 });

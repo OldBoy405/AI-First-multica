@@ -172,6 +172,9 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
+  EMPTY_QUEUE_STATUS_WITH_ITEMS,
+  QueueStatusWithItemsSchema,
+  type QueueStatusWithItems,
   EMPTY_PROJECT_DISCUSSION,
   ProjectDiscussionSchema,
   type ProjectDiscussion,
@@ -1969,6 +1972,16 @@ export class ApiClient {
   // (CR-2026-004). Powers the queue indicator and the full-queue disabled state.
   async getProjectQueueStatus(id: string): Promise<{ queue_depth: number; queue_limit: number }> {
     return this.fetch(`/api/projects/${id}/queue-status`);
+  }
+
+  // Same endpoint with ?include=items (CR-2026-007 DD-3): depth/limit plus
+  // the pending rows behind the number. A separate method (not an optional
+  // parameter) so existing depth-only consumers keep their exact return type.
+  async getProjectQueueItems(id: string): Promise<QueueStatusWithItems> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/queue-status?include=items`);
+    return parseWithFallback(raw, QueueStatusWithItemsSchema, EMPTY_QUEUE_STATUS_WITH_ITEMS, {
+      endpoint: "GET /api/projects/:id/queue-status?include=items",
+    });
   }
 
   // Project group-chat context (CR-2026-006 TASK-01): the backing issue id and

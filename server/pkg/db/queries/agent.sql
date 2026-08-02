@@ -1024,3 +1024,21 @@ SELECT count(*) FROM agent_task_queue atq
 JOIN issue i ON i.id = atq.issue_id
 WHERE i.project_id = $1
   AND atq.status IN ('queued', 'dispatched');
+
+-- name: ListProjectPendingTasks :many
+-- Queue detail rows behind CountProjectPendingTasks: identical pending
+-- reading (queued + dispatched on the project's issues) so item count always
+-- equals queue depth. LEFT JOIN "user" because originator_user_id is
+-- deliberately NULL for autopilot/agent-sourced tasks — an INNER JOIN would
+-- drop them. summary reads the trigger_summary snapshot column directly
+-- (already truncated and leak-safe at enqueue time). Ordered like the claim
+-- SQL: owner priority bumps first, then FIFO. CR-2026-007 DD-3.
+SELECT atq.id, atq.status, atq.priority, atq.created_at,
+       atq.trigger_summary, atq.originator_user_id,
+       u.name AS originator_name, u.avatar_url AS originator_avatar_url
+FROM agent_task_queue atq
+JOIN issue i ON i.id = atq.issue_id
+LEFT JOIN "user" u ON u.id = atq.originator_user_id
+WHERE i.project_id = $1
+  AND atq.status IN ('queued', 'dispatched')
+ORDER BY atq.priority DESC, atq.created_at ASC;

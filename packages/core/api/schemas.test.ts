@@ -13,6 +13,8 @@ import {
   InboxUnreadSummarySchema,
   IssueTriggerPreviewSchema,
   ListIssuesResponseSchema,
+  EMPTY_QUEUE_STATUS_WITH_ITEMS,
+  QueueStatusWithItemsSchema,
   RuntimeHourlyActivityListSchema,
   RuntimeUsageByAgentListSchema,
   RuntimeUsageByHourListSchema,
@@ -254,6 +256,48 @@ describe("AgentTaskListSchema", () => {
       "comment-2",
       "comment-3",
     ]);
+  });
+});
+
+describe("QueueStatusWithItemsSchema (CR-2026-007 DD-3)", () => {
+  it("parses items with a human originator and a null-originator system task", () => {
+    const parsed = QueueStatusWithItemsSchema.parse({
+      queue_depth: 2,
+      queue_limit: 50,
+      items: [
+        {
+          task_id: "t1",
+          status: "queued",
+          priority: 100,
+          created_at: "2026-08-02T00:00:00Z",
+          originator: { id: "u1", name: "Ada", avatar_url: null },
+          summary: "fix the flaky test",
+        },
+        {
+          task_id: "t2",
+          status: "dispatched",
+          priority: 0,
+          created_at: "2026-08-02T00:01:00Z",
+          // Autopilot/agent-sourced task: no human in the chain (I-9).
+          originator: null,
+          summary: "",
+        },
+      ],
+    });
+
+    expect(parsed.items).toHaveLength(2);
+    expect(parsed.items[0]?.originator?.name).toBe("Ada");
+    expect(parsed.items[1]?.originator).toBeNull();
+  });
+
+  it("returns the empty fallback for a malformed response", () => {
+    const result = parseWithFallback(
+      { queue_depth: "not-a-number", items: "nope" },
+      QueueStatusWithItemsSchema,
+      EMPTY_QUEUE_STATUS_WITH_ITEMS,
+      { endpoint: "test" },
+    );
+    expect(result).toEqual(EMPTY_QUEUE_STATUS_WITH_ITEMS);
   });
 });
 

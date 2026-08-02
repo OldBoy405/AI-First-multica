@@ -2929,6 +2929,65 @@ func (q *Queries) ListPendingTasksByRuntime(ctx context.Context, runtimeID pgtyp
 	return items, nil
 }
 
+const listProjectPendingTasks = `-- name: ListProjectPendingTasks :many
+SELECT atq.id, atq.status, atq.priority, atq.created_at,
+       atq.trigger_summary, atq.originator_user_id,
+       u.name AS originator_name, u.avatar_url AS originator_avatar_url
+FROM agent_task_queue atq
+JOIN issue i ON i.id = atq.issue_id
+LEFT JOIN "user" u ON u.id = atq.originator_user_id
+WHERE i.project_id = $1
+  AND atq.status IN ('queued', 'dispatched')
+ORDER BY atq.priority DESC, atq.created_at ASC
+`
+
+type ListProjectPendingTasksRow struct {
+	ID                  pgtype.UUID        `json:"id"`
+	Status              string             `json:"status"`
+	Priority            int32              `json:"priority"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	TriggerSummary      pgtype.Text        `json:"trigger_summary"`
+	OriginatorUserID    pgtype.UUID        `json:"originator_user_id"`
+	OriginatorName      pgtype.Text        `json:"originator_name"`
+	OriginatorAvatarUrl pgtype.Text        `json:"originator_avatar_url"`
+}
+
+// Queue detail rows behind CountProjectPendingTasks: identical pending
+// reading (queued + dispatched on the project's issues) so item count always
+// equals queue depth. LEFT JOIN "user" because originator_user_id is
+// deliberately NULL for autopilot/agent-sourced tasks — an INNER JOIN would
+// drop them. summary reads the trigger_summary snapshot column directly
+// (already truncated and leak-safe at enqueue time). Ordered like the claim
+// SQL: owner priority bumps first, then FIFO. CR-2026-007 DD-3.
+func (q *Queries) ListProjectPendingTasks(ctx context.Context, projectID pgtype.UUID) ([]ListProjectPendingTasksRow, error) {
+	rows, err := q.db.Query(ctx, listProjectPendingTasks, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProjectPendingTasksRow{}
+	for rows.Next() {
+		var i ListProjectPendingTasksRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.Priority,
+			&i.CreatedAt,
+			&i.TriggerSummary,
+			&i.OriginatorUserID,
+			&i.OriginatorName,
+			&i.OriginatorAvatarUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listQueuedClaimCandidatesByRuntime = `-- name: ListQueuedClaimCandidatesByRuntime :many
 SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids FROM agent_task_queue
 WHERE runtime_id = $1 AND status = 'queued'

@@ -192,7 +192,23 @@
       "status_interrupted": "已中断",
       "model_label": "模型",
       "runtime_guide": "请先在设置中启动本地 Agent",
-      "model_update_failed": "模型更新失败，请重试"
+      "model_update_failed": "模型更新失败，请重试",
+      "stop": "停止",
+      "cancel_already_finished": "任务已结束，无法撤回",
+      "agent_requests_only": "只看 Agent 请求",
+      "no_text_reply": "（无文本回复）",
+      "withdrawn": "已撤回",
+      "copy": "复制",
+      "copied": "已复制"
+    },
+    "queue_bar": {
+      "count_other": "{{count}} 条排队",
+      "cancel": "清除对话",
+      "status_queued": "排队中",
+      "status_dispatched": "已派发",
+      "system_task": "系统任务",
+      "no_summary": "（无消息摘要）",
+      "cancel_already_finished": "任务已结束，无法撤回"
     },
     "private": {
       "needs_team_agent": "Private Ask 使用项目的 Team Agent，请先在 Team Agent 标签页完成配置。",
