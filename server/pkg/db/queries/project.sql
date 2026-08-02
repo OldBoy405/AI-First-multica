@@ -39,19 +39,23 @@ RETURNING *;
 DELETE FROM project WHERE id = $1 AND workspace_id = $2;
 
 -- name: CountIssuesByProject :one
--- CR-2026-006: exclude the hidden Team Agent chat container issue from counts.
+-- CR-2026-006/CR-2026-009: exclude the hidden Team Agent chat and Discussion
+-- container issues from counts.
 SELECT count(*) FROM issue
 WHERE project_id = $1
-  AND origin_type IS DISTINCT FROM 'project_chat';
+  AND origin_type IS DISTINCT FROM 'project_chat'
+  AND origin_type IS DISTINCT FROM 'project_discussion';
 
 -- name: GetProjectIssueStats :many
--- CR-2026-006: exclude the hidden Team Agent chat container issue from stats.
+-- CR-2026-006/CR-2026-009: exclude the hidden Team Agent chat and Discussion
+-- container issues from stats.
 SELECT project_id,
        count(*)::bigint AS total_count,
        count(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done_count
 FROM issue
 WHERE project_id = ANY(sqlc.arg('project_ids')::uuid[])
   AND origin_type IS DISTINCT FROM 'project_chat'
+  AND origin_type IS DISTINCT FROM 'project_discussion'
 GROUP BY project_id;
 
 -- name: GetProjectSettings :one

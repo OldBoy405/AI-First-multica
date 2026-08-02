@@ -3,6 +3,8 @@ export {
   projectListOptions,
   projectDetailOptions,
   projectChatOptions,
+  projectPrivateChatOptions,
+  projectDiscussionOptions,
   projectQueueStatusOptions,
   projectQueueItemsOptions,
 } from "./queries";

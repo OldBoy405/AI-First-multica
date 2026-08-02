@@ -15,9 +15,11 @@ const countIssuesByProject = `-- name: CountIssuesByProject :one
 SELECT count(*) FROM issue
 WHERE project_id = $1
   AND origin_type IS DISTINCT FROM 'project_chat'
+  AND origin_type IS DISTINCT FROM 'project_discussion'
 `
 
-// CR-2026-006: exclude the hidden Team Agent chat container issue from counts.
+// CR-2026-006/CR-2026-009: exclude the hidden Team Agent chat and Discussion
+// container issues from counts.
 func (q *Queries) CountIssuesByProject(ctx context.Context, projectID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countIssuesByProject, projectID)
 	var count int64
@@ -151,6 +153,7 @@ SELECT project_id,
 FROM issue
 WHERE project_id = ANY($1::uuid[])
   AND origin_type IS DISTINCT FROM 'project_chat'
+  AND origin_type IS DISTINCT FROM 'project_discussion'
 GROUP BY project_id
 `
 
@@ -160,7 +163,8 @@ type GetProjectIssueStatsRow struct {
 	DoneCount  int64       `json:"done_count"`
 }
 
-// CR-2026-006: exclude the hidden Team Agent chat container issue from stats.
+// CR-2026-006/CR-2026-009: exclude the hidden Team Agent chat and Discussion
+// container issues from stats.
 func (q *Queries) GetProjectIssueStats(ctx context.Context, projectIds []pgtype.UUID) ([]GetProjectIssueStatsRow, error) {
 	rows, err := q.db.Query(ctx, getProjectIssueStats, projectIds)
 	if err != nil {

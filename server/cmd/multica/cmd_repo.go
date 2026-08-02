@@ -342,6 +342,11 @@ func runRepoCheckout(cmd *cobra.Command, args []string) error {
 	workspaceID := os.Getenv("MULTICA_WORKSPACE_ID")
 	agentName := os.Getenv("MULTICA_AGENT_NAME")
 	taskID := os.Getenv("MULTICA_TASK_ID")
+	// The task-scoped credential the daemon issued to this process (also used
+	// for the main server API). The checkout endpoint requires it match the
+	// token the daemon recorded for taskID, proving this process really is
+	// the task it claims — task_id alone is otherwise spoofable (CR-2026-008).
+	authToken := os.Getenv("MULTICA_TOKEN")
 
 	// Use current working directory as the checkout target.
 	workDir, err := os.Getwd()
@@ -356,6 +361,7 @@ func runRepoCheckout(cmd *cobra.Command, args []string) error {
 		"ref":          repoCheckoutRef,
 		"agent_name":   agentName,
 		"task_id":      taskID,
+		"auth_token":   authToken,
 	}
 
 	data, err := json.Marshal(reqBody)

@@ -236,9 +236,10 @@ func TestRepoCheckoutUsesTaskScopedProjectRefByDefault(t *testing.T) {
 	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "task-1-token"})
 
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`)
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","auth_token":"task-1-token"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
 
 	if rec.Code != http.StatusOK {
@@ -257,9 +258,10 @@ func TestRepoCheckoutExplicitRefOverridesProjectDefault(t *testing.T) {
 	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "task-1-token"})
 
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","ref":"hotfix"}`)
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","ref":"hotfix","auth_token":"task-1-token"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
 
 	if rec.Code != http.StatusOK {
@@ -267,6 +269,40 @@ func TestRepoCheckoutExplicitRefOverridesProjectDefault(t *testing.T) {
 	}
 	if got := cache.lastCreateParams().Ref; got != "hotfix" {
 		t.Fatalf("CreateWorktree Ref = %q, want explicit hotfix", got)
+	}
+}
+
+// TestRepoCheckoutRequiresMatchingTaskToken pins the CODE-BLOCK-001 fix: a
+// checkout request must present the auth token the daemon actually issued for
+// task_id — an omitted, empty, or wrong token is rejected even for an
+// otherwise-unrestricted task, so "don't send a token" (or "claim to be a
+// different task") is never itself a way to skip the ask-only check.
+func TestRepoCheckoutRequiresMatchingTaskToken(t *testing.T) {
+	t.Parallel()
+
+	const workspaceID = "ws-checkout"
+	const repoURL = "https://github.com/org/repo.git"
+	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
+	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "task-1-token"})
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing task_id", `{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","auth_token":"task-1-token"}`},
+		{"unknown task_id", `{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-ghost","auth_token":"task-1-token"}`},
+		{"missing auth_token", `{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1"}`},
+		{"wrong auth_token", `{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-1","auth_token":"guessed"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", strings.NewReader(c.body)))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -391,5 +427,59 @@ func assertActiveTaskCount(t *testing.T, h http.HandlerFunc, want int64) {
 	}
 	if resp.ActiveTaskCount != want {
 		t.Errorf("active_task_count: got %d, want %d", resp.ActiveTaskCount, want)
+	}
+}
+
+// TestRepoCheckoutRejectedForAskOnlyTask pins the enforcement half of the
+// Private Ask read-only sandbox (CR-2026-008): a task registered as ask-only
+// gets a 403 from /repo/checkout regardless of the URL's origin, and the
+// rejection lifts once the task's registration is gone (task finished).
+func TestRepoCheckoutRejectedForAskOnlyTask(t *testing.T) {
+	t.Parallel()
+
+	const workspaceID = "ws-askonly"
+	const repoURL = "https://github.com/org/repo.git"
+	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
+	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, cache)
+
+	d.activeTaskAuth.Store("task-ask", activeTaskAuth{authToken: "ask-token", askOnly: true})
+	d.activeTaskAuth.Store("task-regular", activeTaskAuth{authToken: "regular-token", askOnly: false})
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-ask","auth_token":"ask-token"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for ask-only task, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "read-only chat session") {
+		t.Fatalf("rejection should name the read-only chat session, got: %s", rec.Body.String())
+	}
+
+	// A different (non-ask-only) task on the same daemon checks out fine,
+	// when it presents ITS OWN token.
+	rec = httptest.NewRecorder()
+	body = strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-regular","auth_token":"regular-token"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for regular task, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// CODE-BLOCK-001: the ask-only agent cannot bypass the restriction by
+	// claiming to be task-regular instead — it does not know that task's
+	// token (a distinct per-task secret it was never given).
+	rec = httptest.NewRecorder()
+	body = strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-regular","auth_token":"ask-token"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 impersonating task-regular with the wrong token, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Registration is scoped to the task's lifetime.
+	d.activeTaskAuth.Delete("task-ask")
+	rec = httptest.NewRecorder()
+	body = strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"/tmp/work","task_id":"task-ask","auth_token":"ask-token"}`)
+	d.repoCheckoutHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/repo/checkout", body))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 after registration cleared (unknown task), got %d: %s", rec.Code, rec.Body.String())
 	}
 }

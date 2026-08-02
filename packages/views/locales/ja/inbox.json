@@ -27,6 +27,11 @@
     "edit_advanced": "詳細フォームで編集",
     "archive": "アーカイブ"
   },
+  "container_jump": {
+    "team_agent": "このメッセージはプロジェクトの Team Agent チャットの一部です。",
+    "discussion": "このメッセージはプロジェクトの Discussion の一部です。",
+    "cta": "プロジェクトチャットへ移動"
+  },
   "types": {
     "issue_assigned": "割り当て済み",
     "issue_subscribed": "購読済み",

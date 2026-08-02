@@ -181,6 +181,27 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 		// PR). The `Event.TaskID` / `Event.ChatSessionID` hints are still
 		// populated by producers so that flipping the switch later is a
 		// one-line change here. See review on PR #1429 for context.
+		//
+		// EXCEPTION (CR-2026-008): events bound to a chat session are
+		// creator-private — the HTTP layer and ScopeAuthorizer both enforce
+		// creator-only access, so the fanout must not deliver their payloads
+		// (message content, streamed transcripts) to every workspace member.
+		// They go to the session creator via SendToUser, which covers all of
+		// that user's connections/devices. This deliberately fails closed: a
+		// producer that sets ChatSessionID without ChatRecipientID gets its
+		// event dropped (with an ERROR log), never broadcast — the frontend's
+		// invalidate/refetch patterns self-heal from a missed event, a leaked
+		// private payload cannot be unsent.
+		if e.ChatSessionID != "" {
+			if e.ChatRecipientID == "" {
+				slog.Error("chat event without recipient dropped",
+					"event_type", e.Type, "chat_session_id", e.ChatSessionID)
+				return
+			}
+			realtime.M.RecordEvent(e.Type)
+			b.SendToUser(e.ChatRecipientID, data)
+			return
+		}
 
 		if e.WorkspaceID != "" {
 			realtime.M.RecordEvent(e.Type)

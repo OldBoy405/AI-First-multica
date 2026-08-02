@@ -20,6 +20,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/governance"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
@@ -1838,6 +1839,11 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			resp.WorkspaceID = uuidToString(cs.WorkspaceID)
 			resp.ChatSessionID = uuidToString(cs.ID)
 			resp.ThreadName = cs.Title
+			// Project-bound sessions are the Private Ask pane: a personal
+			// read-only sandbox. The daemon enforces ask-only (no repo
+			// checkout); the global 1:1 chat (project_id NULL) stays
+			// unrestricted (CR-2026-008).
+			resp.AskOnly = cs.ProjectID.Valid
 			// An is_agent_intro session carries no user message: the agent opens
 			// the conversation by introducing itself. Flag it so the daemon builds
 			// a self-introduction prompt rather than a "reply to their message"
@@ -2461,8 +2467,11 @@ func (h *Handler) ReportTaskProgress(w http.ResponseWriter, r *http.Request) {
 			workspaceID = uuidToString(issue.WorkspaceID)
 		}
 	}
+	if workspaceID == "" && task.ChatSessionID.Valid {
+		workspaceID = h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
+	}
 
-	h.TaskService.ReportProgress(r.Context(), taskID, workspaceID, req.Summary, req.Step, req.Total)
+	h.TaskService.ReportProgress(r.Context(), task, workspaceID, req.Summary, req.Step, req.Total)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -3157,9 +3166,17 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 			workspaceID = uuidToString(issue.WorkspaceID)
 		}
 	}
-	if workspaceID == "" && task.ChatSessionID.Valid {
+	// Chat tasks: resolve the session once for both the workspace id and the
+	// per-user delivery target — task:message frames carry the streamed
+	// transcript, the most privacy-sensitive chat payload (CR-2026-008).
+	chatSessionID, chatRecipientID := "", ""
+	if task.ChatSessionID.Valid {
+		chatSessionID = uuidToString(task.ChatSessionID)
 		if cs, err := h.Queries.GetChatSession(r.Context(), task.ChatSessionID); err == nil {
-			workspaceID = uuidToString(cs.WorkspaceID)
+			chatRecipientID = uuidToString(cs.CreatorID)
+			if workspaceID == "" {
+				workspaceID = uuidToString(cs.WorkspaceID)
+			}
 		}
 	}
 
@@ -3189,8 +3206,16 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if workspaceID != "" {
-			h.publishTask(protocol.EventTaskMessage, workspaceID, "system", "", taskID,
-				taskMessageToPayload(created, taskID, uuidToString(task.IssueID)))
+			h.Bus.Publish(events.Event{
+				Type:            protocol.EventTaskMessage,
+				WorkspaceID:     workspaceID,
+				ActorType:       "system",
+				ActorID:         "",
+				TaskID:          taskID,
+				ChatSessionID:   chatSessionID,
+				ChatRecipientID: chatRecipientID,
+				Payload:         taskMessageToPayload(created, taskID, uuidToString(task.IssueID)),
+			})
 		}
 	}
 

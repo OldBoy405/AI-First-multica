@@ -175,6 +175,10 @@
     "unconfigured_admin_cta": "配置团队智能体",
     "unconfigured_member": "请联系项目 Owner 配置团队智能体。",
     "team_agent_setup_failed": "团队智能体设置失败，请重试",
+    "discussion": {
+      "sub": "发送消息开始讨论。",
+      "composer_placeholder": "给团队发消息…"
+    },
     "stream": {
       "no_earlier": "没有更早的消息",
       "composer_placeholder": "给 Team Agent 发消息…",
@@ -205,6 +209,15 @@
       "system_task": "系统任务",
       "no_summary": "（无消息摘要）",
       "cancel_already_finished": "任务已结束，无法撤回"
+    },
+    "private": {
+      "needs_team_agent": "Private Ask 使用项目的 Team Agent，请先在 Team Agent 标签页完成配置。",
+      "load_failed": "私密会话加载失败，请重试。",
+      "empty_hint": "就这个项目随便问——只有你能看到这段对话，Agent 也无法修改项目文件。",
+      "composer_placeholder": "私下提问…",
+      "stop": "停止",
+      "stop_failed": "停止失败，请重试。",
+      "model_follows_team_agent": "模型随 Team Agent 配置"
     }
   }
 }

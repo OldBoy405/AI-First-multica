@@ -335,10 +335,11 @@ func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *ser
 				}
 			}
 		}
-		bus.Publish(events.Event{
+		evt := events.Event{
 			Type:        protocol.EventTaskFailed,
 			WorkspaceID: workspaceID,
 			ActorType:   "system",
+			TaskID:      util.UUIDToString(t.ID),
 			Payload: map[string]any{
 				"task_id":        util.UUIDToString(t.ID),
 				"agent_id":       util.UUIDToString(t.AgentID),
@@ -346,7 +347,14 @@ func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *ser
 				"status":         "failed",
 				"failure_reason": failureReason,
 			},
-		})
+		}
+		if t.ChatSessionID.Valid {
+			evt.ChatSessionID = util.UUIDToString(t.ChatSessionID)
+			if cs, err := queries.GetChatSession(ctx, t.ChatSessionID); err == nil {
+				evt.ChatRecipientID = util.UUIDToString(cs.CreatorID)
+			}
+		}
+		bus.Publish(evt)
 		affectedAgents[util.UUIDToString(t.AgentID)] = t.AgentID
 	}
 	for _, agentID := range affectedAgents {

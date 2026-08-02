@@ -175,6 +175,9 @@ import {
   EMPTY_QUEUE_STATUS_WITH_ITEMS,
   QueueStatusWithItemsSchema,
   type QueueStatusWithItems,
+  EMPTY_PROJECT_DISCUSSION,
+  ProjectDiscussionSchema,
+  type ProjectDiscussion,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1990,6 +1993,16 @@ export class ApiClient {
     });
   }
 
+  // Get-or-create the caller's Private Ask session for a project
+  // (CR-2026-008): the latest active project-bound chat_session, lazily
+  // created against the project's Team Agent. Throws a structured ApiError
+  // with code team_agent_not_configured (409) when the project has no agent
+  // bound — callers gate on projectChatOptions first, so that only fires on
+  // config drift.
+  async getProjectPrivateChat(id: string): Promise<ChatSession> {
+    return this.fetch(`/api/projects/${id}/private-chat`);
+  }
+
   // Post a message to the project's Team Agent (CR-2026-006 TASK-02). On
   // success the server creates a backing comment and enqueues an agent task;
   // non-2xx responses (409 team_agent_not_configured / 429 project_queue_full /
@@ -2004,6 +2017,15 @@ export class ApiClient {
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
+    });
+  }
+
+  // Project Discussion context (CR-2026-009): the backing container issue id,
+  // lazily created on first call. No agent binding — Discussion never drives one.
+  async getProjectDiscussion(id: string): Promise<ProjectDiscussion> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/discussion`);
+    return parseWithFallback(raw, ProjectDiscussionSchema, EMPTY_PROJECT_DISCUSSION, {
+      endpoint: "GET /api/projects/:id/discussion",
     });
   }
 
