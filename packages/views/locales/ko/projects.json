@@ -190,5 +190,26 @@
       "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
       "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "초안 작성 중",
+      "requirement-reviewing": "요구사항 검토 중",
+      "requirement-approved": "요구사항 승인됨",
+      "tech-designing": "기술 설계 중",
+      "tech-design-review-pending": "설계 검토 대기",
+      "tech-design-reviewed": "설계 검토 완료",
+      "task-breakdown": "작업 분해",
+      "developing": "개발 중",
+      "code-reviewing": "코드 리뷰 중",
+      "code-approved": "코드 승인됨",
+      "merging": "병합 중",
+      "writing-back": "역기록 중",
+      "archived": "보관됨",
+      "rejected": "반려됨",
+      "withdrawn": "철회됨"
+    },
+    "multiple_active": "진행 중인 CR {{count}}건",
+    "needs_reconcile": "동기화 중…"
   }
 }

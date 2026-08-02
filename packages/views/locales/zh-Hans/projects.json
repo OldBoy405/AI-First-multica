@@ -190,5 +190,26 @@
       "runtime_guide": "请先在设置中启动本地 Agent",
       "model_update_failed": "模型更新失败，请重试"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "草拟中",
+      "requirement-reviewing": "需求评审中",
+      "requirement-approved": "需求已通过",
+      "tech-designing": "技术设计中",
+      "tech-design-review-pending": "设计待评审",
+      "tech-design-reviewed": "设计已评审",
+      "task-breakdown": "任务拆分",
+      "developing": "开发中",
+      "code-reviewing": "代码评审中",
+      "code-approved": "代码已通过",
+      "merging": "合并中",
+      "writing-back": "回写中",
+      "archived": "已归档",
+      "rejected": "已驳回",
+      "withdrawn": "已撤回"
+    },
+    "multiple_active": "{{count}} 个进行中的 CR",
+    "needs_reconcile": "同步中…"
   }
 }

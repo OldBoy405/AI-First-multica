@@ -190,5 +190,26 @@
       "runtime_guide": "先に設定でローカル Agent を起動してください",
       "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "ドラフト作成中",
+      "requirement-reviewing": "要件レビュー中",
+      "requirement-approved": "要件承認済み",
+      "tech-designing": "技術設計中",
+      "tech-design-review-pending": "設計レビュー待ち",
+      "tech-design-reviewed": "設計レビュー済み",
+      "task-breakdown": "タスク分解",
+      "developing": "開発中",
+      "code-reviewing": "コードレビュー中",
+      "code-approved": "コード承認済み",
+      "merging": "マージ中",
+      "writing-back": "書き戻し中",
+      "archived": "アーカイブ済み",
+      "rejected": "却下",
+      "withdrawn": "撤回済み"
+    },
+    "multiple_active": "進行中の CR が {{count}} 件",
+    "needs_reconcile": "同期中…"
   }
 }

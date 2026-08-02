@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // MaxEventsPerBatch bounds one report call (PRD FR-2).
@@ -32,7 +33,7 @@ const MaxEventsPerBatch = 100
 
 // EventCRUpdated is the WS event type broadcast to workspace rooms after a
 // projection change (board refresh signal).
-const EventCRUpdated = "cr:updated"
+const EventCRUpdated = protocol.EventCRUpdated
 
 var crIDRe = regexp.MustCompile(`^CR-\d{4}-\d{3}$`)
 

@@ -192,5 +192,26 @@
       "runtime_guide": "Start a local Agent in Settings first",
       "model_update_failed": "Failed to update the model, please try again"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "Drafting",
+      "requirement-reviewing": "Requirement Review",
+      "requirement-approved": "Requirement Approved",
+      "tech-designing": "Tech Design",
+      "tech-design-review-pending": "Design Review Pending",
+      "tech-design-reviewed": "Design Reviewed",
+      "task-breakdown": "Task Breakdown",
+      "developing": "Developing",
+      "code-reviewing": "Code Review",
+      "code-approved": "Code Approved",
+      "merging": "Merging",
+      "writing-back": "Writing Back",
+      "archived": "Archived",
+      "rejected": "Rejected",
+      "withdrawn": "Withdrawn"
+    },
+    "multiple_active": "{{count}} active CRs",
+    "needs_reconcile": "Reconciling…"
   }
 }

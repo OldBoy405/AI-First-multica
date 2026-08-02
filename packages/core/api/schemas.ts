@@ -372,6 +372,139 @@ export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
   task_id: "",
 };
 
+// CR governance gate data for a project's chat window (CR-2026-011 TASK-05).
+// One gate node = one pipeline_node_run row: an approval-stage human_approval
+// node's running/passed history, or a reviewed stage's blocked/passed
+// history (each reviewLoop round gets its own row, see server SDD §4.1).
+export interface GateNode {
+  node_id: string;
+  kind: string;
+  seq: number;
+  status: string;
+  attempt: number;
+  detail?: unknown;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export const GateNodeSchema = z
+  .object({
+    node_id: z.string().default(""),
+    kind: z.string().default(""),
+    seq: z.number().default(0),
+    status: z.string().default(""),
+    attempt: z.number().default(1),
+    detail: z.unknown().optional(),
+    started_at: z.string().nullable().optional(),
+    completed_at: z.string().nullable().optional(),
+  })
+  .loose();
+
+// pending_stage is "" when the CR is not currently sitting at an approval
+// gate. pending_advance is true when a matching approval_record already
+// exists for the current evidence_digest but the CR hasn't advanced past
+// the gate yet (server-derived — the card should show "approved, waiting to
+// advance", not a re-approvable state).
+export interface ProjectGateCR {
+  cr_id: string;
+  title: string;
+  status: string;
+  needs_reconcile: boolean;
+  updated_at: string;
+  pending_stage: string;
+  can_approve: boolean;
+  evidence: Record<string, string>;
+  evidence_digest: string;
+  key_id: string;
+  pending_advance: boolean;
+  gate_nodes: GateNode[];
+}
+
+export const ProjectGateCRSchema = z
+  .object({
+    cr_id: z.string().default(""),
+    title: z.string().default(""),
+    status: z.string().default(""),
+    needs_reconcile: z.boolean().default(false),
+    updated_at: z.string().default(""),
+    pending_stage: z.string().default(""),
+    can_approve: z.boolean().default(false),
+    evidence: z.record(z.string(), z.string()).default({}),
+    evidence_digest: z.string().default(""),
+    key_id: z.string().default(""),
+    pending_advance: z.boolean().default(false),
+    gate_nodes: z.array(GateNodeSchema).default([]),
+  })
+  .loose();
+
+export interface ProjectGatesResponse {
+  crs: ProjectGateCR[];
+}
+
+export const ProjectGatesResponseSchema = z
+  .object({
+    crs: z.array(ProjectGateCRSchema).default([]),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_GATES_RESPONSE: ProjectGatesResponse = { crs: [] };
+
+// Signed grant (Ed25519) issued by POST /api/workspaces/{wid}/crs/{crId}/approve.
+export interface Grant {
+  v: number;
+  cr_id: string;
+  stage: string;
+  decision: string;
+  approver: string;
+  approved_at: string;
+  evidence_digest: string;
+  key_id: string;
+  signature: string;
+}
+
+export const GrantSchema = z
+  .object({
+    v: z.number().default(1),
+    cr_id: z.string().default(""),
+    stage: z.string().default(""),
+    decision: z.string().default(""),
+    approver: z.string().default(""),
+    approved_at: z.string().default(""),
+    evidence_digest: z.string().default(""),
+    key_id: z.string().default(""),
+    signature: z.string().default(""),
+  })
+  .loose();
+
+export interface ApproveCrResponse {
+  grant: Grant;
+  idempotent?: boolean;
+}
+
+export const ApproveCrResponseSchema = z
+  .object({
+    grant: GrantSchema,
+    idempotent: z.boolean().optional(),
+  })
+  .loose();
+
+export const EMPTY_APPROVE_CR_RESPONSE: ApproveCrResponse = {
+  grant: {
+    v: 1, cr_id: "", stage: "", decision: "", approver: "",
+    approved_at: "", evidence_digest: "", key_id: "", signature: "",
+  },
+};
+
+// Request body for POST /api/workspaces/{wid}/crs/{crId}/approve.
+export interface ApproveCrRequest {
+  stage: string;
+  decision: "approve" | "reject";
+  reject_reason?: string;
+  // The digest the approval card showed the caller — the server 409s
+  // (EVIDENCE_DRIFT) if it no longer matches (SDD §B.1③).
+  evidence_digest?: string;
+}
+
 const SearchProjectResultSchema = ProjectSchema.extend({
   match_source: z.string(),
   matched_snippet: z.string().optional(),

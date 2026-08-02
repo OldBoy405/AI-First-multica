@@ -33,6 +33,7 @@ import {
   PickerEmpty,
 } from "../../issues/components/pickers/property-picker";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
+import { CrStatusBadge } from "./cr-status-badge";
 import { useT } from "../../i18n";
 
 const MODES: readonly ProjectChatMode[] = [
@@ -61,6 +62,7 @@ export function ProjectChatPanel({
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
+  const wsId = useWorkspaceId();
   const activeMode =
     useProjectChatStore((s) => s.activeMode[projectId]) ?? "team_agent";
   const setActiveMode = useProjectChatStore((s) => s.setActiveMode);
@@ -71,26 +73,29 @@ export function ProjectChatPanel({
       onValueChange={(v) => setActiveMode(projectId, v as ProjectChatMode)}
       className="flex-1 min-h-0"
     >
-      <TabsList variant="line" className="mx-4 mt-2">
-        {MODES.map((mode) => {
-          const Icon = MODE_ICON[mode];
-          return (
-            <Tooltip key={mode}>
-              <TooltipTrigger
-                render={
-                  <TabsTrigger value={mode} className="flex-none">
-                    <Icon className="h-4 w-4" />
-                    {t(($) => $.chat.tabs[mode])}
-                  </TabsTrigger>
-                }
-              />
-              <TooltipContent side="bottom">
-                {t(($) => $.chat.tooltips[mode])}
-              </TooltipContent>
-            </Tooltip>
-          );
-        })}
-      </TabsList>
+      <div className="mx-4 mt-2 flex items-center justify-between gap-2">
+        <TabsList variant="line">
+          {MODES.map((mode) => {
+            const Icon = MODE_ICON[mode];
+            return (
+              <Tooltip key={mode}>
+                <TooltipTrigger
+                  render={
+                    <TabsTrigger value={mode} className="flex-none">
+                      <Icon className="h-4 w-4" />
+                      {t(($) => $.chat.tabs[mode])}
+                    </TabsTrigger>
+                  }
+                />
+                <TooltipContent side="bottom">
+                  {t(($) => $.chat.tooltips[mode])}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </TabsList>
+        <CrStatusBadge wsId={wsId} projectId={projectId} />
+      </div>
 
       {MODES.map((mode) => (
         <TabsContent key={mode} value={mode} className="min-h-0">

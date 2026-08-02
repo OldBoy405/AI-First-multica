@@ -803,4 +803,115 @@ describe("ApiClient", () => {
       expect(JSON.parse(fetchMock.mock.calls[1]![1]?.body as string)).toEqual({ content: "again" });
     });
   });
+
+  describe("getProjectGates (CR-2026-011 TASK-05)", () => {
+    const jsonResponse = (body: unknown, status: number, statusText = "") =>
+      new Response(JSON.stringify(body), {
+        status,
+        statusText,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    it("resolves to an empty crs list when the route 404s (governance feature off, SDD DD-8)", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: "not found" }, 404, "Not Found"));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      const result = await client.getProjectGates("proj-1");
+
+      expect(result).toEqual({ crs: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("propagates non-404 errors", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: "boom" }, 500, "Internal Server Error"));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      await expect(client.getProjectGates("proj-1")).rejects.toMatchObject({ status: 500 });
+    });
+
+    it("parses a successful response, defaulting missing optional fields", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            crs: [
+              {
+                cr_id: "CR-2026-011",
+                title: "Gate接合",
+                status: "requirement-reviewing",
+                needs_reconcile: false,
+                updated_at: "2026-08-02T10:00:00Z",
+                pending_stage: "requirement",
+                can_approve: true,
+                pending_advance: false,
+                gate_nodes: [
+                  { node_id: "n1", kind: "human_approval", seq: 5, status: "running", attempt: 1 },
+                ],
+              },
+            ],
+          },
+          200,
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      const result = await client.getProjectGates("proj-1");
+
+      expect(result.crs).toHaveLength(1);
+      expect(result.crs[0]).toMatchObject({
+        cr_id: "CR-2026-011",
+        pending_stage: "requirement",
+        can_approve: true,
+        evidence: {},
+        evidence_digest: "",
+      });
+      expect(result.crs[0]!.gate_nodes[0]).toMatchObject({ node_id: "n1", status: "running" });
+    });
+  });
+
+  describe("approveCr (CR-2026-011 TASK-05)", () => {
+    it("posts to the workspace-scoped approve endpoint and returns the grant", async () => {
+      const grant = {
+        v: 1, cr_id: "CR-2026-011", stage: "requirement", decision: "approve",
+        approver: "u1", approved_at: "2026-08-02T10:00:00Z",
+        evidence_digest: "abc", key_id: "k1", signature: "sig",
+      };
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ grant }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      const result = await client.approveCr("ws-1", "CR-2026-011", { stage: "requirement", decision: "approve" });
+
+      expect(fetchMock.mock.calls[0]![0]).toBe(
+        "https://api.example.test/api/workspaces/ws-1/crs/CR-2026-011/approve",
+      );
+      expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).toEqual({
+        stage: "requirement",
+        decision: "approve",
+      });
+      expect(result.grant).toMatchObject({ cr_id: "CR-2026-011", stage: "requirement" });
+    });
+
+    it("propagates a 409 EVIDENCE_DRIFT as a structured ApiError", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: "EVIDENCE_DRIFT", expected: "aaa", current: "bbb" }),
+          { status: 409, statusText: "Conflict", headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      await expect(
+        client.approveCr("ws-1", "CR-2026-011", { stage: "requirement", decision: "approve" }),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: { error: "EVIDENCE_DRIFT" },
+      });
+    });
+  });
 });
