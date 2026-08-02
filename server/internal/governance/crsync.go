@@ -264,6 +264,13 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 		if err != nil {
 			return err
 		}
+		// Gate-node projection (CR-2026-011 TASK-02) is read-side only — only
+		// project when the transition is trusted (legalFresh); an untrusted
+		// first sighting is flagged needs_reconcile above and must not seed a
+		// pipeline_run off a from/to pair we don't believe.
+		if legalFresh {
+			s.projectGateTransition(ctx, workspaceID, ev.CRID, ev.FromStatus, ev.ToStatus)
+		}
 		s.publish(ctx, workspaceID, ev.CRID)
 		return nil
 	}
@@ -277,6 +284,7 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 		if err != nil {
 			return err
 		}
+		s.projectGateTransition(ctx, workspaceID, ev.CRID, ev.FromStatus, ev.ToStatus)
 	} else {
 		// Out-of-order or illegal: never force the projection — flag and let
 		// reconcile replay from the authority.
