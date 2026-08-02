@@ -1080,6 +1080,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/chat", h.GetProjectChat)
 					r.Post("/chat/messages", h.SendProjectChatMessage)
 					r.Get("/private-chat", h.GetProjectPrivateChat)
+					r.Get("/discussion", h.GetProjectDiscussion)
 					r.Get("/resources", h.ListProjectResources)
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)

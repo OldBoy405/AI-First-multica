@@ -177,6 +177,10 @@
     "unconfigured_admin_cta": "Configure Team Agent",
     "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
     "team_agent_setup_failed": "Failed to set the Team Agent, please try again",
+    "discussion": {
+      "sub": "Send a message to start discussing.",
+      "composer_placeholder": "Message the team…"
+    },
     "stream": {
       "no_earlier": "No earlier messages",
       "composer_placeholder": "Message Team Agent…",

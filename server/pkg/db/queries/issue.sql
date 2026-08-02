@@ -10,9 +10,11 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue from all
-  -- issue-listing surfaces (board/list/swimlane/gantt/my-issues route here).
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues from all issue-listing surfaces
+  -- (board/list/swimlane/gantt/my-issues route here).
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND (sqlc.narg('status')::text IS NULL OR i.status = sqlc.narg('status'))
   AND (sqlc.narg('priority')::text IS NULL OR i.priority = sqlc.narg('priority'))
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
@@ -172,8 +174,10 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage
 FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue.
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues.
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND i.status NOT IN ('done', 'cancelled')
   AND (sqlc.narg('priority')::text IS NULL OR i.priority = sqlc.narg('priority'))
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
@@ -219,9 +223,11 @@ ORDER BY i.position ASC, i.created_at DESC;
 -- See ListIssues for the semantics of involves_user_id.
 SELECT count(*) FROM issue i
 WHERE i.workspace_id = $1
-  -- CR-2026-006: hide the per-project Team Agent chat container issue from all
-  -- issue-listing surfaces (board/list/swimlane/gantt/my-issues route here).
+  -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+  -- Discussion container issues from all issue-listing surfaces
+  -- (board/list/swimlane/gantt/my-issues route here).
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   AND (sqlc.narg('status')::text IS NULL OR i.status = sqlc.narg('status'))
   AND (sqlc.narg('priority')::text IS NULL OR i.priority = sqlc.narg('priority'))
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
@@ -358,3 +364,9 @@ RETURNING id, workspace_id, creator_type, creator_id, first_executed_at;
 -- At most one row exists per project (partial unique index issue_project_chat_unique).
 SELECT * FROM issue
 WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_chat';
+
+-- name: GetProjectDiscussionIssue :one
+-- CR-2026-009: fetch the hidden per-project Discussion container issue.
+-- At most one row exists per project (partial unique index issue_project_discussion_unique).
+SELECT * FROM issue
+WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_discussion';

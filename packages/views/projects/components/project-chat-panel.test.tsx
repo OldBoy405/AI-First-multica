@@ -4,6 +4,8 @@ import { render, screen, waitFor, fireEvent, cleanup } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { useProjectChatStore } from "@multica/core/projects";
+import { NavigationProvider } from "../../navigation/context";
+import type { NavigationAdapter } from "../../navigation/types";
 import enCommon from "../../locales/en/common.json";
 import enProjects from "../../locales/en/projects.json";
 
@@ -36,14 +38,37 @@ vi.mock("./project-private-ask", () => ({
   ProjectPrivateAsk: () => <div data-testid="project-private-ask" />,
 }));
 
+// Discussion's own stream/composer are covered by discussion-pane.test.tsx
+// (CR-2026-009). Stub it here for the same reason as ProjectTeamAgentChat
+// above — this file only asserts tab-switch delegation.
+vi.mock("./discussion-pane", () => ({
+  DiscussionPane: (props: { projectId: string }) => (
+    <div data-testid="discussion-pane" data-project={props.projectId} />
+  ),
+}));
+
 import { ProjectChatPanel } from "./project-chat-panel";
 
-function renderPanel(canConfigure: boolean) {
+function makeNavAdapter(overrides: Partial<NavigationAdapter> = {}): NavigationAdapter {
+  return {
+    push: () => {},
+    replace: () => {},
+    back: () => {},
+    pathname: "/",
+    searchParams: new URLSearchParams(),
+    getShareableUrl: (p) => p,
+    ...overrides,
+  };
+}
+
+function renderPanel(canConfigure: boolean, nav: NavigationAdapter = makeNavAdapter()) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
-        <ProjectChatPanel projectId="proj-1" canConfigure={canConfigure} />
+        <NavigationProvider value={nav}>
+          <ProjectChatPanel projectId="proj-1" canConfigure={canConfigure} />
+        </NavigationProvider>
       </I18nProvider>
     </QueryClientProvider>,
   );
@@ -86,6 +111,18 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
       expect(screen.getByTestId("project-chat-unconfigured-member")).toBeTruthy(),
     );
     expect(screen.queryByTestId("project-chat-unconfigured-admin")).toBeNull();
+  });
+
+  it("?mode=discussion deep-links straight to the Discussion tab (CR-2026-009)", async () => {
+    mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
+    renderPanel(true, makeNavAdapter({ searchParams: new URLSearchParams("mode=discussion") }));
+    await waitFor(() => expect(screen.getByTestId("discussion-pane")).toBeTruthy());
+  });
+
+  it("an invalid ?mode= value is ignored and falls back to Team Agent", async () => {
+    mockGetProjectChat.mockResolvedValue({ issue_id: "i1", team_agent_id: "a1" });
+    renderPanel(true, makeNavAdapter({ searchParams: new URLSearchParams("mode=not-a-real-mode") }));
+    await waitFor(() => expect(screen.getByTestId("project-team-agent-chat")).toBeTruthy());
   });
 
   it("configured Team Agent renders the message stream for the backing issue (TASK-04)", async () => {

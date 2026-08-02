@@ -4,6 +4,7 @@ export {
   projectDetailOptions,
   projectChatOptions,
   projectPrivateChatOptions,
+  projectDiscussionOptions,
   projectQueueStatusOptions,
 } from "./queries";
 export { useProjectChatStore, projectChatDraftKey, type ProjectChatMode } from "./project-chat-store";

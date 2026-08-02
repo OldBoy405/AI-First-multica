@@ -66,6 +66,16 @@ type IssueResponse struct {
 	// preserves whatever labels are already in cache. nil pointer = "field
 	// absent, do not touch"; non-nil (incl. empty slice) = authoritative list.
 	Labels *[]LabelResponse `json:"labels,omitempty"`
+	// OriginType identifies a system container issue (e.g. "project_chat",
+	// "project_discussion" — CR-2026-006/CR-2026-009's hidden per-project chat
+	// anchors) so client surfaces that reach a container by direct id (the
+	// inbox does, for a Team Agent/@mention notification) can detect it and
+	// redirect to the project chat panel instead of rendering a bare Issue
+	// detail for an issue that was never meant to be seen as one. Nil for
+	// every ordinary issue. Only populated on the single-issue detail fetch
+	// (issueToResponse) — list/search rows already exclude containers
+	// entirely, so they have no need for it.
+	OriginType *string `json:"origin_type,omitempty"`
 }
 
 // validIssueStatuses / validIssuePriorities mirror the CHECK constraints on
@@ -109,6 +119,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
 		Metadata:      parseIssueMetadata(i.Metadata),
+		OriginType:    textToPtr(i.OriginType),
 	}
 }
 
@@ -468,10 +479,11 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		whereClause += " AND i.status NOT IN ('done', 'cancelled')"
 	}
 
-	// CR-2026-006: exclude the hidden Team Agent chat container issue. Critical
-	// here because the search WHERE also matches on comment content (Tier 7/8),
-	// so without this, chat messages would leak into global issue search results.
-	whereClause += " AND i.origin_type IS DISTINCT FROM 'project_chat'"
+	// CR-2026-006/CR-2026-009: exclude the hidden Team Agent chat and Discussion
+	// container issues. Critical here because the search WHERE also matches on
+	// comment content (Tier 7/8), so without this, chat/discussion messages
+	// would leak into global issue search results.
+	whereClause += " AND i.origin_type IS DISTINCT FROM 'project_chat' AND i.origin_type IS DISTINCT FROM 'project_discussion'"
 
 	// --- ORDER BY clause ---
 	// Build ranking CASE with fine-grained tiers.
@@ -940,9 +952,10 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build dynamic SQL — same approach as ListGroupedIssues.
-	// CR-2026-006: hide the per-project Team Agent chat container issue
-	// (origin_type='project_chat') from every issue-listing surface.
-	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'"}
+	// CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+	// Discussion container issues (origin_type='project_chat'/'project_discussion')
+	// from every issue-listing surface.
+	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'", "i.origin_type IS DISTINCT FROM 'project_discussion'"}
 	args := []any{wsUUID}
 	addArg := func(v any) string {
 		args = append(args, v)
@@ -1274,9 +1287,10 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// CR-2026-006: hide the per-project Team Agent chat container issue
-	// (origin_type='project_chat') from every issue-listing surface.
-	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'"}
+	// CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
+	// Discussion container issues (origin_type='project_chat'/'project_discussion')
+	// from every issue-listing surface.
+	where := []string{"i.workspace_id = $1", "i.origin_type IS DISTINCT FROM 'project_chat'", "i.origin_type IS DISTINCT FROM 'project_discussion'"}
 	args := []any{wsUUID}
 	addArg := func(v any) string {
 		args = append(args, v)

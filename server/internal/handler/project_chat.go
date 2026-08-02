@@ -63,6 +63,53 @@ func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ProjectDiscussionResponse is the entry payload for a project's Discussion
+// tab (CR-2026-009): the hidden container issue that anchors the pure-human,
+// agent-free message stream. Unlike ProjectChatResponse there is no agent
+// binding to report — Discussion never drives an agent.
+type ProjectDiscussionResponse struct {
+	IssueID string `json:"issue_id"`
+}
+
+// GetProjectDiscussion resolves (lazily creating on first use) the project's
+// hidden Discussion container issue. GET /api/projects/{id}/discussion.
+func (h *Handler) GetProjectDiscussion(w http.ResponseWriter, r *http.Request) {
+	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: projectUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	issue, err := h.IssueService.EnsureProjectDiscussionIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve project discussion")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ProjectDiscussionResponse{
+		IssueID: uuidToString(issue.ID),
+	})
+}
+
 // projectTeamAgentID pulls the bound Team Agent id out of the project.settings
 // JSONB bag. Returns "" when unset or malformed — an unconfigured Team Agent is
 // a normal state the frontend handles, not an error.

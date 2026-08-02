@@ -27,6 +27,11 @@
     "edit_advanced": "在完整表单中编辑",
     "archive": "归档"
   },
+  "container_jump": {
+    "team_agent": "这条消息来自项目的 Team Agent 聊天。",
+    "discussion": "这条消息来自项目的 Discussion 讨论。",
+    "cta": "前往项目聊天"
+  },
   "types": {
     "issue_assigned": "已分配",
     "issue_subscribed": "已订阅",

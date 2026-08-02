@@ -14,6 +14,8 @@ export const projectKeys = {
     [...projectKeys.all(wsId), "chat", id] as const,
   privateChat: (wsId: string, id: string) =>
     [...projectKeys.all(wsId), "private-chat", id] as const,
+  discussion: (wsId: string, id: string) =>
+    [...projectKeys.all(wsId), "discussion", id] as const,
 };
 
 export function projectListOptions(wsId: string) {
@@ -58,5 +60,14 @@ export function projectPrivateChatOptions(wsId: string, id: string) {
     queryKey: projectKeys.privateChat(wsId, id),
     queryFn: () => api.getProjectPrivateChat(id),
     staleTime: Infinity,
+  });
+}
+
+// Project Discussion context (CR-2026-009): backing container issue id.
+// Powers the project chat panel's Discussion tab.
+export function projectDiscussionOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: projectKeys.discussion(wsId, id),
+    queryFn: () => api.getProjectDiscussion(id),
   });
 }

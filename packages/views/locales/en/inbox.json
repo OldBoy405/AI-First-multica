@@ -27,6 +27,11 @@
     "edit_advanced": "Edit as advanced form",
     "archive": "Archive"
   },
+  "container_jump": {
+    "team_agent": "This message is part of the project's Team Agent chat.",
+    "discussion": "This message is part of the project's Discussion.",
+    "cta": "Go to project chat"
+  },
   "types": {
     "issue_assigned": "Assigned",
     "issue_subscribed": "Subscribed",

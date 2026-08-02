@@ -22,32 +22,77 @@ import (
 // exclude origin_type='project_chat'), so it only needs to be stable, not nice.
 const projectChatIssueTitle = "Team Agent Chat"
 
+// projectDiscussionIssueTitle is the fixed title of every project's hidden
+// Discussion container issue (CR-2026-009). Same visibility rule as the chat
+// container: never shown in any issue-listing surface.
+const projectDiscussionIssueTitle = "Discussion"
+
 // EnsureProjectChatIssue returns the hidden container issue that anchors a
 // project's Team Agent group chat (CR-2026-006), creating it on first use.
 //
 // The message stream reuses the existing comment/timeline/websocket stack by
 // hanging every chat message off this one issue. It is stamped
 // origin_type='project_chat' so all issue-listing queries filter it out.
+func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID) (db.Issue, error) {
+	return s.ensureContainerIssue(ctx, workspaceID, projectID, callerID,
+		"project_chat", projectChatIssueTitle, "project-chat",
+		func(q *db.Queries, ctx context.Context, projectID, workspaceID pgtype.UUID) (db.Issue, error) {
+			return q.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{ProjectID: projectID, WorkspaceID: workspaceID})
+		})
+}
+
+// EnsureProjectDiscussionIssue returns the hidden container issue that anchors
+// a project's Discussion tab — a pure-human, agent-free multi-member chat
+// (CR-2026-009), creating it on first use.
+//
+// Structurally identical to EnsureProjectChatIssue: every Discussion message
+// is a comment hung off this one issue, stamped origin_type='project_discussion'
+// so all issue-listing queries filter it out. The only behavioral difference
+// from the chat container lives downstream, in computeCommentAgentTriggers'
+// origin-type short-circuit (CR-2026-009 red line: no agent is ever enqueued
+// off a Discussion comment).
+func (s *IssueService) EnsureProjectDiscussionIssue(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID) (db.Issue, error) {
+	return s.ensureContainerIssue(ctx, workspaceID, projectID, callerID,
+		"project_discussion", projectDiscussionIssueTitle, "project-discussion",
+		func(q *db.Queries, ctx context.Context, projectID, workspaceID pgtype.UUID) (db.Issue, error) {
+			return q.GetProjectDiscussionIssue(ctx, db.GetProjectDiscussionIssueParams{ProjectID: projectID, WorkspaceID: workspaceID})
+		})
+}
+
+// containerIssueGetter is the shape shared by GetProjectChatIssue and
+// GetProjectDiscussionIssue — sqlc gives each origin type its own generated
+// method (and its own Params struct) rather than a parameterized one, so
+// ensureContainerIssue takes this as a closure over *db.Queries to stay
+// generated-code-friendly while sharing the tx/lock/create plumbing below. The
+// caller passes *db.Queries explicitly (rather than binding it in the closure)
+// so ensureContainerIssue can run the same getter against both the plain
+// s.Queries fast-path read and the tx-scoped qtx recheck under the lock.
+type containerIssueGetter func(q *db.Queries, ctx context.Context, projectID, workspaceID pgtype.UUID) (db.Issue, error)
+
+// ensureContainerIssue is the shared lazy-creation path behind
+// EnsureProjectChatIssue and EnsureProjectDiscussionIssue.
 //
 // Concurrency: the fast path is a plain read. On a miss we open a tx, take an
-// advisory lock keyed on (workspace, project) to serialize concurrent
-// first-opens, re-check inside the lock, and only then create. The partial
-// unique index issue_project_chat_unique is the belt-and-suspenders backstop
-// if two creators ever slip past the lock.
-func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID) (db.Issue, error) {
+// advisory lock keyed on (kind, workspace, project) to serialize concurrent
+// first-opens, re-check inside the lock, and only then create. The container's
+// partial unique index (issue_project_chat_unique / issue_project_discussion_unique)
+// is the belt-and-suspenders backstop if two creators ever slip past the lock.
+func (s *IssueService) ensureContainerIssue(
+	ctx context.Context,
+	workspaceID, projectID, callerID pgtype.UUID,
+	originType, title, lockKeyPrefix string,
+	get containerIssueGetter,
+) (db.Issue, error) {
 	if !workspaceID.Valid || !projectID.Valid {
-		return db.Issue{}, fmt.Errorf("ensure project chat issue: workspace and project required")
+		return db.Issue{}, fmt.Errorf("ensure %s issue: workspace and project required", originType)
 	}
 
-	existing, err := s.Queries.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{
-		ProjectID:   projectID,
-		WorkspaceID: workspaceID,
-	})
+	existing, err := get(s.Queries, ctx, projectID, workspaceID)
 	if err == nil {
 		return existing, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return db.Issue{}, fmt.Errorf("lookup project chat issue: %w", err)
+		return db.Issue{}, fmt.Errorf("lookup %s issue: %w", originType, err)
 	}
 
 	tx, err := s.TxStarter.Begin(ctx)
@@ -58,20 +103,17 @@ func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, 
 	qtx := s.Queries.WithTx(tx)
 
 	// Serialize concurrent first-opens on the same project. Released on commit.
-	lockKey := strings.Join([]string{"project-chat", util.UUIDToString(workspaceID), util.UUIDToString(projectID)}, "|")
+	lockKey := strings.Join([]string{lockKeyPrefix, util.UUIDToString(workspaceID), util.UUIDToString(projectID)}, "|")
 	if err := qtx.LockIssueDuplicateKey(ctx, lockKey); err != nil {
-		return db.Issue{}, fmt.Errorf("lock project chat key: %w", err)
+		return db.Issue{}, fmt.Errorf("lock %s key: %w", originType, err)
 	}
 
 	// Re-check under the lock — another opener may have created it while we
 	// waited on the advisory lock.
-	if existing, err := qtx.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{
-		ProjectID:   projectID,
-		WorkspaceID: workspaceID,
-	}); err == nil {
+	if existing, err := get(qtx, ctx, projectID, workspaceID); err == nil {
 		return existing, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return db.Issue{}, fmt.Errorf("recheck project chat issue: %w", err)
+		return db.Issue{}, fmt.Errorf("recheck %s issue: %w", originType, err)
 	}
 
 	number, err := qtx.IncrementIssueCounter(ctx, workspaceID)
@@ -85,21 +127,24 @@ func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, 
 
 	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
 		WorkspaceID: workspaceID,
-		Title:       projectChatIssueTitle,
+		Title:       title,
 		Description: pgtype.Text{},
 		Status:      "todo",
 		// CR-2026-006 (TSUG-002): 'medium' maps to priority tier 2 via
-		// priorityToInt. Every group-chat task enqueues off this container
-		// issue and inherits its priority, so pinning the container at medium
-		// keeps project chat on par with 1:1 chat (also fixed at 2) — otherwise
+		// priorityToInt. Every group-chat task enqueues off the chat container
+		// issue and inherits its priority, so pinning it at medium keeps
+		// project chat on par with 1:1 chat (also fixed at 2) — otherwise
 		// 'none'(=0) would let 1:1 chat perpetually jump ahead of group chat on
 		// the same agent. Owner/admin preemption (tier 100) still outranks it.
+		// The Discussion container never enqueues anything (CR-2026-009 red
+		// line), so this value is inert for it — kept identical for one fewer
+		// branch, not because it means anything there.
 		Priority:     "medium",
 		AssigneeType: pgtype.Text{},
 		AssigneeID:   pgtype.UUID{},
 		// The container has no meaningful author; attribute it to the member
-		// who first opened the chat. It is never surfaced, so this only
-		// affects the (also hidden) issue's own creator record.
+		// who first opened it. It is never surfaced, so this only affects the
+		// (also hidden) issue's own creator record.
 		CreatorType:   "member",
 		CreatorID:     callerID,
 		ParentIssueID: pgtype.UUID{},
@@ -108,15 +153,15 @@ func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, 
 		DueDate:       pgtype.Date{},
 		Number:        number,
 		ProjectID:     projectID,
-		OriginType:    pgtype.Text{String: "project_chat", Valid: true},
+		OriginType:    pgtype.Text{String: originType, Valid: true},
 		OriginID:      pgtype.UUID{},
 		Stage:         pgtype.Int4{},
 	})
 	if err != nil {
-		return db.Issue{}, fmt.Errorf("create project chat issue: %w", err)
+		return db.Issue{}, fmt.Errorf("create %s issue: %w", originType, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return db.Issue{}, fmt.Errorf("commit project chat issue: %w", err)
+		return db.Issue{}, fmt.Errorf("commit %s issue: %w", originType, err)
 	}
 	return issue, nil
 }
