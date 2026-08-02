@@ -94,7 +94,9 @@ type SendProjectChatMessageResponse struct {
 // SendProjectChatMessage posts a member's message to the project's Team Agent
 // group chat and enqueues a run for the bound agent. POST /api/projects/{id}/chat/messages.
 //
-// Errors: 409 when no Team Agent is configured; 429 project_queue_full when the
+// Errors: 409 when no Team Agent is configured; 403 presenter_required when an
+// active presenter holds single-writer control and the caller is neither the
+// presenter nor owner/admin (CR-2026-010); 429 project_queue_full when the
 // shared queue is at capacity (front-load reject or the inner-guard race —
 // TSUG-001); 502 for any other enqueue failure (retryable, the comment is
 // rolled back before returning).
@@ -153,6 +155,11 @@ func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request)
 
 	comment, task, err := h.TaskService.SendProjectChatMessage(r.Context(), issue, agentUUID, callerUUID, req.Content)
 	if err != nil {
+		var presenterRequired *service.ErrPresenterRequired
+		if errors.As(err, &presenterRequired) {
+			writePresenterRequired(w, presenterRequired)
+			return
+		}
 		var full *service.ErrProjectQueueFull
 		if errors.As(err, &full) {
 			writeProjectQueueFull(w, full)
@@ -167,5 +174,16 @@ func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusCreated, SendProjectChatMessageResponse{
 		CommentID: uuidToString(comment.ID),
 		TaskID:    uuidToString(task.ID),
+	})
+}
+
+// writePresenterRequired returns 403 with the active presenter's user id so
+// the frontend can render "current presenter is X" alongside the rejection
+// (CR-2026-010 SDD §4.3 AC-2).
+func writePresenterRequired(w http.ResponseWriter, required *service.ErrPresenterRequired) {
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"code":              "presenter_required",
+		"error":             required.Error(),
+		"presenter_user_id": required.PresenterUserID,
 	})
 }
