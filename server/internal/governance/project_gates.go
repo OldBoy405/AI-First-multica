@@ -10,6 +10,7 @@ package governance
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -68,14 +69,14 @@ func canApprove(ctx context.Context, pool *pgxpool.Pool, workspaceID, userID str
 }
 
 type gateNodeView struct {
-	NodeID      string  `json:"node_id"`
-	Kind        string  `json:"kind"`
-	Seq         int     `json:"seq"`
-	Status      string  `json:"status"`
-	Attempt     int     `json:"attempt"`
-	Detail      []byte  `json:"detail,omitempty"`
-	StartedAt   *string `json:"started_at,omitempty"`
-	CompletedAt *string `json:"completed_at,omitempty"`
+	NodeID      string          `json:"node_id"`
+	Kind        string          `json:"kind"`
+	Seq         int             `json:"seq"`
+	Status      string          `json:"status"`
+	Attempt     int             `json:"attempt"`
+	Detail      json.RawMessage `json:"detail,omitempty"`
+	StartedAt   *string         `json:"started_at,omitempty"`
+	CompletedAt *string         `json:"completed_at,omitempty"`
 }
 
 type projectGateCR struct {

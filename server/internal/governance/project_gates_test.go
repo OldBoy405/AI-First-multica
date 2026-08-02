@@ -186,3 +186,42 @@ func TestProjectGatesCrossWorkspace404(t *testing.T) {
 		t.Fatalf("cross-workspace project access must be 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestProjectGatesDetailIsEmbeddedJSONNotBase64 catches the mistake of typing
+// gateNodeView.Detail as []byte, which encoding/json base64-encodes — the
+// frontend needs the blocker detail as a plain embedded JSON object.
+func TestProjectGatesDetailIsEmbeddedJSONNotBase64(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+	ownerID := testUserID(t)
+	crID := "CR-9005-004"
+	projectID := gateProjectFixture(t, testWorkspaceID, crID, "requirement-reviewing")
+	svc := NewSyncService(testPool, nil)
+	postEvents(t, svc, testWorkspaceID, []OutboxEvent{
+		reviewEvent(crID, "requirement", "block", 1, `[{"id":"REQ-BLOCK-001","location":"FR-1","issue":"x","suggestion":"y"}]`, "r1", "review1.json"),
+	})
+
+	approvalSvc, _ := newTestApprovalService(t)
+	rec := gatesHTTP(t, approvalSvc, testWorkspaceID, projectID, ownerID)
+	var body struct {
+		CRs []projectGateCR `json:"crs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.CRs) != 1 || len(body.CRs[0].GateNodes) == 0 {
+		t.Fatalf("expected at least one gate node with detail, got %+v", body.CRs)
+	}
+	var detail struct {
+		Blockers []struct {
+			ID string `json:"id"`
+		} `json:"blockers"`
+	}
+	if err := json.Unmarshal(body.CRs[0].GateNodes[0].Detail, &detail); err != nil {
+		t.Fatalf("detail must be embedded JSON, not a base64 string: %v (raw: %s)", err, body.CRs[0].GateNodes[0].Detail)
+	}
+	if len(detail.Blockers) != 1 || detail.Blockers[0].ID != "REQ-BLOCK-001" {
+		t.Fatalf("expected 1 blocker REQ-BLOCK-001, got %+v", detail.Blockers)
+	}
+}
