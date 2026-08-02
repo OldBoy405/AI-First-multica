@@ -33,6 +33,7 @@ import {
   PickerEmpty,
 } from "../../issues/components/pickers/property-picker";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
+import { ProjectPrivateAsk } from "./project-private-ask";
 import { useT } from "../../i18n";
 
 const MODES: readonly ProjectChatMode[] = [
@@ -141,6 +142,8 @@ function ModePane({
 
       {mode === "team_agent" ? (
         <TeamAgentPane projectId={projectId} canConfigure={canConfigure} />
+      ) : mode === "private_ask" ? (
+        <PrivateAskPane projectId={projectId} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
           <p className="text-sm font-medium">{t(($) => $.chat.greetings[mode])}</p>
@@ -149,6 +152,15 @@ function ModePane({
           </p>
         </div>
       )}
+    </div>
+  );
+}
+
+function PrivateAskPane({ projectId }: { projectId: string }) {
+  const wsId = useWorkspaceId();
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ProjectPrivateAsk projectId={projectId} wsId={wsId} />
     </div>
   );
 }
