@@ -212,6 +212,27 @@
       "withdrawn": "Withdrawn"
     },
     "multiple_active": "{{count}} active CRs",
-    "needs_reconcile": "Reconciling…"
+    "needs_reconcile": "Reconciling…",
+    "stage": {
+      "requirement": "Requirement",
+      "tech-design": "Tech Design",
+      "dev-start": "Dev Start",
+      "code": "Code"
+    },
+    "approve": "Approve",
+    "reject": "Reject",
+    "reject_reason_placeholder": "Reason for rejection…",
+    "reject_confirm": "Confirm reject",
+    "cancel": "Cancel",
+    "waiting_for_approval": "Waiting for {{stage}} approval",
+    "pending_advance": "Approved — waiting to advance",
+    "evidence_label": "Evidence",
+    "evidence_drift": "Evidence changed since this card loaded — reload and re-review",
+    "forbidden_approver": "You don't have permission to approve this",
+    "submit_failed": "Failed to submit, please try again",
+    "attempt_label": "Attempt {{attempt}}/3",
+    "review_blocked": "Review blocked",
+    "review_passed": "Review passed",
+    "node_cancelled": "Cancelled"
   }
 }

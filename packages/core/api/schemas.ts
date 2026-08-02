@@ -381,6 +381,11 @@ export interface GateNode {
   kind: string;
   seq: number;
   status: string;
+  // The gates.json#approvalStages key this node belongs to (requirement/
+  // tech-design/dev-start/code) — server-derived (SDD gate_nodes_gen.go's
+  // reverse map). Needed to label a PASSED node correctly: cr.pending_stage
+  // reflects the CR's CURRENT gate, not this (possibly earlier) node's.
+  stage: string;
   attempt: number;
   detail?: unknown;
   started_at?: string | null;
@@ -393,6 +398,7 @@ export const GateNodeSchema = z
     kind: z.string().default(""),
     seq: z.number().default(0),
     status: z.string().default(""),
+    stage: z.string().default(""),
     attempt: z.number().default(1),
     detail: z.unknown().optional(),
     started_at: z.string().nullable().optional(),

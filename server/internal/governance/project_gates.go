@@ -69,15 +69,35 @@ func canApprove(ctx context.Context, pool *pgxpool.Pool, workspaceID, userID str
 }
 
 type gateNodeView struct {
-	NodeID      string          `json:"node_id"`
-	Kind        string          `json:"kind"`
-	Seq         int             `json:"seq"`
-	Status      string          `json:"status"`
+	NodeID string `json:"node_id"`
+	Kind   string `json:"kind"`
+	Seq    int    `json:"seq"`
+	Status string `json:"status"`
+	// Stage is the gates.json#approvalStages key (requirement/tech-design/
+	// dev-start/code) this node belongs to — the frontend needs this to
+	// render a stage label without re-deriving CR-A's own gate_nodes_gen.go
+	// mapping (a passed node's stage can't be inferred from cr.pending_stage,
+	// which reflects the CR's CURRENT gate, not this node's).
+	Stage       string          `json:"stage,omitempty"`
 	Attempt     int             `json:"attempt"`
 	Detail      json.RawMessage `json:"detail,omitempty"`
 	StartedAt   *string         `json:"started_at,omitempty"`
 	CompletedAt *string         `json:"completed_at,omitempty"`
 }
+
+// stageForNodeID is the reverse of ApprovalGateNodes/ReviewGateNodes: given a
+// node's UUID, which approvalStages key does it belong to. Built once from
+// the two small generated maps (7 entries total).
+var stageForNodeID = func() map[string]string {
+	m := make(map[string]string, len(ApprovalGateNodes)+len(ReviewGateNodes))
+	for stage, node := range ApprovalGateNodes {
+		m[node.NodeID] = stage
+	}
+	for stage, node := range ReviewGateNodes {
+		m[node.NodeID] = stage
+	}
+	return m
+}()
 
 type projectGateCR struct {
 	CRID           string            `json:"cr_id"`
@@ -189,6 +209,7 @@ func (a *ApprovalService) HandleProjectGates(w http.ResponseWriter, r *http.Requ
 				var startedAt, completedAt *string
 				if err := nodeRows.Scan(&n.NodeID, &n.Kind, &n.Seq, &n.Status, &n.Attempt, &n.Detail, &startedAt, &completedAt); err == nil {
 					n.StartedAt, n.CompletedAt = startedAt, completedAt
+					n.Stage = stageForNodeID[n.NodeID]
 					view.GateNodes = append(view.GateNodes, n)
 				}
 			}

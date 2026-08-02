@@ -9,10 +9,12 @@ import { issueKeys } from "@multica/core/issues/queries";
 import { taskMessagesOptions } from "@multica/core/chat/queries";
 import {
   projectChatDraftKey,
+  projectGatesOptions,
   projectQueueStatusOptions,
   useProjectChatStore,
   useSendProjectChatMessage,
 } from "@multica/core/projects";
+import type { ProjectGateCR } from "@multica/core/api/schemas";
 import { useAuthStore } from "@multica/core/auth";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { agentListOptions } from "@multica/core/workspace/queries";
@@ -25,6 +27,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { ReadonlyContent } from "../../editor";
 import { buildTimeline } from "../../common/task-transcript";
 import { TimelineView } from "../../chat/components/chat-message-list";
+import { CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { useT } from "../../i18n";
@@ -68,10 +71,21 @@ export function ProjectTeamAgentChat({
     [timeline],
   );
 
+  // CR governance gates (CR-2026-011 TASK-06): the same query CrStatusBadge
+  // reads, kept live by cr:updated (WS) — no separate subscription needed.
+  const { data: crs = [] } = useQuery(projectGatesOptions(wsId, projectId));
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div className="flex-1 min-h-0 overflow-y-auto" data-tab-scroll-root>
-        <TeamAgentStreamView comments={comments} tasks={tasks} currentUserId={userId} />
+        <TeamAgentStreamView
+          comments={comments}
+          tasks={tasks}
+          crs={crs}
+          wsId={wsId}
+          projectId={projectId}
+          currentUserId={userId}
+        />
       </div>
       <TeamAgentComposer
         projectId={projectId}
@@ -88,10 +102,21 @@ export function ProjectTeamAgentChat({
 export function TeamAgentStreamView({
   comments,
   tasks,
+  crs = [],
+  wsId,
+  projectId,
   currentUserId,
 }: {
   comments: TimelineEntry[];
   tasks: AgentTask[];
+  /** CR governance gates (CR-2026-011 TASK-06) — each gate_node becomes a
+   *  third kind of stream item, interleaved with comments and task cards. */
+  crs?: ProjectGateCR[];
+  /** Required together with projectId when crs is non-empty (the approval
+   *  card's mutation needs both); optional otherwise so existing callers
+   *  (e.g. tests) that don't pass gate data don't need to thread them. */
+  wsId?: string;
+  projectId?: string;
   currentUserId?: string;
 }) {
   const { t } = useT("projects");
@@ -112,10 +137,24 @@ export function TeamAgentStreamView({
         node: <TaskExecutionCard key={`t:${task.id}`} task={task} />,
       });
     }
+    if (wsId && projectId) {
+      for (const cr of crs) {
+        for (const node of cr.gate_nodes) {
+          const key = `g:${cr.cr_id}:${node.node_id}:${node.attempt}`;
+          merged.push({
+            key,
+            at: node.started_at ? new Date(node.started_at).getTime() : new Date(cr.updated_at).getTime(),
+            node: (
+              <CrGateCard key={key} cr={cr} node={node} wsId={wsId} projectId={projectId} />
+            ),
+          });
+        }
+      }
+    }
     // Stable order: by timestamp, then key so equal timestamps don't jitter.
     merged.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
     return merged;
-  }, [comments, tasks, currentUserId]);
+  }, [comments, tasks, crs, wsId, projectId, currentUserId]);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-3">

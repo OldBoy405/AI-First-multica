@@ -225,3 +225,56 @@ func TestProjectGatesDetailIsEmbeddedJSONNotBase64(t *testing.T) {
 		t.Fatalf("expected 1 blocker REQ-BLOCK-001, got %+v", detail.Blockers)
 	}
 }
+
+// TestProjectGatesNodeStageIsIndependentOfPendingStage is TASK-06's
+// regression: a PASSED node's stage must reflect the node itself, not
+// cr.pending_stage (which moves on to the next gate once the first passes —
+// labeling a passed requirement node with the CR's now-current tech-design
+// stage would be a real UI bug, not cosmetic).
+func TestProjectGatesNodeStageIsIndependentOfPendingStage(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+	ownerID := testUserID(t)
+	crID := "CR-9005-005"
+	projectID := gateProjectFixture(t, testWorkspaceID, crID, "requirement-reviewing")
+	svc := NewSyncService(testPool, nil)
+
+	// Advance past requirement-approved (node "requirement" passes) into
+	// tech-design-review-pending — the actual gate-pending state for the
+	// tech-design stage (gates.json#approvalStages.tech-design.expect).
+	postEvents(t, svc, testWorkspaceID, []OutboxEvent{
+		ev(crID, "status", "requirement-reviewing", "requirement-approved", "approve-requirement", "s1", "f1.json"),
+		ev(crID, "status", "requirement-approved", "tech-designing", "write-tech-design", "s2", "f2.json"),
+		ev(crID, "status", "tech-designing", "tech-design-review-pending", "write-tech-design-complete", "s3", "f3.json"),
+	})
+
+	approvalSvc, _ := newTestApprovalService(t)
+	rec := gatesHTTP(t, approvalSvc, testWorkspaceID, projectID, ownerID)
+	var body struct {
+		CRs []projectGateCR `json:"crs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.CRs) != 1 {
+		t.Fatalf("expected 1 CR, got %d", len(body.CRs))
+	}
+	if body.CRs[0].PendingStage != "tech-design" {
+		t.Fatalf("expected CR to now be pending tech-design, got %s", body.CRs[0].PendingStage)
+	}
+
+	var requirementNode *gateNodeView
+	for i := range body.CRs[0].GateNodes {
+		n := &body.CRs[0].GateNodes[i]
+		if n.NodeID == ApprovalGateNodes["requirement"].NodeID {
+			requirementNode = n
+		}
+	}
+	if requirementNode == nil {
+		t.Fatal("expected the passed requirement approval node to be present")
+	}
+	if requirementNode.Stage != "requirement" {
+		t.Fatalf("expected the passed node's own stage to stay 'requirement' (not the CR's current pending_stage 'tech-design'), got %q", requirementNode.Stage)
+	}
+}

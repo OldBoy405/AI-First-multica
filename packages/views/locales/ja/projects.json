@@ -210,6 +210,27 @@
       "withdrawn": "撤回済み"
     },
     "multiple_active": "進行中の CR が {{count}} 件",
-    "needs_reconcile": "同期中…"
+    "needs_reconcile": "同期中…",
+    "stage": {
+      "requirement": "要件",
+      "tech-design": "技術設計",
+      "dev-start": "開発開始",
+      "code": "コード"
+    },
+    "approve": "承認",
+    "reject": "却下",
+    "reject_reason_placeholder": "却下の理由…",
+    "reject_confirm": "却下を確定",
+    "cancel": "キャンセル",
+    "waiting_for_approval": "{{stage}}の承認待ち",
+    "pending_advance": "承認済み — 進行を待っています",
+    "evidence_label": "証拠",
+    "evidence_drift": "このカードの表示後に証拠が変更されました — 再読み込みして再レビューしてください",
+    "forbidden_approver": "この承認を行う権限がありません",
+    "submit_failed": "送信に失敗しました。もう一度お試しください",
+    "attempt_label": "{{attempt}}/3 回目",
+    "review_blocked": "レビューがブロックされました",
+    "review_passed": "レビュー承認済み",
+    "node_cancelled": "キャンセル済み"
   }
 }

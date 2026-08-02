@@ -210,6 +210,27 @@
       "withdrawn": "已撤回"
     },
     "multiple_active": "{{count}} 个进行中的 CR",
-    "needs_reconcile": "同步中…"
+    "needs_reconcile": "同步中…",
+    "stage": {
+      "requirement": "需求",
+      "tech-design": "技术设计",
+      "dev-start": "开发启动",
+      "code": "代码"
+    },
+    "approve": "批准",
+    "reject": "驳回",
+    "reject_reason_placeholder": "驳回原因…",
+    "reject_confirm": "确认驳回",
+    "cancel": "取消",
+    "waiting_for_approval": "等待{{stage}}审批",
+    "pending_advance": "已批准 — 等待推进",
+    "evidence_label": "证据",
+    "evidence_drift": "证据在卡片加载后已变更 — 请刷新后重新评审",
+    "forbidden_approver": "你没有权限批准此项",
+    "submit_failed": "提交失败，请重试",
+    "attempt_label": "第 {{attempt}}/3 轮",
+    "review_blocked": "评审被阻塞",
+    "review_passed": "评审已通过",
+    "node_cancelled": "已取消"
   }
 }
