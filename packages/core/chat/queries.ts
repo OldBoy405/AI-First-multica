@@ -2,6 +2,7 @@ import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
 import type { TaskMessagePayload } from "../types/events";
 import type { ChatSession } from "../types/chat";
+import type { Agent } from "../types/agent";
 
 // NOTE on workspace scoping:
 // `wsId` is used only as part of queryKey for cache isolation per workspace.
@@ -70,6 +71,33 @@ export function sortChatSessions(sessions: ChatSession[]): ChatSession[] {
     const bp = b.pinned ? 1 : 0;
     if (ap !== bp) return bp - ap;
     return sessionActivityTime(b) - sessionActivityTime(a);
+  });
+}
+
+/**
+ * Biases an agent-picker list toward the agent the user most recently
+ * chatted with — a *suggestion*, never a silent default. Agents with no
+ * session history keep their relative order at the end (a fresh workspace
+ * with zero chat history reduces to a no-op: original order, first agent
+ * picked by nobody).
+ */
+export function sortAgentsByRecentChat<T extends Agent>(
+  agents: T[],
+  sessions: ChatSession[],
+): T[] {
+  const lastActivity = new Map<string, number>();
+  for (const s of sessions) {
+    const t = sessionActivityTime(s);
+    const prev = lastActivity.get(s.agent_id);
+    if (prev === undefined || t > prev) lastActivity.set(s.agent_id, t);
+  }
+  return [...agents].sort((a, b) => {
+    const at = lastActivity.get(a.id);
+    const bt = lastActivity.get(b.id);
+    if (at === undefined && bt === undefined) return 0;
+    if (at === undefined) return 1;
+    if (bt === undefined) return -1;
+    return bt - at;
   });
 }
 

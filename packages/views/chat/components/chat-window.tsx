@@ -38,6 +38,7 @@ import {
   pendingChatTasksOptions,
   chatKeys,
   isTaskMessageTaskId,
+  sortAgentsByRecentChat,
 } from "@multica/core/chat/queries";
 import {
   useCreateChatSession,
@@ -259,13 +260,22 @@ export function ChatWindow() {
     : null;
   const isAgentArchived = !!sessionAgent?.archived_at;
 
-  // Resolve selected agent: open session's agent → stored preference → first
-  // available. New chats have no session, so they fall through to the picker.
+  // Resolve selected agent: open session's agent → stored preference → none.
+  // No silent "first available" fallback — a brand-new workspace with several
+  // agents and zero chat history must not guess which agent the user meant.
+  // New chats and first-ever opens fall through to the picker instead.
   const activeAgent =
     sessionAgent ??
     availableAgents.find((a) => a.id === selectedAgentId) ??
-    availableAgents[0] ??
     null;
+
+  // Recency-biased ordering for the agent picker — a suggestion (most
+  // recently chatted-with agent listed first within its mine/others group),
+  // never a silent default. No-op when nobody has chatted with any agent yet.
+  const pickerAgents = useMemo(
+    () => sortAgentsByRecentChat(availableAgents, sessions),
+    [availableAgents, sessions],
+  );
 
   // Three-state availability — "loading" stays neutral (no banner, no
   // disable) so the input doesn't flash a fake "no agent" state in the
@@ -867,7 +877,7 @@ export function ChatWindow() {
         agentName={activeAgent?.name}
         leftAdornment={
           <AgentDropdown
-            agents={availableAgents}
+            agents={pickerAgents}
             activeAgent={activeAgent}
             userId={user?.id}
             onSelect={handleSelectAgent}
@@ -922,7 +932,9 @@ export function AgentDropdown({
     setOpen(false);
   };
 
-  if (!activeAgent) {
+  // Workspace genuinely has no assignable agent — the picker would be an
+  // empty shell, so a plain label reads better than an inert dropdown.
+  if (agents.length === 0) {
     return <span className="text-xs text-muted-foreground">{t(($) => $.window.no_agents)}</span>;
   }
 
@@ -943,17 +955,26 @@ export function AgentDropdown({
         />
       }
       trigger={
-        <>
-          <ActorAvatar
-            actorType="agent"
-            actorId={activeAgent.id}
-            size="md"
-            enableHoverCard
-            showStatusDot
-          />
-          <span className="text-xs font-medium max-w-28 truncate">{activeAgent.name}</span>
-          <ChevronDown className="size-3 text-muted-foreground shrink-0" />
-        </>
+        activeAgent ? (
+          <>
+            <ActorAvatar
+              actorType="agent"
+              actorId={activeAgent.id}
+              size="md"
+              enableHoverCard
+              showStatusDot
+            />
+            <span className="text-xs font-medium max-w-28 truncate">{activeAgent.name}</span>
+            <ChevronDown className="size-3 text-muted-foreground shrink-0" />
+          </>
+        ) : (
+          <>
+            <span className="text-xs text-muted-foreground max-w-32 truncate">
+              {t(($) => $.window.choose_agent)}
+            </span>
+            <ChevronDown className="size-3 text-muted-foreground shrink-0" />
+          </>
+        )
       }
     >
       {filteredMine.length === 0 && filteredOthers.length === 0 ? (
@@ -966,7 +987,7 @@ export function AgentDropdown({
                 <AgentPickerItem
                   key={agent.id}
                   agent={agent}
-                  isCurrent={agent.id === activeAgent.id}
+                  isCurrent={agent.id === activeAgent?.id}
                   onSelect={handlePick}
                 />
               ))}
@@ -978,7 +999,7 @@ export function AgentDropdown({
                 <AgentPickerItem
                   key={agent.id}
                   agent={agent}
-                  isCurrent={agent.id === activeAgent.id}
+                  isCurrent={agent.id === activeAgent?.id}
                   onSelect={handlePick}
                 />
               ))}

@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import type { TaskMessagePayload } from "../types/events";
 import type { ChatSession } from "../types/chat";
+import type { Agent } from "../types/agent";
 import {
   isTaskMessageTaskId,
   mergeTaskMessagesBySeq,
+  sortAgentsByRecentChat,
   sortChatSessions,
   taskMessagesOptions,
 } from "./queries";
@@ -101,5 +103,91 @@ describe("sortChatSessions", () => {
     const snapshot = input.map((s) => s.id);
     sortChatSessions(input);
     expect(input.map((s) => s.id)).toEqual(snapshot);
+  });
+});
+
+describe("sortAgentsByRecentChat", () => {
+  const session = (over: Partial<ChatSession>): ChatSession => ({
+    id: "s",
+    workspace_id: "w",
+    agent_id: "a",
+    creator_id: "c",
+    title: "t",
+    status: "active",
+    has_unread: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...over,
+  });
+
+  const agent = (over: Partial<Agent> & Pick<Agent, "id" | "name" | "owner_id">): Agent => ({
+    workspace_id: "ws-1",
+    runtime_id: "runtime-1",
+    description: "",
+    instructions: "",
+    avatar_url: null,
+    runtime_mode: "local",
+    runtime_config: {},
+    custom_args: [],
+    visibility: "workspace",
+    permission_mode: "public_to",
+    invocation_targets: [{ target_type: "workspace", target_id: null }],
+    status: "idle",
+    max_concurrent_tasks: 1,
+    model: "sonnet",
+    skills: [],
+    created_at: new Date(0).toISOString(),
+    updated_at: new Date(0).toISOString(),
+    archived_at: null,
+    archived_by: null,
+    ...over,
+  });
+
+  // A brand-new workspace where nobody has chatted with anybody yet: the
+  // whole point of this fix — order must fall back to input order, not
+  // silently favour one agent, so a caller relying on "first" for the old
+  // default-agent behaviour gets nothing new to latch onto.
+  it("preserves original order when there is no chat history at all", () => {
+    const first = agent({ id: "first", name: "First", owner_id: "u1" });
+    const second = agent({ id: "second", name: "Second", owner_id: "u1" });
+
+    const sorted = sortAgentsByRecentChat([first, second], []);
+    expect(sorted.map((a) => a.id)).toEqual(["first", "second"]);
+  });
+
+  it("puts the most recently chatted-with agent first", () => {
+    const older = agent({ id: "older", name: "Older", owner_id: "u1" });
+    const newer = agent({ id: "newer", name: "Newer", owner_id: "u1" });
+    const untouched = agent({ id: "untouched", name: "Untouched", owner_id: "u1" });
+    const sessions = [
+      session({ id: "s1", agent_id: "older", updated_at: "2026-01-01T00:00:00Z" }),
+      session({ id: "s2", agent_id: "newer", updated_at: "2026-06-01T00:00:00Z" }),
+    ];
+
+    const sorted = sortAgentsByRecentChat([older, untouched, newer], sessions);
+    expect(sorted.map((a) => a.id)).toEqual(["newer", "older", "untouched"]);
+  });
+
+  it("uses the most recent session per agent when several exist", () => {
+    const a = agent({ id: "a", name: "A", owner_id: "u1" });
+    const b = agent({ id: "b", name: "B", owner_id: "u1" });
+    const sessions = [
+      session({ id: "s1", agent_id: "a", updated_at: "2026-01-01T00:00:00Z" }),
+      session({ id: "s2", agent_id: "a", updated_at: "2026-08-01T00:00:00Z" }),
+      session({ id: "s3", agent_id: "b", updated_at: "2026-06-01T00:00:00Z" }),
+    ];
+
+    const sorted = sortAgentsByRecentChat([b, a], sessions);
+    expect(sorted.map((x) => x.id)).toEqual(["a", "b"]);
+  });
+
+  it("does not mutate the input array", () => {
+    const input = [
+      agent({ id: "1", name: "One", owner_id: "u1" }),
+      agent({ id: "2", name: "Two", owner_id: "u1" }),
+    ];
+    const snapshot = input.map((a) => a.id);
+    sortAgentsByRecentChat(input, []);
+    expect(input.map((a) => a.id)).toEqual(snapshot);
   });
 });

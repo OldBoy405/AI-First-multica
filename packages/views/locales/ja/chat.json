@@ -91,6 +91,7 @@
     "my_agents": "マイエージェント",
     "others": "その他",
     "no_agents": "エージェントなし",
+    "choose_agent": "エージェントを選択",
     "history_group": "チャット履歴",
     "agent_filter_placeholder": "エージェントを検索..."
   },

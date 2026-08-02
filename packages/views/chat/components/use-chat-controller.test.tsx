@@ -193,3 +193,18 @@ describe("useChatController.archiveSession", () => {
     expect(h.archivedMutate).toHaveBeenCalledWith({ sessionId: "sA", archived: true });
   });
 });
+
+describe("useChatController.activeAgent (default-agent fix)", () => {
+  it("is null with no open session and no stored preference — never silently guesses", () => {
+    // Brand-new workspace: several agents exist, nobody has chatted with any
+    // of them yet. The old `?? availableAgents[0]` fallback would have picked
+    // "agent-a" here just because it happens to be first in the list.
+    const result = setup(null, [], [agentA, agentB]);
+    expect(result.current.activeAgent).toBeNull();
+  });
+
+  it("still resolves to the open session's agent when one exists", () => {
+    const result = setup("sB", [sA, sB, sC], [agentA, agentB]);
+    expect(result.current.activeAgent?.id).toBe("agent-b");
+  });
+});
