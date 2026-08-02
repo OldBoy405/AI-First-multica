@@ -172,6 +172,9 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
+  EMPTY_PROJECT_DISCUSSION,
+  ProjectDiscussionSchema,
+  type ProjectDiscussion,
   EMPTY_ATTACHMENT,
   EMPTY_CLOUD_RUNTIME_NODE,
   EMPTY_CLOUD_RUNTIME_NODE_LIST,
@@ -1991,6 +1994,15 @@ export class ApiClient {
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
+    });
+  }
+
+  // Project Discussion context (CR-2026-009): the backing container issue id,
+  // lazily created on first call. No agent binding — Discussion never drives one.
+  async getProjectDiscussion(id: string): Promise<ProjectDiscussion> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/discussion`);
+    return parseWithFallback(raw, ProjectDiscussionSchema, EMPTY_PROJECT_DISCUSSION, {
+      endpoint: "GET /api/projects/:id/discussion",
     });
   }
 

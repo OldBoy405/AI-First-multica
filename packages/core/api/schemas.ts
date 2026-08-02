@@ -353,6 +353,22 @@ export const EMPTY_PROJECT_CHAT: ProjectChat = {
   team_agent_id: "",
 };
 
+// Project Discussion context (CR-2026-009): the backing container issue id.
+// Unlike ProjectChat there is no agent binding — Discussion never drives one.
+export interface ProjectDiscussion {
+  issue_id: string;
+}
+
+export const ProjectDiscussionSchema = z
+  .object({
+    issue_id: z.string().default(""),
+  })
+  .loose();
+
+export const EMPTY_PROJECT_DISCUSSION: ProjectDiscussion = {
+  issue_id: "",
+};
+
 // Result of posting a Team Agent chat message (CR-2026-006 TASK-02):
 // the created backing comment plus the enqueued agent task.
 export interface ProjectChatSendResult {

@@ -175,6 +175,10 @@
     "unconfigured_admin_cta": "配置团队智能体",
     "unconfigured_member": "请联系项目 Owner 配置团队智能体。",
     "team_agent_setup_failed": "团队智能体设置失败，请重试",
+    "discussion": {
+      "sub": "发送消息开始讨论。",
+      "composer_placeholder": "给团队发消息…"
+    },
     "stream": {
       "no_earlier": "没有更早的消息",
       "composer_placeholder": "给 Team Agent 发消息…",

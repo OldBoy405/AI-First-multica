@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Lock, MessagesSquare, X } from "lucide-react";
 import { toast } from "sonner";
@@ -32,7 +32,9 @@ import {
   PickerSection,
   PickerEmpty,
 } from "../../issues/components/pickers/property-picker";
+import { useNavigation } from "../../navigation";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
+import { DiscussionPane } from "./discussion-pane";
 import { useT } from "../../i18n";
 
 const MODES: readonly ProjectChatMode[] = [
@@ -61,9 +63,22 @@ export function ProjectChatPanel({
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
+  const router = useNavigation();
   const activeMode =
     useProjectChatStore((s) => s.activeMode[projectId]) ?? "team_agent";
   const setActiveMode = useProjectChatStore((s) => s.setActiveMode);
+
+  // ?mode= deep link (CR-2026-009): read once per project so an inbox jump
+  // link (`?tab=chat&mode=discussion`) lands on the right tab. Only re-runs
+  // when projectId changes, not on every render, so a later manual tab
+  // switch isn't clobbered by a stale query string.
+  useEffect(() => {
+    const raw = router.searchParams.get("mode");
+    if (raw === "team_agent" || raw === "private_ask" || raw === "discussion") {
+      setActiveMode(projectId, raw);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   return (
     <Tabs
@@ -141,6 +156,8 @@ function ModePane({
 
       {mode === "team_agent" ? (
         <TeamAgentPane projectId={projectId} canConfigure={canConfigure} />
+      ) : mode === "discussion" ? (
+        <DiscussionPane projectId={projectId} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
           <p className="text-sm font-medium">{t(($) => $.chat.greetings[mode])}</p>

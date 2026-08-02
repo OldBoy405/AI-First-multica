@@ -62,4 +62,8 @@ export interface Issue {
   labels?: Label[];
   created_at: string;
   updated_at: string;
+  /** Set only for a hidden system container issue (e.g. "project_chat",
+   *  "project_discussion" — CR-2026-006/CR-2026-009's per-project chat
+   *  anchors). Absent for every ordinary issue. */
+  origin_type?: string;
 }
