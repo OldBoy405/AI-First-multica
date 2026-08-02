@@ -212,6 +212,18 @@ func (a *ApprovalService) HandleApprove(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decision must be approve or reject"})
 		return
 	}
+	// SDD DD-5 (CR-2026-011 TASK-04): this endpoint had no role check before
+	// this task, only requireHumanActor. See canApprove's doc comment
+	// (project_gates.go) for why it checks workspace owner/admin only.
+	if allowed, err := canApprove(r.Context(), a.pool, workspaceID, r.Header.Get("X-User-ID")); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "approver check failed"})
+		return
+	} else if !allowed {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "FORBIDDEN_APPROVER", "detail": "only workspace owners/admins may approve or reject",
+		})
+		return
+	}
 	evidence, err := a.latestEvidence(r, crID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "evidence lookup failed"})

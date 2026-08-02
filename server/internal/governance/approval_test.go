@@ -116,14 +116,26 @@ func newTestApprovalService(t *testing.T) (*ApprovalService, ed25519.PublicKey) 
 	return NewApprovalService(testPool, priv, "approval-test"), pub
 }
 
+// testUserID returns a user who is also an owner member of testWorkspaceID.
+// CR-2026-011 TASK-04 added a role check to HandleApprove (canApprove,
+// project_gates.go) — every test exercising a successful approve/reject path
+// needs its caller to actually hold that role, not just exist as a user row.
 func testUserID(t *testing.T) string {
 	t.Helper()
+	ctx := context.Background()
 	var id string
-	if err := testPool.QueryRow(context.Background(), `
+	if err := testPool.QueryRow(ctx, `
 		INSERT INTO "user" (email, name) VALUES ('governance-approver@test', 'Approver')
 		ON CONFLICT (email) DO UPDATE SET updated_at = now()
 		RETURNING id::text`).Scan(&id); err != nil {
 		t.Fatalf("test user fixture: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1::uuid, $2::uuid, 'owner')
+		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'owner'`,
+		testWorkspaceID, id); err != nil {
+		t.Fatalf("test owner member fixture: %v", err)
 	}
 	return id
 }
@@ -163,6 +175,47 @@ func TestApproveRejectsTaskTokens(t *testing.T) {
 	rec := approveHTTP(t, svc, testUserID(t), "CR-9002-001", approveRequest{Stage: "requirement", Decision: "approve"}, true)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("mat_ (task token) must be 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// testMemberUserID returns a user who is a plain 'member' (not owner/admin)
+// of testWorkspaceID — CR-2026-011 TASK-04's negative case for canApprove.
+func testMemberUserID(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (email, name) VALUES ('governance-plain-member@test', 'Plain Member')
+		ON CONFLICT (email) DO UPDATE SET updated_at = now()
+		RETURNING id::text`).Scan(&id); err != nil {
+		t.Fatalf("test member user fixture: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1::uuid, $2::uuid, 'member')
+		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'member'`,
+		testWorkspaceID, id); err != nil {
+		t.Fatalf("test plain member fixture: %v", err)
+	}
+	return id
+}
+
+// TestApproveRejectsNonOwnerAdmin is the FORBIDDEN_APPROVER path (SDD DD-5):
+// a workspace member who is neither owner nor admin cannot approve, even
+// though they pass requireHumanActor cleanly.
+func TestApproveRejectsNonOwnerAdmin(t *testing.T) {
+	crID := "CR-9002-004"
+	resetCR(t, crID)
+	seedEvidenceEvent(t, crID, map[string]string{"a.yml": "sha256:" + hex.EncodeToString(make([]byte, 32))})
+	svc, _ := newTestApprovalService(t)
+	rec := approveHTTP(t, svc, testMemberUserID(t), crID, approveRequest{Stage: "requirement", Decision: "approve"}, false)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("plain member must be 403 FORBIDDEN_APPROVER, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "FORBIDDEN_APPROVER" {
+		t.Fatalf("expected error=FORBIDDEN_APPROVER, got %+v", body)
 	}
 }
 

@@ -3763,6 +3763,36 @@ func (q *Queries) RestoreAgent(ctx context.Context, id pgtype.UUID) (Agent, erro
 	return i, err
 }
 
+const setTaskCRAttributionIfValid = `-- name: SetTaskCRAttributionIfValid :execrows
+UPDATE agent_task_queue atq
+SET cr_id = $2
+FROM agent a
+WHERE atq.id = $1
+  AND atq.agent_id = a.id
+  AND EXISTS (SELECT 1 FROM cr WHERE cr.cr_id = $2 AND cr.workspace_id = a.workspace_id)
+`
+
+type SetTaskCRAttributionIfValidParams struct {
+	ID   pgtype.UUID `json:"id"`
+	CrID pgtype.Text `json:"cr_id"`
+}
+
+// AIFIRST (CR-2026-011 TASK-04, SDD DD-4): best-effort cr_id attribution,
+// written from the daemon's StartTask self-report (workdir branch name), not
+// an enqueue-time param — no enqueue path has CR context. The EXISTS guard is
+// the workspace check: the caller does not get to attribute a task to a CR
+// outside its own workspace by self-reporting an arbitrary cr_id. Zero rows
+// affected means the guard failed (unknown cr_id or cross-workspace) — the
+// caller treats that as a silent no-op, matching CompleteTask's precedent of
+// not trusting daemon-supplied audit data at face value.
+func (q *Queries) SetTaskCRAttributionIfValid(ctx context.Context, arg SetTaskCRAttributionIfValidParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setTaskCRAttributionIfValid, arg.ID, arg.CrID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setTaskDeliveredCommentIDs = `-- name: SetTaskDeliveredCommentIDs :one
 UPDATE agent_task_queue
 SET delivered_comment_ids = $1::uuid[]

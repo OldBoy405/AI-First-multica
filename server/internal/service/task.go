@@ -1658,6 +1658,31 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.Ag
 	return &task, nil
 }
 
+// AttributeTaskToCR is the AIFIRST cr_id attribution path (CR-2026-011
+// TASK-04, SDD DD-4): best-effort, called from the StartTask HTTP handler
+// when the daemon self-reports a cr_id derived from the task's workdir
+// branch name. Errors are logged, not returned — attribution is an
+// enhancement for the gate-node UI, never a condition for the task itself
+// to start successfully.
+func (s *TaskService) AttributeTaskToCR(ctx context.Context, taskID pgtype.UUID, crID string) {
+	if crID == "" {
+		return
+	}
+	rows, err := s.Queries.SetTaskCRAttributionIfValid(ctx, db.SetTaskCRAttributionIfValidParams{
+		ID:   taskID,
+		CrID: pgtype.Text{String: crID, Valid: true},
+	})
+	if err != nil {
+		slog.Warn("cr attribution failed", "task_id", util.UUIDToString(taskID), "cr_id", crID, "error", err)
+		return
+	}
+	if rows == 0 {
+		// Unknown cr_id or cross-workspace mismatch — not trusted, silently
+		// ignored (the daemon's self-report is not a security boundary).
+		slog.Debug("cr attribution skipped: cr_id not valid for this task's workspace", "task_id", util.UUIDToString(taskID), "cr_id", crID)
+	}
+}
+
 func (s *TaskService) cancelDeferredEscalationsForTask(ctx context.Context, taskID pgtype.UUID) {
 	cancelled, err := s.Queries.CancelDeferredEscalationsForTask(ctx, taskID)
 	if err != nil {

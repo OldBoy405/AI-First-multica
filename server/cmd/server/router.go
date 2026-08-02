@@ -1079,6 +1079,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/queue-status", h.GetProjectQueueStatus)
 					r.Get("/chat", h.GetProjectChat)
 					r.Post("/chat/messages", h.SendProjectChatMessage)
+					// AIFIRST: CR governance gates for this project's chat window
+					// (CR-2026-011 TASK-04, D7). Same approvalSvc feature flag as
+					// the workspace-level /crs routes above (SDD DD-8).
+					if approvalSvc != nil {
+						r.Get("/gates", approvalSvc.HandleProjectGates)
+					}
 					r.Get("/resources", h.ListProjectResources)
 					r.Post("/resources", h.CreateProjectResource)
 					r.Put("/resources/{resourceId}", h.UpdateProjectResource)

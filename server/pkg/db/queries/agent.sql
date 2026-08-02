@@ -487,6 +487,22 @@ SET status = 'running',
 WHERE id = $1 AND status IN ('dispatched', 'waiting_local_directory')
 RETURNING *;
 
+-- name: SetTaskCRAttributionIfValid :execrows
+-- AIFIRST (CR-2026-011 TASK-04, SDD DD-4): best-effort cr_id attribution,
+-- written from the daemon's StartTask self-report (workdir branch name), not
+-- an enqueue-time param — no enqueue path has CR context. The EXISTS guard is
+-- the workspace check: the caller does not get to attribute a task to a CR
+-- outside its own workspace by self-reporting an arbitrary cr_id. Zero rows
+-- affected means the guard failed (unknown cr_id or cross-workspace) — the
+-- caller treats that as a silent no-op, matching CompleteTask's precedent of
+-- not trusting daemon-supplied audit data at face value.
+UPDATE agent_task_queue atq
+SET cr_id = $2
+FROM agent a
+WHERE atq.id = $1
+  AND atq.agent_id = a.id
+  AND EXISTS (SELECT 1 FROM cr WHERE cr.cr_id = $2 AND cr.workspace_id = a.workspace_id);
+
 -- name: MarkAgentTaskWaitingLocalDirectory :one
 -- Transitions a freshly-dispatched task into 'waiting_local_directory' while
 -- the daemon waits for another in-flight task to release the path lock on a
