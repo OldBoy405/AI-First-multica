@@ -225,6 +225,19 @@ func isTrivialDoneOutput(output string) bool {
 	return false
 }
 
+// issueIsDiscussionContainer reports whether the issue is a project
+// Discussion container (origin_type='project_discussion'). Lookup failures
+// fail closed to false so a transient DB error can never change ordinary
+// suppression behavior — only a positively identified Discussion container
+// earns the exemption (CR-2026-012).
+func (s *TaskService) issueIsDiscussionContainer(ctx context.Context, issueID pgtype.UUID) bool {
+	issue, err := s.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		return false
+	}
+	return issue.OriginType.Valid && issue.OriginType.String == "project_discussion"
+}
+
 func (s *TaskService) captureTaskQueued(ctx context.Context, task db.AgentTaskQueue) {
 	if s.Metrics != nil {
 		source, runtimeMode, _ := s.taskMetricsContext(ctx, task)
@@ -1948,7 +1961,12 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 					// decoded into real newlines before the comment hits the DB. See
 					// util.UnescapeBackslashEscapes for the exact contract.
 					body := util.UnescapeBackslashEscapes(payload.Output)
-					if task.TriggerCommentID.Valid && isTrivialDoneOutput(body) {
+					// CR-2026-012: Discussion-container tasks are exempt from trivial
+					// suppression — "a DC activation always produces visible output"
+					// must be a mechanism guarantee, not a prompt convention (review
+					// TSUG-002). Every other comment-triggered task keeps the
+					// suppression.
+					if task.TriggerCommentID.Valid && isTrivialDoneOutput(body) && !s.issueIsDiscussionContainer(ctx, task.IssueID) {
 						slog.Warn("suppressing trivial comment-trigger fallback output",
 							"task_id", util.UUIDToString(task.ID),
 							"issue_id", util.UUIDToString(task.IssueID),

@@ -536,6 +536,28 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			}
 			patch[service.ProjectSettingTeamAgentID] = s
 		}
+		// CR-2026-012: the agent bound as the project's Discussion Coordinator.
+		// Same validation shape as team_agent_id above — a forged or stale id
+		// must not persist and surface later as a broken Discussion binding.
+		if v, present := req.Settings[service.ProjectSettingDiscussionCoordinatorID]; present {
+			s, isStr := v.(string)
+			if !isStr {
+				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id must be an agent id string")
+				return
+			}
+			agentUUID, perr := util.ParseUUID(s)
+			if perr != nil {
+				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id is not a valid agent id")
+				return
+			}
+			if _, aerr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+				ID: agentUUID, WorkspaceID: prevProject.WorkspaceID,
+			}); aerr != nil {
+				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id: agent not found in workspace")
+				return
+			}
+			patch[service.ProjectSettingDiscussionCoordinatorID] = s
+		}
 		if len(patch) > 0 {
 			patchJSON, merr := json.Marshal(patch)
 			if merr != nil {
