@@ -1577,18 +1577,63 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 }
 
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
-	// CR-2026-009 red line: the Discussion container is the pure-human message
-	// surface — no comment on it may ever enqueue an agent run, regardless of
-	// mentions or reply targets. This is the single choke point all agent
-	// triggers pass through (explicit @agent/@squad mentions, the member-mention
-	// no-op branch, the assigned-squad-leader fallback, and parent-author
-	// continuation all live below), so short-circuiting here covers every
-	// caller — including a comment created directly against the API, not just
+	// CR-2026-009 red line, CR-2026-012 controlled opening: the Discussion
+	// container is the pure-human message surface — no comment on it may
+	// enqueue an agent run UNLESS the project bound a Discussion Coordinator.
+	// Unconfigured → reject everything, byte-for-byte the old red line.
+	// Configured → compute triggers through the general path and keep only
+	// the two sanctioned classes (DC activation ∪ DC-authored route to the
+	// project Team Agent). This dispatcher is the single choke point all
+	// agent triggers pass through (explicit @agent/@squad mentions, the
+	// member-mention no-op branch, the assigned-squad-leader fallback, and
+	// parent-author continuation all live below), so it covers every caller
+	// — including a comment created directly against the API, not just
 	// through the Discussion tab's own send path.
 	if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
-		return nil
+		coordinatorID, teamAgentID := h.TaskService.ProjectDiscussionAgentIDs(ctx, issue.ProjectID)
+		if !coordinatorID.Valid {
+			return nil
+		}
+		triggers := h.computeCommentAgentTriggersCore(ctx, issue, content, parentComment, actorType, actorID, opts)
+		return filterDiscussionContainerTriggers(triggers, coordinatorID, teamAgentID, actorType, actorID)
 	}
+	return h.computeCommentAgentTriggersCore(ctx, issue, content, parentComment, actorType, actorID, opts)
+}
 
+// filterDiscussionContainerTriggers narrows general-path triggers down to the
+// only two classes allowed on a Discussion container (CR-2026-012 SDD §4.1):
+//
+//  1. activation — the comment @-mentions the Discussion Coordinator itself;
+//  2. routing — a Discussion-Coordinator-authored comment explicitly
+//     @-mentions the project Team Agent (handed to the re-target enqueue in
+//     TASK-03; only the explicit-mention source qualifies).
+//
+// Every other trigger is dropped, so replies to agent parents, thread-root
+// continuation, and assignee/squad fallbacks stay red-lined even with a
+// coordinator bound. A DC @-mentioning itself is excluded — activation must
+// come from a human, never from the coordinator looping on its own output.
+func filterDiscussionContainerTriggers(triggers []commentAgentTrigger, coordinatorID, teamAgentID pgtype.UUID, actorType, actorID string) []commentAgentTrigger {
+	actorUUID, actorErr := util.ParseUUID(actorID)
+	actorIsCoordinator := actorErr == nil && actorType == "agent" && actorUUID == coordinatorID
+
+	filtered := make([]commentAgentTrigger, 0, len(triggers))
+	for _, trigger := range triggers {
+		if trigger.Agent.ID == coordinatorID {
+			if actorIsCoordinator {
+				continue // DC @ DC self-trigger is never a valid activation
+			}
+			filtered = append(filtered, trigger)
+			continue
+		}
+		if actorIsCoordinator && teamAgentID.Valid && trigger.Agent.ID == teamAgentID &&
+			trigger.Source == commentTriggerSourceMentionAgent {
+			filtered = append(filtered, trigger)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) computeCommentAgentTriggersCore(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
 	if isNoteComment(content) {
 		return nil
 	}

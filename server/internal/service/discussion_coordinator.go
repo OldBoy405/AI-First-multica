@@ -23,14 +23,45 @@ const ProjectSettingDiscussionCoordinatorID = "discussion_coordinator_agent_id"
 // bag, or invalid UUID string all degrade to "unconfigured" rather than
 // erroring, so a broken setting can never wedge the comment-trigger path.
 func (s *TaskService) ProjectDiscussionCoordinatorID(ctx context.Context, projectID pgtype.UUID) pgtype.UUID {
+	coordinatorID, _ := s.ProjectDiscussionAgentIDs(ctx, projectID)
+	return coordinatorID
+}
+
+// ProjectDiscussionAgentIDs resolves the Discussion Coordinator binding and
+// the Team Agent binding from ONE project.settings read — the comment-trigger
+// hot path needs both (activation filter + routing target, SDD §8) and the
+// settings bag is a single JSONB column. Both values follow the same
+// fail-safe contract as ProjectDiscussionCoordinatorID: zero UUID =
+// unconfigured.
+func (s *TaskService) ProjectDiscussionAgentIDs(ctx context.Context, projectID pgtype.UUID) (coordinatorID, teamAgentID pgtype.UUID) {
 	if !projectID.Valid {
-		return pgtype.UUID{}
+		return pgtype.UUID{}, pgtype.UUID{}
 	}
 	raw, err := s.Queries.GetProjectSettings(ctx, projectID)
 	if err != nil || len(raw) == 0 {
+		return pgtype.UUID{}, pgtype.UUID{}
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return pgtype.UUID{}, pgtype.UUID{}
+	}
+	return uuidSettingFromBag(settings, ProjectSettingDiscussionCoordinatorID),
+		uuidSettingFromBag(settings, ProjectSettingTeamAgentID)
+}
+
+// uuidSettingFromBag pulls one agent-UUID setting out of an already-parsed
+// settings bag. Missing key, wrong JSON type, or invalid UUID string all
+// degrade to the zero UUID.
+func uuidSettingFromBag(settings map[string]any, key string) pgtype.UUID {
+	v, ok := settings[key].(string)
+	if !ok {
 		return pgtype.UUID{}
 	}
-	return discussionCoordinatorIDFromSettings(raw)
+	id, err := util.ParseUUID(v)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return id
 }
 
 // discussionCoordinatorIDFromSettings parses the coordinator binding out of
