@@ -166,12 +166,19 @@ func requireHumanActor(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // latestEvidence returns the newest non-empty evidence snapshot for a CR.
+// cr_sync_event has no workspace_id of its own (cr_id alone isn't globally
+// unique — only UNIQUE(workspace_id, cr_id) on the cr table), so this joins
+// through cr to scope the lookup to the caller's workspace; otherwise a
+// same-named CR in another workspace could leak its evidence (file paths +
+// sha256 digests) through this workspace's approval card.
 func (a *ApprovalService) latestEvidence(r *http.Request, crID string) (map[string]string, error) {
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 	var evidence map[string]string
 	err := a.pool.QueryRow(r.Context(), `
-		SELECT evidence FROM cr_sync_event
-		WHERE cr_id = $1 AND evidence <> '{}'::jsonb
-		ORDER BY id DESC LIMIT 1`, crID).Scan(&evidence)
+		SELECT cse.evidence FROM cr_sync_event cse
+		JOIN cr ON cr.cr_id = cse.cr_id
+		WHERE cr.workspace_id = $1::uuid AND cse.cr_id = $2 AND cse.evidence <> '{}'::jsonb
+		ORDER BY cse.id DESC LIMIT 1`, workspaceID, crID).Scan(&evidence)
 	if err != nil {
 		if err.Error() == "no rows in result set" || strings.Contains(err.Error(), "no rows") {
 			return map[string]string{}, nil
