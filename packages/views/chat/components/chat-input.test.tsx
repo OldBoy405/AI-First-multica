@@ -133,16 +133,20 @@ vi.mock("@multica/core/chat", () => {
   return {
     DRAFT_NEW_SESSION: "__draft_new__",
     newSessionDraftKey: (agentId: string | null) => `__draft_new__:${agentId ?? ""}`,
+    // vi.fn wrapper so adapter-isolation tests can assert call counts
+    // (CR-2026-012 DD-9: ChatInputCore must never reach this store).
     useChatStore: Object.assign(
-      (selector?: (s: typeof state) => unknown) =>
+      vi.fn((selector?: (s: typeof state) => unknown) =>
         selector ? selector(state) : state,
+      ),
       { getState: () => state },
     ),
   };
 });
 
-import { ChatInput } from "./chat-input";
+import { ChatInput, ChatInputCore, type ChatInputDraftAdapter } from "./chat-input";
 import { useChatStore } from "@multica/core/chat";
+import type { Attachment } from "@multica/core/types";
 
 type ChatInputOnSend = React.ComponentProps<typeof ChatInput>["onSend"];
 type ChatInputCommit = Parameters<ChatInputOnSend>[2];
@@ -153,6 +157,7 @@ beforeEach(() => {
   editorState.cleared = 0;
   editorState.blurred = 0;
   editorState.focused = 0;
+  (useChatStore as unknown as ReturnType<typeof vi.fn>).mockClear();
   const state = useChatStore.getState() as unknown as {
     activeSessionId: string | null;
     selectedAgentId: string;
@@ -414,22 +419,36 @@ describe("ChatInput attachment wiring", () => {
 describe("ChatInput async send", () => {
   it("restores a cancelled empty run draft into the editor", async () => {
     const onRestoreDraftConsumed = vi.fn();
-    renderInput({
+    const props = {
       restoreDraftRequest: {
         id: "msg-restored",
         content: "bring this back",
       },
       onRestoreDraftConsumed,
-    });
+    };
+    // Fresh element per render — React bails out when the root receives the
+    // exact same element reference.
+    const makeElement = () => (
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput onSend={vi.fn()} onUploadFile={vi.fn()} agentName="Multica" {...props} />
+      </I18nProvider>
+    );
+    const { rerender } = render(makeElement());
 
     await waitFor(() => {
       expect(useChatStore.getState().setInputDraft).toHaveBeenCalledWith(
         "__draft_new__:agent-1",
         "bring this back",
       );
-      expect(editorProps.last?.defaultValue).toBe("bring this back");
       expect(onRestoreDraftConsumed).toHaveBeenCalledTimes(1);
     });
+    // The real zustand store notifies subscribers, re-rendering the compose
+    // box with the restored draft; the mock store has no subscription
+    // mechanism, so emulate that notification with a plain rerender. The
+    // consumed-id guard must keep the restore one-shot across it.
+    rerender(makeElement());
+    expect(editorProps.last?.defaultValue).toBe("bring this back");
+    expect(onRestoreDraftConsumed).toHaveBeenCalledTimes(1);
   });
 
   it("consumes a restore request even when an existing draft blocks restore", async () => {
@@ -662,5 +681,139 @@ describe("ChatInput commit handoff", () => {
     expect(editorState.blurred).toBe(0);
     // …but the sent session's persisted draft is cleared regardless.
     expect(useChatStore.getState().clearInputDraft).toHaveBeenCalledWith("__draft_new__:agent-1");
+  });
+});
+
+// CR-2026-012 DD-9 double lock: ChatInputCore codes against
+// ChatInputDraftAdapter only. The STATIC lock asserts the store mock is never
+// called with a custom adapter (structural decoupling); the BEHAVIORAL locks
+// assert each user action routes to the adapter methods while the global
+// store stays byte-for-byte untouched.
+describe("ChatInputCore adapter isolation", () => {
+  const ADAPTER_KEY = "project-x:team";
+
+  function makeAdapter(): ChatInputDraftAdapter {
+    return {
+      draftKey: ADAPTER_KEY,
+      editorKey: "team",
+      draft: "",
+      attachments: [] as Attachment[],
+      setDraft: vi.fn() as unknown as ChatInputDraftAdapter["setDraft"],
+      setAttachments: vi.fn() as unknown as ChatInputDraftAdapter["setAttachments"],
+      addAttachment: vi.fn() as unknown as ChatInputDraftAdapter["addAttachment"],
+      clearDraft: vi.fn() as unknown as ChatInputDraftAdapter["clearDraft"],
+    };
+  }
+
+  function renderCore(
+    adapter: ChatInputDraftAdapter,
+    props: Partial<React.ComponentProps<typeof ChatInputCore>> = {},
+  ) {
+    const onSend = props.onSend ?? vi.fn();
+    const onUploadFile =
+      props.onUploadFile ??
+      vi.fn(async (_file: File) =>
+        makeUpload({ id: "att-iso", link: "https://cdn.example/att-iso.png", filename: "iso.png" }),
+      );
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInputCore
+          draftAdapter={adapter}
+          onSend={onSend}
+          onUploadFile={onUploadFile}
+          agentName="Multica"
+          {...props}
+        />
+      </I18nProvider>,
+    );
+    return { onSend, onUploadFile };
+  }
+
+  function globalStoreSnapshot() {
+    const state = useChatStore.getState() as unknown as {
+      inputDrafts: Record<string, string>;
+      inputDraftAttachments: Record<string, Attachment[]>;
+    };
+    return JSON.stringify({ drafts: state.inputDrafts, attachments: state.inputDraftAttachments });
+  }
+
+  it("static lock: never subscribes to useChatStore with a custom adapter", () => {
+    renderCore(makeAdapter());
+    expect(screen.getByTestId("editor")).toBeTruthy();
+    expect(useChatStore).not.toHaveBeenCalled();
+  });
+
+  it("behavioral lock: typing routes to adapter.setDraft, global store untouched", () => {
+    const adapter = makeAdapter();
+    const before = globalStoreSnapshot();
+    renderCore(adapter);
+
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "hello adapter" } });
+
+    expect(adapter.setDraft).toHaveBeenCalledWith(ADAPTER_KEY, "hello adapter");
+    expect(useChatStore.getState().setInputDraft).not.toHaveBeenCalled();
+    expect(globalStoreSnapshot()).toBe(before);
+  });
+
+  it("behavioral lock: upload routes to adapter.addAttachment, global store untouched", async () => {
+    const adapter = makeAdapter();
+    const before = globalStoreSnapshot();
+    renderCore(adapter);
+
+    const file = new File(["x"], "iso.png", { type: "image/png" });
+    await act(async () => {
+      dropHandlers.onDrop?.([file]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(adapter.addAttachment).toHaveBeenCalledWith(
+      ADAPTER_KEY,
+      expect.objectContaining({ id: "att-iso" }),
+    );
+    expect(useChatStore.getState().addInputDraftAttachment).not.toHaveBeenCalled();
+    expect(globalStoreSnapshot()).toBe(before);
+  });
+
+  it("behavioral lock: send commit routes to adapter.clearDraft, global store untouched", async () => {
+    const adapter = makeAdapter();
+    const before = globalStoreSnapshot();
+    const onSend = vi.fn<ChatInputOnSend>((_content, _ids, commitInput) => {
+      commitInput();
+      return true;
+    });
+    renderCore(adapter, { onSend });
+
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "ship it" } });
+    let sendButton: HTMLElement;
+    await waitFor(() => {
+      const buttons = screen.getAllByRole("button");
+      sendButton = buttons[buttons.length - 1]!;
+      expect(sendButton).not.toBeDisabled();
+    });
+    fireEvent.click(sendButton!);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(adapter.clearDraft).toHaveBeenCalledWith(ADAPTER_KEY);
+    expect(useChatStore.getState().clearInputDraft).not.toHaveBeenCalled();
+    expect(globalStoreSnapshot()).toBe(before);
+  });
+
+  it("behavioral lock: restore routes to adapter.setDraft/setAttachments, global store untouched", async () => {
+    const adapter = makeAdapter();
+    const before = globalStoreSnapshot();
+    const onRestoreDraftConsumed = vi.fn();
+    renderCore(adapter, {
+      restoreDraftRequest: { id: "r-iso", content: "restored via adapter" },
+      onRestoreDraftConsumed,
+    });
+
+    await waitFor(() => {
+      expect(adapter.setDraft).toHaveBeenCalledWith(ADAPTER_KEY, "restored via adapter");
+      expect(adapter.setAttachments).toHaveBeenCalledWith(ADAPTER_KEY, []);
+      expect(onRestoreDraftConsumed).toHaveBeenCalledTimes(1);
+    });
+    expect(useChatStore.getState().setInputDraft).not.toHaveBeenCalled();
+    expect(globalStoreSnapshot()).toBe(before);
   });
 });
