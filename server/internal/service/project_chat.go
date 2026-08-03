@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -189,6 +192,40 @@ func (s *IssueService) ensureContainerIssue(
 // rejected sender must see "presenter required", never "queue full", and
 // nothing is persisted (no comment, no task) for either rejection.
 func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
+	return s.sendProjectChatCore(ctx, issue, agentID, callerID, content)
+}
+
+// MergeForwardDiscussion posts a member's multi-select of Discussion messages
+// as ONE merged message on the project Team Agent chat and enqueues exactly
+// one Team Agent run for it (CR-2026-012 DD-7/DD-8): one confirmation = one
+// comment + one task. comments must already be validated as belonging to the
+// project's Discussion container and are rendered in created_at ascending
+// order inside the merged markdown. registerCR appends the
+// requirement-register instruction block — pure comment text, the server
+// keeps zero CR write paths (DD-8).
+//
+// Reuses the exact SendProjectChatMessage kernel (presenter guard → capacity
+// guard → create → enqueue → compensating delete → broadcast-after-success),
+// so CR-2026-010 presenter control and CR-2026-004 capacity governance apply
+// to merged forwards without a second implementation. Deliberately NOT
+// coalesced_comment_ids: that mechanism assumes same-issue delivery plans,
+// which cross-container forwarding is not (DD-7).
+//
+// ponytail: the 50-comment selection cap lives at the handler; compressing
+// genuinely longer discussions into a summary is an upgrade path, not a
+// v1 feature.
+func (s *TaskService) MergeForwardDiscussion(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, comments []db.Comment, registerCR bool) (db.Comment, db.AgentTaskQueue, error) {
+	// Render in created_at ascending order regardless of caller ordering — the
+	// history list and the "earliest message" trigger quote both depend on it.
+	sorted := append([]db.Comment(nil), comments...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt.Time.Before(sorted[j].CreatedAt.Time) })
+	content := buildMergedForwardContent(ctx, s, sorted, registerCR)
+	return s.sendProjectChatCore(ctx, issue, agentID, callerID, content)
+}
+
+// sendProjectChatCore is the shared guard → create → enqueue → compensate →
+// broadcast sequence behind SendProjectChatMessage and MergeForwardDiscussion.
+func (s *TaskService) sendProjectChatCore(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
 	suppressPreempt, perr := s.guardProjectChatPresenter(ctx, issue, callerID)
 	if perr != nil {
 		return db.Comment{}, db.AgentTaskQueue{}, perr
@@ -314,4 +351,71 @@ func (s *TaskService) guardProjectChatPresenter(ctx context.Context, issue db.Is
 		return true, nil
 	}
 	return false, &ErrPresenterRequired{PresenterUserID: util.UUIDToString(state.Presenter.UserID)}
+}
+
+// mergedForwardRegisterCRBlock is the DD-8 instruction block appended when
+// the user checks "upgrade to CR" in the merge preview. It is comment text —
+// visible and auditable in the chat record — while the actual CR registration
+// stays with the executing agent via the requirement-register Skill (the
+// server keeps zero CR write paths).
+const mergedForwardRegisterCRBlock = "## 升级为 CR\n请按 requirement-register Skill 将上述讨论注册为 CR（目标 workspace 的 knowledge-base 仓），完成后在本会话回报 CR-ID。"
+
+// buildMergedForwardContent renders the selected Discussion messages into the
+// merged markdown posted on the Team Agent chat (SDD §4.3): a trigger-message
+// blockquote quoting the earliest message in full, a chronological history
+// list of ALL selected messages, and optionally the register-CR instruction
+// block. Comments must arrive sorted by created_at ascending; headings stay
+// in fixed English because this is persisted agent-facing content — the
+// chat.merged_forward.* locale keys cover the frontend preview chrome.
+func buildMergedForwardContent(ctx context.Context, s *TaskService, comments []db.Comment, registerCR bool) string {
+	var b strings.Builder
+
+	b.WriteString("## Trigger message\n")
+	first := comments[0]
+	for _, line := range strings.Split(strings.TrimRight(first.Content, "\n"), "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n## Conversation history (")
+	b.WriteString(strconv.Itoa(len(comments)))
+	b.WriteString(" messages)\n")
+	for _, c := range comments {
+		b.WriteString("- [")
+		b.WriteString(commentAuthorDisplayName(ctx, s, c))
+		b.WriteString(" ")
+		b.WriteString(c.CreatedAt.Time.UTC().Format(time.RFC3339))
+		b.WriteString("] ")
+		// Flatten newlines so each message stays one list item.
+		b.WriteString(strings.Join(strings.Fields(c.Content), " "))
+		b.WriteString("\n")
+	}
+
+	if registerCR {
+		b.WriteString("\n")
+		b.WriteString(mergedForwardRegisterCRBlock)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// commentAuthorDisplayName resolves a comment author's display name for the
+// merged-forward rendering. Lookup failures degrade to the author kind —
+// attribution is best-effort, the message bodies carry the substance.
+func commentAuthorDisplayName(ctx context.Context, s *TaskService, c db.Comment) string {
+	if !c.AuthorID.Valid {
+		return c.AuthorType
+	}
+	switch c.AuthorType {
+	case "member":
+		if u, err := s.Queries.GetUser(ctx, c.AuthorID); err == nil {
+			return u.Name
+		}
+	case "agent":
+		if a, err := s.Queries.GetAgent(ctx, c.AuthorID); err == nil {
+			return a.Name
+		}
+	}
+	return c.AuthorType
 }
