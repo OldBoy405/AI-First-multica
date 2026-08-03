@@ -66,10 +66,14 @@ func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 
 // ProjectDiscussionResponse is the entry payload for a project's Discussion
 // tab (CR-2026-009): the hidden container issue that anchors the pure-human,
-// agent-free message stream. Unlike ProjectChatResponse there is no agent
-// binding to report — Discussion never drives an agent.
+// agent-free message stream. CR-2026-012 adds the optional Discussion
+// Coordinator binding: when set, @-mentioning that agent in Discussion
+// activates it (the controlled opening of the CR-2026-009 red line).
 type ProjectDiscussionResponse struct {
 	IssueID string `json:"issue_id"`
+	// CoordinatorAgentID is the bound Discussion Coordinator's agent id;
+	// empty when unconfigured (Discussion stays agent-free — the red line).
+	CoordinatorAgentID string `json:"coordinator_agent_id,omitempty"`
 }
 
 // GetProjectDiscussion resolves (lazily creating on first use) the project's
@@ -107,7 +111,8 @@ func (h *Handler) GetProjectDiscussion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ProjectDiscussionResponse{
-		IssueID: uuidToString(issue.ID),
+		IssueID:            uuidToString(issue.ID),
+		CoordinatorAgentID: projectTeamAgentSetting(project.Settings, service.ProjectSettingDiscussionCoordinatorID),
 	})
 }
 
@@ -115,6 +120,15 @@ func (h *Handler) GetProjectDiscussion(w http.ResponseWriter, r *http.Request) {
 // JSONB bag. Returns "" when unset or malformed — an unconfigured Team Agent is
 // a normal state the frontend handles, not an error.
 func projectTeamAgentID(settings []byte) string {
+	return projectTeamAgentSetting(settings, service.ProjectSettingTeamAgentID)
+}
+
+// projectTeamAgentSetting reads one agent-UUID-string setting out of the
+// project.settings JSONB bag (shared by the Team Agent binding and the
+// CR-2026-012 Discussion Coordinator binding). Returns "" when unset or
+// malformed — an unconfigured binding is a normal state the frontend
+// handles, not an error.
+func projectTeamAgentSetting(settings []byte, key string) string {
 	if len(settings) == 0 {
 		return ""
 	}
@@ -122,7 +136,7 @@ func projectTeamAgentID(settings []byte) string {
 	if err := json.Unmarshal(settings, &bag); err != nil {
 		return ""
 	}
-	if v, ok := bag[service.ProjectSettingTeamAgentID].(string); ok {
+	if v, ok := bag[key].(string); ok {
 		return v
 	}
 	return ""

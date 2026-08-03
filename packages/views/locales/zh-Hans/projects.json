@@ -250,6 +250,29 @@
       "presenter_transferred": "{{from}} 将主持人转让给了 {{to}}",
       "presenter_revoked": "{{approver}} 撤销了 {{user}} 的主持人权限",
       "presenter_released": "{{user}} 释放了主持人权限"
+    },
+    "merged_forward": {
+      "select_entry": "选择",
+      "selected_count": "已选 {{count}} 条",
+      "merge_cta": "合并转发",
+      "preview_title": "转发给团队 Agent",
+      "trigger_message": "触发消息",
+      "chat_history": "讨论记录",
+      "messages_in_conversation": "{{count}} 条消息",
+      "register_cr_label": "升级为变更请求（CR）",
+      "confirm": "转发",
+      "cancel": "取消",
+      "success": "已转发给团队 Agent",
+      "send_failed": "转发失败，已保留所选消息，请重试。",
+      "queue_full_error": "团队 Agent 队列已满（{{depth}}/{{limit}}）。已保留所选消息，请稍后重试。",
+      "presenter_locked_error": "演示人持有单写控制。已保留所选消息，请在解除后重试。"
+    },
+    "dc": {
+      "coordinator_label": "讨论协调者",
+      "coordinator_pick_cta": "选择协调者",
+      "coordinator_bound": "协调者：{{name}}",
+      "coordinator_setup_failed": "设置讨论协调者失败",
+      "queue_full_notice": "团队 Agent 队列已满（{{depth}}/{{limit}}），任务未入队。"
     }
   },
   "governance": {

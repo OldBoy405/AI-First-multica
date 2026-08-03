@@ -175,6 +175,23 @@ export function useSetProjectTeamAgent(wsId: string, projectId: string) {
   });
 }
 
+// Bind (or rebind) the project's Discussion Coordinator (CR-2026-012 DD-1):
+// writes settings.discussion_coordinator_agent_id, mirrored on the Team
+// Agent binding above. Invalidates the Discussion context query so the pane
+// header flips to the configured state.
+export function useSetProjectDiscussionCoordinator(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) =>
+      api.updateProject(projectId, {
+        settings: { discussion_coordinator_agent_id: agentId },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.discussion(wsId, projectId) });
+    },
+  });
+}
+
 // Approve/reject a CR's pending gate (CR-2026-011 TASK-05). No optimistic
 // update — the outcome isn't locally predictable (EVIDENCE_DRIFT/
 // FORBIDDEN_APPROVER can reject it, and pending_advance is server-derived),
