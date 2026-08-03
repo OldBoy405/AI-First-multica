@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, SendHorizontal, Square } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
 import {
@@ -17,14 +17,19 @@ import {
   useProjectChatStore,
 } from "@multica/core/projects";
 import { useAgentPresenceDetail } from "@multica/core/agents";
+import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { agentListOptions } from "@multica/core/workspace/queries";
+import type { Attachment } from "@multica/core/types";
 import {
   Tooltip,
   TooltipTrigger,
   TooltipContent,
 } from "@multica/ui/components/ui/tooltip";
-import { Button } from "@multica/ui/components/ui/button";
 import { ChatMessageList } from "../../chat/components/chat-message-list";
+import {
+  ChatInputCore,
+  type ChatInputDraftAdapter,
+} from "../../chat/components/chat-input";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useT } from "../../i18n";
 
@@ -38,11 +43,10 @@ import { useT } from "../../i18n";
 // whose activeSessionId is a global singleton shared by the floating chat
 // and the /chat page.
 //
-// ponytail: composer is the same plain textarea as the Team Agent pane —
-// ChatInput reads useChatStore internally (chat-input.tsx draft keys), so
-// reusing it here would leak this pane's drafts into the global chat's
-// draft namespace. Attachments / @mentions ride on a later ChatInput
-// decoupling; add them when that lands.
+// composer rides ChatInputCore with a per-pane adapter (CR-2026-012 DD-9/
+// FR-8): drafts + attachments live in the project chat store's private_ask
+// slot, @-mentions stay member-only, and uploads bind to this pane's own
+// chat session — never the global chat store's namespace.
 
 export function ProjectPrivateAsk({
   projectId,
@@ -174,6 +178,38 @@ function PrivateAskSession({
   );
 }
 
+const EMPTY_DRAFT_ATTACHMENTS: Attachment[] = [];
+
+// CR-2026-012 DD-9/DD-10: bridges ChatInputCore onto the project chat store's
+// `${projectId}:private_ask` slot. Same shape as the Team Agent pane's
+// adapter; the two panes only differ in the mode constant (SDD §5.3 — no
+// shared wrapper, negative abstraction value).
+function usePrivateAskDraftAdapter(projectId: string): ChatInputDraftAdapter {
+  const draftKey = projectChatDraftKey(projectId, "private_ask");
+  const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
+  const attachments = useProjectChatStore(
+    (s) => s.draftAttachments[draftKey] ?? EMPTY_DRAFT_ATTACHMENTS,
+  );
+  const setDraft = useProjectChatStore((s) => s.setDraft);
+  const setDraftAttachments = useProjectChatStore((s) => s.setDraftAttachments);
+  const addDraftAttachment = useProjectChatStore((s) => s.addDraftAttachment);
+  return useMemo(
+    () => ({
+      draftKey,
+      editorKey: "private_ask",
+      draft,
+      attachments,
+      setDraft: (_key, content) => setDraft(projectId, "private_ask", content),
+      setAttachments: (_key, atts) =>
+        setDraftAttachments(projectId, "private_ask", atts),
+      addAttachment: (_key, att) =>
+        addDraftAttachment(projectId, "private_ask", att),
+      clearDraft: (_key) => setDraft(projectId, "private_ask", ""),
+    }),
+    [projectId, draftKey, draft, attachments, setDraft, setDraftAttachments, addDraftAttachment],
+  );
+}
+
 function PrivateAskComposer({
   projectId,
   wsId,
@@ -193,31 +229,38 @@ function PrivateAskComposer({
 }) {
   const { t } = useT("projects");
   const qc = useQueryClient();
-  const draftKey = projectChatDraftKey(projectId, "private_ask");
-  const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
-  const setDraft = useProjectChatStore((s) => s.setDraft);
-  const [sending, setSending] = useState(false);
+  const draftAdapter = usePrivateAskDraftAdapter(projectId);
   const running = pendingTaskId != null && pendingTaskId !== "";
+  const { uploadWithToast } = useFileUpload(api, (err) => toast.error(err.message));
+
+  const handleComposerUpload = useCallback(
+    (file: File) => uploadWithToast(file, { chatSessionId: sessionId }),
+    [uploadWithToast, sessionId],
+  );
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
     void qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
   };
 
-  const handleSend = async () => {
-    const content = draft.trim();
-    if (!content || sending || running) return;
-    setSending(true);
-    setPendingMessage(content);
+  const handleSend = async (
+    content: string,
+    attachmentIds: string[] | undefined,
+    commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
+  ): Promise<boolean> => {
+    const trimmed = content.trim();
+    if (!trimmed || running) return false;
+    setPendingMessage(trimmed);
     try {
-      await api.sendChatMessage(sessionId, content);
-      setDraft(projectId, "private_ask", "");
+      await api.sendChatMessage(sessionId, trimmed, attachmentIds);
+      commitInput(); // success → clear draft + attachment slot via adapter
       refresh();
+      return true;
     } catch {
       // Draft is preserved — the user can just hit send again.
       toast.error(t(($) => $.chat.stream.send_failed));
+      return false;
     } finally {
-      setSending(false);
       setPendingMessage(null);
     }
   };
@@ -265,49 +308,18 @@ function PrivateAskComposer({
           </TooltipContent>
         </Tooltip>
       </div>
-      <div className="relative flex items-end gap-2 rounded-lg border bg-card px-3 py-2 transition-colors focus-within:border-brand">
-        <textarea
-          data-testid="private-ask-composer-input"
-          value={draft}
-          rows={1}
-          disabled={running || sending}
-          placeholder={t(($) => $.chat.private.composer_placeholder)}
-          onChange={(e) => setDraft(projectId, "private_ask", e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void handleSend();
-            }
-          }}
-          className="max-h-32 min-h-[24px] flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
+      {/* CR-2026-012 FR-8: rich composer (attachments + member-only @
+          mentions). Stop button / model badge stay untouched above. */}
+      <div data-testid="private-ask-composer">
+        <ChatInputCore
+          draftAdapter={draftAdapter}
+          onSend={handleSend}
+          onUploadFile={handleComposerUpload}
+          onStop={handleStop}
+          isRunning={running}
+          disabled={running}
+          mentionItemTypes={["member"]}
         />
-        {running ? (
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            data-testid="private-ask-stop"
-            onClick={() => void handleStop()}
-            aria-label={t(($) => $.chat.private.stop)}
-          >
-            <Square className="h-3.5 w-3.5" />
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="icon-sm"
-            data-testid="private-ask-send"
-            disabled={sending || !draft.trim()}
-            onClick={() => void handleSend()}
-            aria-label={t(($) => $.chat.stream.send)}
-          >
-            {sending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <SendHorizontal className="h-4 w-4" />
-            )}
-          </Button>
-        )}
       </div>
     </div>
   );

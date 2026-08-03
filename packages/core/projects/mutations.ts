@@ -63,7 +63,10 @@ export function useUpdateProject() {
 export function useSendProjectChatMessage(wsId: string, projectId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (content: string) => api.sendProjectChatMessage(projectId, content),
+    // CR-2026-012 FR-8: attachment ids ride along the same send (backend
+    // binds them to the chat comment); absent/empty keeps prior behavior.
+    mutationFn: (vars: { content: string; attachmentIds?: string[] }) =>
+      api.sendProjectChatMessage(projectId, vars.content, vars.attachmentIds),
     onError: (err) => {
       if (err instanceof ApiError && err.status === 409) {
         qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });

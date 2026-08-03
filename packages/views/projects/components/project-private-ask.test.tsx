@@ -66,6 +66,80 @@ vi.mock("../../agents/components/inspector/model-picker", () => ({
   ),
 }));
 
+// CR-2026-012 TASK-06: the composer is ChatInputCore behind an adapter; this
+// shim keeps the historical textarea/send/stop testids and the adapter
+// contract (draft read, setDraft on change, clearDraft via commitInput,
+// submitting + running disable) so the pane-level send-flow assertions stay
+// meaningful without pulling the real Tiptap editor into jsdom.
+vi.mock("../../chat/components/chat-input", async () => {
+  const React = await import("react");
+  type Adapter = {
+    draftKey: string;
+    draft: string;
+    setDraft: (key: string, content: string) => void;
+    clearDraft: (key: string) => void;
+  };
+  type Commit = (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void;
+  function ChatInputCore(props: {
+    draftAdapter: Adapter;
+    onSend: (
+      content: string,
+      attachmentIds: string[] | undefined,
+      commitInput: Commit,
+    ) => void | boolean | Promise<void | boolean>;
+    onStop?: () => void;
+    isRunning?: boolean;
+    disabled?: boolean;
+  }) {
+    const [submitting, setSubmitting] = React.useState(false);
+    const commit: Commit = (options) => {
+      props.draftAdapter.clearDraft(props.draftAdapter.draftKey);
+      for (const key of options?.extraDraftKeys ?? []) {
+        if (key !== props.draftAdapter.draftKey) props.draftAdapter.clearDraft(key);
+      }
+    };
+    const handle = async () => {
+      setSubmitting(true);
+      try {
+        await props.onSend(props.draftAdapter.draft, undefined, commit);
+      } finally {
+        setSubmitting(false);
+      }
+    };
+    return (
+      <div>
+        <textarea
+          data-testid="private-ask-composer-input"
+          value={props.draftAdapter.draft}
+          disabled={props.disabled || submitting || props.isRunning}
+          onChange={(e) =>
+            props.draftAdapter.setDraft(props.draftAdapter.draftKey, e.target.value)
+          }
+        />
+        {props.isRunning && props.onStop ? (
+          <button
+            type="button"
+            data-testid="private-ask-stop"
+            onClick={() => void props.onStop?.()}
+          >
+            stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="private-ask-send"
+            disabled={props.disabled || submitting || !props.draftAdapter.draft.trim()}
+            onClick={() => void handle()}
+          >
+            send
+          </button>
+        )}
+      </div>
+    );
+  }
+  return { ChatInputCore };
+});
+
 import { ProjectPrivateAsk } from "./project-private-ask";
 
 function renderPane() {
@@ -88,7 +162,12 @@ describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
     mocks.getProjectPrivateChat.mockResolvedValue(SESSION);
     mocks.listChatMessages.mockResolvedValue([]);
     mocks.getPendingChatTask.mockResolvedValue({});
-    useProjectChatStore.setState({ drafts: {}, activeMode: {}, tutorialSeen: {} });
+    useProjectChatStore.setState({
+      drafts: {},
+      activeMode: {},
+      tutorialSeen: {},
+      draftAttachments: {},
+    });
     localStorage.clear();
   });
   afterEach(cleanup);
@@ -135,7 +214,11 @@ describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
     fireEvent.click(screen.getByTestId("private-ask-send"));
 
     await waitFor(() =>
-      expect(mocks.sendChatMessage).toHaveBeenCalledWith("sess-1", "why does the build fail?"),
+      expect(mocks.sendChatMessage).toHaveBeenCalledWith(
+        "sess-1",
+        "why does the build fail?",
+        undefined,
+      ),
     );
     await waitFor(() =>
       expect(

@@ -115,6 +115,10 @@ interface ChatInputProps {
   leftAdornment?: ReactNode;
   /** Chat @ suggestions: current/recent issue/project entries. */
   contextItems?: MentionItem[];
+  /** Restrict @ suggestions to these item types (CR-2026-012 DD-11) — e.g.
+   *  ["member"] on the project chat panes. Undefined keeps the full mixed
+   *  list (global chat default). */
+  mentionItemTypes?: MentionItem["type"][];
   /** Monotonic nonce bumped by the owner whenever the compose box should grab
    *  keyboard focus — currently on "new chat" so the user can type right away.
    *  0 (the initial value) is inert, so a plain deep-link open never steals
@@ -142,6 +146,7 @@ export function ChatInputCore({
   agentName,
   leftAdornment,
   contextItems,
+  mentionItemTypes,
   focusRequest,
 }: ChatInputCoreProps) {
   const { t } = useT("chat");
@@ -406,6 +411,7 @@ export function ChatInputCore({
             debounceMs={100}
             mentionMode={contextItems ? "context" : "default"}
             mentionContextItems={contextItems}
+            mentionItemTypes={mentionItemTypes}
             enableSlashCommands
             // Chat is short-form — the floating formatting toolbar is
             // more distraction than feature here.

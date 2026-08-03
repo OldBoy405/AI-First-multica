@@ -139,6 +139,11 @@ interface ContentEditorProps {
   /** Chat can surface current/recent issue/project suggestions. Other editors use default mention behavior. */
   mentionMode?: "default" | "context";
   mentionContextItems?: MentionItem[];
+  /** Restrict @ suggestions to these item types (CR-2026-012 DD-11) — e.g.
+   *  ["member"] on the project chat panes where only humans may be
+   *  addressed. Editor identity should be keyed by the owner when this
+   *  value changes per surface (it is read at editor-creation time). */
+  mentionItemTypes?: MentionItem["type"][];
   /** Enable the `/` command picker. Defaults false. */
   enableSlashCommands?: boolean;
   /**
@@ -203,6 +208,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       disableMentions = false,
       mentionMode = "default",
       mentionContextItems,
+      mentionItemTypes,
       enableSlashCommands = false,
       slashCommandMode = "skill",
       attachments,
@@ -395,6 +401,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         disableMentions,
         mentionMode,
         getMentionContextItems: () => mentionContextItemsRef.current,
+        mentionItemTypes,
         enableSlashCommands,
         slashCommandMode,
         resolveIssueIdentifierRef,

@@ -69,6 +69,10 @@ interface MentionListProps {
   query: string;
   command: (item: MentionItem) => void;
   includeProjectSearch?: boolean;
+  /** Restrict the popup to these item types (CR-2026-012 DD-11). Undefined
+   *  = no restriction. Server search is skipped when issue/project results
+   *  would be filtered out anyway. */
+  itemTypes?: MentionItem["type"][];
 }
 
 export interface MentionListRef {
@@ -144,7 +148,7 @@ function mergeMentionItems(
 }
 
 export const MentionList = forwardRef<MentionListRef, MentionListProps>(
-  function MentionList({ items, query, command, includeProjectSearch = false }, ref) {
+  function MentionList({ items, query, command, includeProjectSearch = false, itemTypes }, ref) {
     const { t } = useT("editor");
     // Selection is tracked by item identity, NOT by a positional index. The
     // list is re-bucketed by groupItems() and grows asynchronously (server
@@ -159,14 +163,18 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
     const [searchedQuery, setSearchedQuery] = useState("");
     const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
     const normalizedQuery = query.trim();
+    // DD-11: the server search only yields issue/project rows. When the type
+    // filter would drop them anyway, skip the round-trip entirely.
+    const serverSearchRelevant =
+      !itemTypes || itemTypes.includes("issue") || itemTypes.includes("project");
 
     useEffect(() => {
       const q = normalizedQuery;
       setServerItems([]);
 
-      if (!q) {
+      if (!q || !serverSearchRelevant) {
         setIsSearching(false);
-        setSearchedQuery("");
+        setSearchedQuery(serverSearchRelevant ? "" : q);
         return;
       }
 
@@ -232,12 +240,18 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
         clearTimeout(timer);
         controller.abort();
       };
-    }, [includeProjectSearch, normalizedQuery]);
+    }, [includeProjectSearch, normalizedQuery, serverSearchRelevant]);
 
     const displayItems = useMemo(() => {
       const currentServerItems = searchedQuery === normalizedQuery ? serverItems : [];
-      return mergeMentionItems(items, currentServerItems).slice(0, MAX_ITEMS);
-    }, [items, normalizedQuery, searchedQuery, serverItems]);
+      const merged = mergeMentionItems(items, currentServerItems);
+      // DD-11 choke point: sync items are filtered at their source
+      // (buildSyncItems / context provider), server items here.
+      const typed = itemTypes
+        ? merged.filter((item) => itemTypes.includes(item.type))
+        : merged;
+      return typed.slice(0, MAX_ITEMS);
+    }, [items, normalizedQuery, searchedQuery, serverItems, itemTypes]);
 
     // The single index space for selection. groupItems() re-buckets displayItems
     // (current → recent → search → users → issues); orderedItems is exactly what
@@ -522,6 +536,10 @@ function matchesMentionQuery(item: MentionItem, query: string): boolean {
 interface MentionSuggestionOptions {
   mode?: "default" | "context";
   getContextItems?: () => MentionItem[];
+  /** Restrict suggestions to these item types (CR-2026-012 DD-11) — e.g.
+   *  ["member"] for surfaces where only humans may be addressed. Undefined
+   *  keeps the full mixed list (members/agents/squads/issues/…). */
+  itemTypes?: MentionItem["type"][];
 }
 
 export function createMentionSuggestion(
@@ -605,7 +623,9 @@ export function createMentionSuggestion(
       )
       .map(issueToMention);
 
-    return [...allItem, ...userItems, ...issueItems];
+    return [...allItem, ...userItems, ...issueItems].filter(
+      (item) => !options.itemTypes || options.itemTypes.includes(item.type),
+    );
   }
 
   return {
@@ -613,7 +633,11 @@ export function createMentionSuggestion(
     items: ({ query }) => {
       if (options.mode === "context") {
         const normalizedQuery = query.trim();
-        const contextItems = (options.getContextItems?.() ?? []).filter((item) => matchesMentionQuery(item, query));
+        const contextItems = (options.getContextItems?.() ?? []).filter(
+          (item) =>
+            matchesMentionQuery(item, query) &&
+            (!options.itemTypes || options.itemTypes.includes(item.type)),
+        );
         if (!normalizedQuery) return contextItems;
         return mergeMentionItems(contextItems, buildSyncItems(query));
       }
@@ -628,6 +652,7 @@ export function createMentionSuggestion(
         query: props.query,
         command: props.command,
         includeProjectSearch: options.mode === "context",
+        itemTypes: options.itemTypes,
       }),
       onKeyDown: (ref, props) => ref?.onKeyDown(props) ?? false,
     }),

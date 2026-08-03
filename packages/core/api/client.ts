@@ -2023,10 +2023,18 @@ export class ApiClient {
   async sendProjectChatMessage(
     id: string,
     content: string,
+    attachmentIds?: string[],
   ): Promise<ProjectChatSendResult> {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        // CR-2026-012 FR-8: optional attachment binding (older callers omit
+        // the field; the backend treats absence as "no attachments").
+        ...(attachmentIds && attachmentIds.length > 0
+          ? { attachment_ids: attachmentIds }
+          : {}),
+      }),
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",

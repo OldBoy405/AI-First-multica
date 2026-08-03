@@ -123,11 +123,26 @@ vi.mock("@multica/core/api", async (importActual) => {
 // convention used elsewhere in this repo (see chat-input.test.tsx).
 const projectChatState = {
   drafts: {} as Record<string, string>,
+  draftAttachments: {} as Record<string, unknown[]>,
   agentRequestFilter: {} as Record<string, boolean>,
   setDraft: vi.fn((projectId: string, mode: string, text: string) => {
     const key = `${projectId}:${mode}`;
     if (text) projectChatState.drafts[key] = text;
-    else delete projectChatState.drafts[key];
+    else {
+      delete projectChatState.drafts[key];
+      delete projectChatState.draftAttachments[key];
+    }
+  }),
+  setDraftAttachments: vi.fn((projectId: string, mode: string, attachments: unknown[]) => {
+    const key = `${projectId}:${mode}`;
+    if (attachments.length > 0) projectChatState.draftAttachments[key] = attachments;
+    else delete projectChatState.draftAttachments[key];
+  }),
+  addDraftAttachment: vi.fn((projectId: string, mode: string, attachment: { id?: string }) => {
+    if (!attachment.id) return;
+    const key = `${projectId}:${mode}`;
+    const existing = projectChatState.draftAttachments[key] ?? [];
+    projectChatState.draftAttachments[key] = [...existing, attachment];
   }),
   setAgentRequestFilter: vi.fn((projectId: string, value: boolean) => {
     projectChatState.agentRequestFilter[projectId] = value;
@@ -169,6 +184,58 @@ vi.mock("@multica/core/projects", () => ({
     queryKey: ["presenter", id],
     queryFn: async () => presenterStateMock,
   }),
+}));
+
+// CR-2026-012 TASK-06: the composer is ChatInputCore behind an adapter; this
+// shim keeps the historical textarea/send-button testids and the adapter
+// contract (draft read, setDraft on change, clearDraft via commitInput) so
+// the pane-level send/lock/latch assertions stay meaningful without pulling
+// the real Tiptap editor into jsdom.
+type ComposerCommit = (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void;
+vi.mock("../../chat/components/chat-input", () => ({
+  ChatInputCore: ({
+    draftAdapter,
+    onSend,
+    disabled,
+  }: {
+    draftAdapter: {
+      draftKey: string;
+      draft: string;
+      setDraft: (key: string, content: string) => void;
+      clearDraft: (key: string) => void;
+    };
+    onSend: (
+      content: string,
+      attachmentIds: string[] | undefined,
+      commitInput: ComposerCommit,
+    ) => void | boolean | Promise<void | boolean>;
+    disabled?: boolean;
+  }) => {
+    const commit: ComposerCommit = (options) => {
+      draftAdapter.clearDraft(draftAdapter.draftKey);
+      for (const key of options?.extraDraftKeys ?? []) {
+        if (key !== draftAdapter.draftKey) draftAdapter.clearDraft(key);
+      }
+    };
+    return (
+      <div>
+        <textarea
+          data-testid="project-chat-composer-input"
+          value={draftAdapter.draft}
+          disabled={disabled}
+          onChange={(e) => draftAdapter.setDraft(draftAdapter.draftKey, e.target.value)}
+        />
+        <button
+          type="button"
+          data-testid="project-chat-send"
+          disabled={disabled || !draftAdapter.draft.trim()}
+          onClick={() => void onSend(draftAdapter.draft, undefined, commit)}
+        >
+          send
+        </button>
+      </div>
+    );
+  },
 }));
 
 import {
@@ -273,11 +340,16 @@ function gateCR(overrides: Partial<ProjectGateCR> & { nodeAt: string; nodeStatus
 
 beforeEach(() => {
   for (const k of Object.keys(projectChatState.drafts)) delete projectChatState.drafts[k];
+  for (const k of Object.keys(projectChatState.draftAttachments)) {
+    delete projectChatState.draftAttachments[k];
+  }
   for (const k of Object.keys(projectChatState.agentRequestFilter)) {
     delete projectChatState.agentRequestFilter[k];
   }
   for (const k of Object.keys(messagesByTask)) delete messagesByTask[k];
   projectChatState.setDraft.mockClear();
+  projectChatState.setDraftAttachments.mockClear();
+  projectChatState.addDraftAttachment.mockClear();
   projectChatState.setAgentRequestFilter.mockClear();
   sendMock.mutateAsync = vi.fn();
   sendMock.isPending = false;
@@ -369,7 +441,7 @@ describe("TeamAgentStreamView", () => {
 });
 
 describe("TeamAgentComposer", () => {
-  const props = { projectId: "proj-1", wsId: "ws-1", canConfigure: false };
+  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", canConfigure: false };
 
   it("clears the draft on a successful send", async () => {
     projectChatState.drafts["proj-1:team_agent"] = "hello agent";
@@ -380,7 +452,9 @@ describe("TeamAgentComposer", () => {
       screen.getByTestId("project-chat-send").click();
     });
 
-    expect(sendMock.mutateAsync).toHaveBeenCalledWith("hello agent");
+    expect(sendMock.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "hello agent" }),
+    );
     expect(projectChatState.drafts["proj-1:team_agent"]).toBeUndefined();
   });
 
@@ -477,6 +551,7 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
   const props = {
     projectId: "proj-1",
     wsId: "ws-1",
+    issueId: "issue-chat-1",
     teamAgentId: "agent-1",
     canConfigure: false,
   };
@@ -935,7 +1010,7 @@ describe("TeamAgentStreamView presenter notices", () => {
 // from 429 project_queue_full — separate banner, separate copy, never
 // conflated even though both share the "locked" state.
 describe("TeamAgentComposer presenter guard", () => {
-  const props = { projectId: "proj-1", wsId: "ws-1", canConfigure: false };
+  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", canConfigure: false };
 
   it("locks the composer and names the current presenter", async () => {
     projectChatState.drafts["proj-1:team_agent"] = "blocked send";
