@@ -17,6 +17,7 @@ export {
   useDeleteProject,
   useSendProjectChatMessage,
   useSetProjectTeamAgent,
+  useSetProjectDiscussionCoordinator,
   useApproveCr,
   useCancelProjectQueueTask,
   useRequestPresenter,

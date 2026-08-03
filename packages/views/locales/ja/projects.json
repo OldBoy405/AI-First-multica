@@ -250,6 +250,29 @@
       "presenter_transferred": "{{from}} がプレゼンターを {{to}} に移譲しました",
       "presenter_revoked": "{{approver}} が {{user}} のプレゼンター権限を取り消しました",
       "presenter_released": "{{user}} がプレゼンターを解放しました"
+    },
+    "merged_forward": {
+      "select_entry": "選択",
+      "selected_count": "{{count}} 件選択中",
+      "merge_cta": "チーム Agent に転送",
+      "preview_title": "チーム Agent に転送",
+      "trigger_message": "トリガーメッセージ",
+      "chat_history": "議論の履歴",
+      "messages_in_conversation": "{{count}} 件のメッセージ",
+      "register_cr_label": "変更リクエスト（CR）として登録",
+      "confirm": "転送",
+      "cancel": "キャンセル",
+      "success": "チーム Agent に転送しました",
+      "send_failed": "転送に失敗しました。選択は保持されています。再試行してください。",
+      "queue_full_error": "チーム Agent のキューがいっぱいです（{{depth}}/{{limit}}）。選択は保持されています。後で再試行してください。",
+      "presenter_locked_error": "プレゼンターが単一書き込み権限を保持しています。選択は保持されています。解除後に再試行してください。"
+    },
+    "dc": {
+      "coordinator_label": "ディスカッションコーディネーター",
+      "coordinator_pick_cta": "コーディネーターを選択",
+      "coordinator_bound": "コーディネーター：{{name}}",
+      "coordinator_setup_failed": "ディスカッションコーディネーターの設定に失敗しました",
+      "queue_full_notice": "チーム Agent のキューがいっぱいです（{{depth}}/{{limit}}）。タスクはキューに入りませんでした。"
     }
   },
   "governance": {

@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@multica/ui/lib/utils";
 import {
   ContentEditor,
@@ -39,6 +39,36 @@ function attachmentReferenceUrls(attachment: Attachment): string[] {
 
 function isAttachmentReferenced(content: string, attachment: Attachment): boolean {
   return attachmentReferenceUrls(attachment).some((url) => content.includes(url));
+}
+
+/**
+ * Draft persistence contract the compose box codes against (CR-2026-012 DD-9,
+ * tech-debt Plan A). `ChatInputCore` knows ONLY this interface — never the
+ * global chat store — so alternative surfaces (project Team Agent pane,
+ * Private Ask pane) can inject their own per-project draft storage without
+ * subscribing to, or writing into, `useChatStore` at all.
+ *
+ * Read fields are plain values (re-render driven); write methods take an
+ * explicit key so a single adapter can address several draft slots (e.g. the
+ * send commit clearing both the sent key and any `extraDraftKeys`).
+ */
+export interface ChatInputDraftAdapter {
+  /** Storage key scoping the in-progress draft (session / project / mode). */
+  readonly draftKey: string;
+  /** React `key` for the editor instance (forces remount on identity swap). */
+  readonly editorKey: string;
+  /** Current draft text for `draftKey`. */
+  readonly draft: string;
+  /** Current draft attachment rows for `draftKey`. */
+  readonly attachments: Attachment[];
+  /** Persist the draft text for a key. */
+  setDraft(key: string, content: string): void;
+  /** Replace the draft attachments for a key. */
+  setAttachments(key: string, attachments: Attachment[]): void;
+  /** Append (or upsert by id) one attachment row for a key. */
+  addAttachment(key: string, attachment: Attachment): void;
+  /** Drop both text and attachments persisted for a key. */
+  clearDraft(key: string): void;
 }
 
 interface ChatInputProps {
@@ -85,6 +115,10 @@ interface ChatInputProps {
   leftAdornment?: ReactNode;
   /** Chat @ suggestions: current/recent issue/project entries. */
   contextItems?: MentionItem[];
+  /** Restrict @ suggestions to these item types (CR-2026-012 DD-11) — e.g.
+   *  ["member"] on the project chat panes. Undefined keeps the full mixed
+   *  list (global chat default). */
+  mentionItemTypes?: MentionItem["type"][];
   /** Monotonic nonce bumped by the owner whenever the compose box should grab
    *  keyboard focus — currently on "new chat" so the user can type right away.
    *  0 (the initial value) is inert, so a plain deep-link open never steals
@@ -92,7 +126,14 @@ interface ChatInputProps {
   focusRequest?: number;
 }
 
-export function ChatInput({
+interface ChatInputCoreProps extends ChatInputProps {
+  /** Draft persistence backend (CR-2026-012 DD-9). `ChatInput` passes the
+   *  global-chat-store adapter; alternative surfaces pass their own. */
+  draftAdapter: ChatInputDraftAdapter;
+}
+
+export function ChatInputCore({
+  draftAdapter,
   onSend,
   restoreDraftRequest,
   onRestoreDraftConsumed,
@@ -105,53 +146,20 @@ export function ChatInput({
   agentName,
   leftAdornment,
   contextItems,
+  mentionItemTypes,
   focusRequest,
-}: ChatInputProps) {
+}: ChatInputCoreProps) {
   const { t } = useT("chat");
   const editorRef = useRef<ContentEditorRef>(null);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const selectedAgentId = useChatStore((s) => s.selectedAgentId);
-  // Two keys with deliberately different concerns:
-  //
-  // `draftKey` — zustand storage key. Scopes the in-progress draft per
-  // session so different sessions don't bleed text into each other; for
-  // brand-new chats it falls back to a per-agent slot so switching agents
-  // mid-compose gives each agent its own draft. This is a STORAGE key, not
-  // a React identity.
-  //
-  // `editorKey` — React `key` on the ContentEditor. Forces a fresh editor
-  // instance when the user explicitly switches agent. Placeholder text itself
-  // no longer depends on this: ContentEditor's placeholder-sync effect
-  // refreshes it live (e.g. across archived ↔ active sessions of the SAME
-  // agent, where this key does not change). A cancelled-run draft restore
-  // does NOT bump this key either: it just writes
-  // the restored text into `inputDraft`, and the editor's own
-  // defaultValue-sync effect (content-editor.tsx) pushes it into the live
-  // instance. There is no second copy of the draft to drift or resurface.
-  // Crucially this does NOT include `activeSessionId`: when the user
-  // uploads a file in a brand-new chat, `handleUploadFile` first awaits
-  // `ensureSession` which lazily creates the session and flips
-  // `activeSessionId` from null → uuid mid-upload. If the editor key
-  // depended on session id, that flip would unmount the editor right as
-  // the blob preview was inserted, dropping the in-progress upload's
-  // image node before file-upload.ts could swap it for the CDN URL — the
-  // user would see the image flash on then disappear. Keeping editor
-  // identity stable across the lazy-create event is what makes
-  // first-upload-creates-session work the same as second-upload.
-  const draftKey = activeSessionId ?? newSessionDraftKey(selectedAgentId);
-  // Select a primitive — empty-string fallback keeps referential stability.
-  const inputDraft = useChatStore((s) => s.inputDrafts[draftKey] ?? "");
-  const draftAttachments = useChatStore(
-    (s) => s.inputDraftAttachments[draftKey] ?? EMPTY_ATTACHMENTS,
-  );
-  const setInputDraft = useChatStore((s) => s.setInputDraft);
-  const setInputDraftAttachments = useChatStore((s) => s.setInputDraftAttachments);
-  const addInputDraftAttachment = useChatStore((s) => s.addInputDraftAttachment);
-  const clearInputDraft = useChatStore((s) => s.clearInputDraft);
+  // All draft I/O goes through the injected adapter — this component never
+  // touches useChatStore (structural fact pinned by chat-input.test.tsx).
+  const draftKey = draftAdapter.draftKey;
+  const inputDraft = draftAdapter.draft;
+  const draftAttachments = draftAdapter.attachments;
   const [isEmpty, setIsEmpty] = useState(!inputDraft.trim());
   const [isSubmitting, setIsSubmitting] = useState(false);
   const consumedRestoreIdRef = useRef<string | null>(null);
-  const editorKey = selectedAgentId ?? "no-agent";
+  const editorKey = draftAdapter.editorKey;
   // Number of in-flight uploads. We track this explicitly (rather than
   // peeking at the editor on every render) so the SubmitButton visibly
   // disables the instant an upload starts and re-enables the instant it
@@ -206,17 +214,16 @@ export function ChatInput({
       onRestoreDraftConsumed?.();
       return;
     }
-    setInputDraft(draftKey, restoreDraftRequest.content);
-    setInputDraftAttachments(draftKey, restoreDraftRequest.attachments ?? []);
+    draftAdapter.setDraft(draftKey, restoreDraftRequest.content);
+    draftAdapter.setAttachments(draftKey, restoreDraftRequest.attachments ?? []);
     setIsEmpty(!restoreDraftRequest.content.trim());
     onRestoreDraftConsumed?.();
   }, [
+    draftAdapter,
     draftKey,
     inputDraft,
     onRestoreDraftConsumed,
     restoreDraftRequest,
-    setInputDraft,
-    setInputDraftAttachments,
   ]);
 
   const handleUpload = useCallback(
@@ -228,14 +235,14 @@ export function ChatInput({
         if (result) {
           const persistedURL = result.markdownLink || result.link;
           uploadMapRef.current.set(persistedURL, result.id);
-          if (result.id) addInputDraftAttachment(draftKey, result);
+          if (result.id) draftAdapter.addAttachment(draftKey, result);
         }
         return result;
       } finally {
         setPendingUploads((n) => Math.max(0, n - 1));
       }
     },
-    [addInputDraftAttachment, draftKey, onUploadFile],
+    [draftAdapter, draftKey, onUploadFile],
   );
 
   // Drop zone wraps the rounded card so a drop anywhere on the input
@@ -278,10 +285,11 @@ export function ChatInput({
       if (isAttachmentReferenced(content, attachment)) activeIds.push(attachment.id);
     }
     const uniqueActiveIds = Array.from(new Set(activeIds));
-    // Capture draft key BEFORE onSend — creating a new session mutates
-    // activeSessionId synchronously, so reading it after onSend would point
-    // at the new session and leave the old draft orphaned.
-    const keyAtSend = draftKey;
+    // Capture the adapter BEFORE onSend — creating a new session mutates the
+    // default adapter's draftKey synchronously, so reading it after onSend
+    // would point at the new session and leave the old draft orphaned.
+    const adapterAtSend = draftAdapter;
+    const keyAtSend = adapterAtSend.draftKey;
     let committed = false;
     const commitInput = (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => {
       if (committed) return;
@@ -306,9 +314,9 @@ export function ChatInput({
       }
       // The sent draft's data is cleared regardless — the message is on its
       // way, so its persisted draft must not resurface.
-      clearInputDraft(keyAtSend);
+      adapterAtSend.clearDraft(keyAtSend);
       for (const key of options?.extraDraftKeys ?? []) {
-        if (key !== keyAtSend) clearInputDraft(key);
+        if (key !== keyAtSend) adapterAtSend.clearDraft(key);
       }
       uploadMapRef.current.clear();
       setIsSubmitting(false);
@@ -378,21 +386,22 @@ export function ChatInput({
       >
         <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
           <ContentEditor
-            // See the editorKey / draftKey split note above — editorKey
-            // intentionally does not depend on activeSessionId.
+            // See the editorKey / draftKey split note on
+            // useGlobalChatDraftAdapter — editorKey intentionally does not
+            // depend on activeSessionId.
             key={editorKey}
             ref={editorRef}
             defaultValue={inputDraft}
             placeholder={placeholder}
             onUpdate={(md) => {
               setIsEmpty(!md.trim());
-              setInputDraft(draftKey, md);
+              draftAdapter.setDraft(draftKey, md);
               if (draftAttachments.length > 0) {
                 const referenced = draftAttachments.filter((attachment) =>
                   isAttachmentReferenced(md, attachment),
                 );
                 if (referenced.length !== draftAttachments.length) {
-                  setInputDraftAttachments(draftKey, referenced);
+                  draftAdapter.setAttachments(draftKey, referenced);
                 }
               }
             }}
@@ -402,6 +411,7 @@ export function ChatInput({
             debounceMs={100}
             mentionMode={contextItems ? "context" : "default"}
             mentionContextItems={contextItems}
+            mentionItemTypes={mentionItemTypes}
             enableSlashCommands
             // Chat is short-form — the floating formatting toolbar is
             // more distraction than feature here.
@@ -439,4 +449,85 @@ export function ChatInput({
       </div>
     </div>
   );
+}
+
+/**
+ * Default adapter: bridges `ChatInputCore` onto the global chat store —
+ * exactly the pre-split behavior (CR-2026-012 DD-9).
+ *
+ * Two keys with deliberately different concerns:
+ *
+ * `draftKey` — zustand storage key. Scopes the in-progress draft per
+ * session so different sessions don't bleed text into each other; for
+ * brand-new chats it falls back to a per-agent slot so switching agents
+ * mid-compose gives each agent its own draft. This is a STORAGE key, not
+ * a React identity.
+ *
+ * `editorKey` — React `key` on the ContentEditor. Forces a fresh editor
+ * instance when the user explicitly switches agent. Placeholder text itself
+ * no longer depends on this: ContentEditor's placeholder-sync effect
+ * refreshes it live (e.g. across archived ↔ active sessions of the SAME
+ * agent, where this key does not change). A cancelled-run draft restore
+ * does NOT bump this key either: it just writes
+ * the restored text into `inputDraft`, and the editor's own
+ * defaultValue-sync effect (content-editor.tsx) pushes it into the live
+ * instance. There is no second copy of the draft to drift or resurface.
+ * Crucially this does NOT include `activeSessionId`: when the user
+ * uploads a file in a brand-new chat, `handleUploadFile` first awaits
+ * `ensureSession` which lazily creates the session and flips
+ * `activeSessionId` from null → uuid mid-upload. If the editor key
+ * depended on session id, that flip would unmount the editor right as
+ * the blob preview was inserted, dropping the in-progress upload's
+ * image node before file-upload.ts could swap it for the CDN URL — the
+ * user would see the image flash on then disappear. Keeping editor
+ * identity stable across the lazy-create event is what makes
+ * first-upload-creates-session work the same as second-upload.
+ */
+export function useGlobalChatDraftAdapter(): ChatInputDraftAdapter {
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const selectedAgentId = useChatStore((s) => s.selectedAgentId);
+  const draftKey = activeSessionId ?? newSessionDraftKey(selectedAgentId);
+  // Select primitives — empty-string fallback keeps referential stability.
+  const draft = useChatStore((s) => s.inputDrafts[draftKey] ?? "");
+  const attachments = useChatStore(
+    (s) => s.inputDraftAttachments[draftKey] ?? EMPTY_ATTACHMENTS,
+  );
+  const setInputDraft = useChatStore((s) => s.setInputDraft);
+  const setInputDraftAttachments = useChatStore((s) => s.setInputDraftAttachments);
+  const addInputDraftAttachment = useChatStore((s) => s.addInputDraftAttachment);
+  const clearInputDraft = useChatStore((s) => s.clearInputDraft);
+  const editorKey = selectedAgentId ?? "no-agent";
+  return useMemo(
+    () => ({
+      draftKey,
+      editorKey,
+      draft,
+      attachments,
+      setDraft: setInputDraft,
+      setAttachments: setInputDraftAttachments,
+      addAttachment: addInputDraftAttachment,
+      clearDraft: clearInputDraft,
+    }),
+    [
+      draftKey,
+      editorKey,
+      draft,
+      attachments,
+      setInputDraft,
+      setInputDraftAttachments,
+      addInputDraftAttachment,
+      clearInputDraft,
+    ],
+  );
+}
+
+/**
+ * The global-chat compose box: `ChatInputCore` wired to the global chat
+ * store via `useGlobalChatDraftAdapter`. Import sites (/chat page, floating
+ * window) keep using this export unchanged; surfaces with their own draft
+ * storage render `ChatInputCore` directly with a custom adapter.
+ */
+export function ChatInput(props: ChatInputProps) {
+  const draftAdapter = useGlobalChatDraftAdapter();
+  return <ChatInputCore {...props} draftAdapter={draftAdapter} />;
 }

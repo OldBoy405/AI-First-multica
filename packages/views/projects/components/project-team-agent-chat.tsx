@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, CheckCircle2, Copy, Loader2, Mic, SendHorizontal, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, Copy, Loader2, Mic, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
@@ -19,11 +19,12 @@ import {
 } from "@multica/core/projects";
 import type { ProjectGateCR } from "@multica/core/api/schemas";
 import { useAuthStore } from "@multica/core/auth";
+import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { agentListOptions } from "@multica/core/workspace/queries";
 import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes";
 import { useAgentPermissions } from "@multica/core/permissions";
-import type { Agent, AgentTask, TimelineEntry } from "@multica/core/types";
+import type { Agent, AgentTask, Attachment, TimelineEntry } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
@@ -32,6 +33,10 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { ReadonlyContent } from "../../editor";
 import { buildTimeline } from "../../common/task-transcript";
 import { TimelineView } from "../../chat/components/chat-message-list";
+import {
+  ChatInputCore,
+  type ChatInputDraftAdapter,
+} from "../../chat/components/chat-input";
 import { CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
@@ -155,6 +160,7 @@ export function ProjectTeamAgentChat({
       <TeamAgentComposer
         projectId={projectId}
         wsId={wsId}
+        issueId={issueId}
         teamAgentId={teamAgentId}
         canConfigure={canConfigure}
       />
@@ -577,14 +583,51 @@ function TaskExecutionCard({
 
 // ─── Composer ─────────────────────────────────────────────────────────────
 
+const EMPTY_DRAFT_ATTACHMENTS: Attachment[] = [];
+
+// CR-2026-012 DD-9/DD-10: bridges ChatInputCore onto the project chat store's
+// `${projectId}:team_agent` slot. Editor identity is constant ("team_agent")
+// — the project pane has no per-agent remount semantics (tech-debt doc §4.3),
+// and draft/attachments persist across tab switches via the store.
+function useTeamAgentDraftAdapter(projectId: string): ChatInputDraftAdapter {
+  const draftKey = projectChatDraftKey(projectId, "team_agent");
+  const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
+  const attachments = useProjectChatStore(
+    (s) => s.draftAttachments[draftKey] ?? EMPTY_DRAFT_ATTACHMENTS,
+  );
+  const setDraft = useProjectChatStore((s) => s.setDraft);
+  const setDraftAttachments = useProjectChatStore((s) => s.setDraftAttachments);
+  const addDraftAttachment = useProjectChatStore((s) => s.addDraftAttachment);
+  return useMemo(
+    () => ({
+      draftKey,
+      editorKey: "team_agent",
+      draft,
+      attachments,
+      // The adapter contract passes the storage key explicitly; this pane's
+      // slot is fixed, so the writers pin projectId/mode and ignore it.
+      setDraft: (_key, content) => setDraft(projectId, "team_agent", content),
+      setAttachments: (_key, atts) =>
+        setDraftAttachments(projectId, "team_agent", atts),
+      addAttachment: (_key, att) =>
+        addDraftAttachment(projectId, "team_agent", att),
+      clearDraft: (_key) => setDraft(projectId, "team_agent", ""),
+    }),
+    [projectId, draftKey, draft, attachments, setDraft, setDraftAttachments, addDraftAttachment],
+  );
+}
+
 export function TeamAgentComposer({
   projectId,
   wsId,
+  issueId,
   teamAgentId,
   canConfigure,
 }: {
   projectId: string;
   wsId: string;
+  /** The chat container issue id — upload scope for composer attachments. */
+  issueId: string;
   /** The configured Team Agent's agent id, when the panel has one. */
   teamAgentId?: string;
   /** Owner/admin — backend exempts them from the full-queue lock, so the
@@ -594,10 +637,14 @@ export function TeamAgentComposer({
   const { t } = useT("projects");
   const { getActorName } = useActorName();
   const qc = useQueryClient();
-  const draftKey = projectChatDraftKey(projectId, "team_agent");
-  const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
-  const setDraft = useProjectChatStore((s) => s.setDraft);
+  const draftAdapter = useTeamAgentDraftAdapter(projectId);
   const { mutateAsync, isPending } = useSendProjectChatMessage(wsId, projectId);
+  const { uploadWithToast } = useFileUpload(api, (err) => toast.error(err.message));
+
+  const handleComposerUpload = useCallback(
+    (file: File) => uploadWithToast(file, { issueId }),
+    [uploadWithToast, issueId],
+  );
 
   // ─── Model selector state (CR-2026-006 TASK-05, TSUG-003) ───────────────
   // The selector binds the Team Agent AGENT's `model` field, not a per-message
@@ -707,13 +754,19 @@ export function TeamAgentComposer({
   // only covers the gap between click and that event / the error toast.
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
 
-  const handleSend = async () => {
-    const content = draft.trim();
-    if (!content || locked || runtimeBlocked || isPending) return;
-    setPendingMessage(content);
+  const handleSend = async (
+    content: string,
+    attachmentIds: string[] | undefined,
+    commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
+  ): Promise<boolean> => {
+    const trimmed = content.trim();
+    if (!trimmed || locked || runtimeBlocked) return false;
+    setPendingMessage(trimmed);
     try {
-      await mutateAsync(content);
-      setDraft(projectId, "team_agent", ""); // success → clear draft
+      await mutateAsync({ content: trimmed, attachmentIds });
+      // Success → clear draft + attachment slot through the adapter.
+      commitInput();
+      return true;
     } catch (e) {
       if (e instanceof ApiError && e.body && typeof e.body === "object") {
         const body = e.body as {
@@ -727,7 +780,7 @@ export function TeamAgentComposer({
           // isn't it — distinct rejection reason from queue_full, must not
           // be conflated into the same banner/copy.
           setPresenterRequired({ presenterUserId: body.presenter_user_id ?? "" });
-          return; // keep the draft so the user can resend once unblocked
+          return false; // keep the draft so the user can resend once unblocked
         }
         if (body.code === "project_queue_full") {
           // Full shared queue: latch the disabled state with the live pair.
@@ -735,16 +788,17 @@ export function TeamAgentComposer({
           if (!canConfigure) {
             setSendQueueFull({ depth: body.queue_depth ?? 0, limit: body.queue_limit ?? 0 });
           }
-          return; // keep the draft so the user can resend on recovery
+          return false; // keep the draft so the user can resend on recovery
         }
         if (body.code === "team_agent_not_configured") {
           // Config drifted — the mutation's onError refreshes the chat context,
           // flipping the panel back to its unconfigured guide. Keep the draft.
-          return;
+          return false;
         }
         // enqueue_failed (502) and everything else: transient — keep the draft.
       }
       toast.error(t(($) => $.chat.stream.send_failed));
+      return false;
     } finally {
       // Cleared on both success and failure: on success the real comment
       // takes over via WS; on failure the draft is preserved so the user can
@@ -841,36 +895,17 @@ export function TeamAgentComposer({
           )}
         </div>
       )}
-      <div className="relative flex items-end gap-2 rounded-lg border bg-card px-3 py-2 transition-colors focus-within:border-brand">
-        <textarea
-          data-testid="project-chat-composer-input"
-          value={draft}
+      {/* CR-2026-012 FR-8: rich composer (attachments + member-only @
+          mentions) on top of the same send/lock/pending machinery above. */}
+      <div data-testid="project-chat-composer">
+        <ChatInputCore
+          draftAdapter={draftAdapter}
+          onSend={handleSend}
+          onUploadFile={handleComposerUpload}
           disabled={locked || runtimeBlocked}
-          rows={1}
-          placeholder={t(($) => $.chat.stream.composer_placeholder)}
-          onChange={(e) => setDraft(projectId, "team_agent", e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void handleSend();
-            }
-          }}
-          className="max-h-32 min-h-[24px] flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
+          isRunning={isPending}
+          mentionItemTypes={["member"]}
         />
-        <Button
-          type="button"
-          size="icon-sm"
-          data-testid="project-chat-send"
-          disabled={locked || runtimeBlocked || isPending || !draft.trim()}
-          onClick={() => void handleSend()}
-          aria-label={t(($) => $.chat.stream.send)}
-        >
-          {isPending ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <SendHorizontal className="h-4 w-4" />
-          )}
-        </Button>
       </div>
     </div>
   );

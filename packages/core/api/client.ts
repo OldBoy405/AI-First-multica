@@ -2023,10 +2023,18 @@ export class ApiClient {
   async sendProjectChatMessage(
     id: string,
     content: string,
+    attachmentIds?: string[],
   ): Promise<ProjectChatSendResult> {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        // CR-2026-012 FR-8: optional attachment binding (older callers omit
+        // the field; the backend treats absence as "no attachments").
+        ...(attachmentIds && attachmentIds.length > 0
+          ? { attachment_ids: attachmentIds }
+          : {}),
+      }),
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
@@ -2072,11 +2080,33 @@ export class ApiClient {
   }
 
   // Project Discussion context (CR-2026-009): the backing container issue id,
-  // lazily created on first call. No agent binding — Discussion never drives one.
+  // lazily created on first call. CR-2026-012 adds the optional Discussion
+  // Coordinator binding (empty = Discussion stays agent-free).
   async getProjectDiscussion(id: string): Promise<ProjectDiscussion> {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/discussion`);
     return parseWithFallback(raw, ProjectDiscussionSchema, EMPTY_PROJECT_DISCUSSION, {
       endpoint: "GET /api/projects/:id/discussion",
+    });
+  }
+
+  // Merge-forward selected Discussion messages to the project Team Agent as
+  // ONE merged message + ONE task (CR-2026-012 DD-7/DD-8). registerCr
+  // appends the requirement-register instruction block to the merged content.
+  // Non-2xx responses (400 invalid_comment_selection / 403 presenter_required
+  // / 409 team_agent_not_configured / 429 project_queue_full / 502
+  // enqueue_failed) throw a structured ApiError the caller branches on; on
+  // 429/403 the caller keeps the multi-select state (DD-6).
+  async mergeForwardDiscussion(
+    projectId: string,
+    commentIds: string[],
+    registerCr: boolean,
+  ): Promise<ProjectChatSendResult> {
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/chat/merge-forward`, {
+      method: "POST",
+      body: JSON.stringify({ comment_ids: commentIds, register_cr: registerCr }),
+    });
+    return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
+      endpoint: "POST /api/projects/:id/chat/merge-forward",
     });
   }
 

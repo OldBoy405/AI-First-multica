@@ -225,6 +225,19 @@ func isTrivialDoneOutput(output string) bool {
 	return false
 }
 
+// issueIsDiscussionContainer reports whether the issue is a project
+// Discussion container (origin_type='project_discussion'). Lookup failures
+// fail closed to false so a transient DB error can never change ordinary
+// suppression behavior — only a positively identified Discussion container
+// earns the exemption (CR-2026-012).
+func (s *TaskService) issueIsDiscussionContainer(ctx context.Context, issueID pgtype.UUID) bool {
+	issue, err := s.Queries.GetIssue(ctx, issueID)
+	if err != nil {
+		return false
+	}
+	return issue.OriginType.Valid && issue.OriginType.String == "project_discussion"
+}
+
 func (s *TaskService) captureTaskQueued(ctx context.Context, task db.AgentTaskQueue) {
 	if s.Metrics != nil {
 		source, runtimeMode, _ := s.taskMetricsContext(ctx, task)
@@ -846,6 +859,18 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 // control is in effect). Every caller other than the project chat send path
 // passes false.
 func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, suppressPreemptPriority, pgtype.UUID{})
+}
+
+// enqueueMentionTaskWithCommentPlanAndOriginator is enqueueMentionTaskWithCommentPlan
+// with an optional explicit originator override (CR-2026-012 TSUG-001). A
+// non-zero explicitOriginator wins over the chain walk — the
+// Discussion-to-Team-Agent route posts its trigger comment through the
+// service (no source_task_id), which resolveOriginatorFromTriggerComment
+// cannot pierce, so the handler resolves the activation human from the route
+// comment's parent chain and passes it here. Zero keeps the ordinary
+// resolveOriginatorForIssueTask semantics.
+func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool, explicitOriginator pgtype.UUID) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -860,7 +885,10 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
 
-	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	originatorUserID := explicitOriginator
+	if !originatorUserID.Valid {
+		originatorUserID = s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	}
 	priority := priorityToInt(issue.Priority)
 	if override, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, originatorUserID); gerr != nil {
 		slog.Info("mention task enqueue rejected: project queue full", "issue_id", util.UUIDToString(issue.ID), "error", gerr)
@@ -1948,7 +1976,12 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 					// decoded into real newlines before the comment hits the DB. See
 					// util.UnescapeBackslashEscapes for the exact contract.
 					body := util.UnescapeBackslashEscapes(payload.Output)
-					if task.TriggerCommentID.Valid && isTrivialDoneOutput(body) {
+					// CR-2026-012: Discussion-container tasks are exempt from trivial
+					// suppression — "a DC activation always produces visible output"
+					// must be a mechanism guarantee, not a prompt convention (review
+					// TSUG-002). Every other comment-triggered task keeps the
+					// suppression.
+					if task.TriggerCommentID.Valid && isTrivialDoneOutput(body) && !s.issueIsDiscussionContainer(ctx, task.IssueID) {
 						slog.Warn("suppressing trivial comment-trigger fallback output",
 							"task_id", util.UUIDToString(task.ID),
 							"issue_id", util.UUIDToString(task.IssueID),

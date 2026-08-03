@@ -1079,6 +1079,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/queue-status", h.GetProjectQueueStatus)
 					r.Get("/chat", h.GetProjectChat)
 					r.Post("/chat/messages", h.SendProjectChatMessage)
+					// CR-2026-012 DD-7: merge-forward a multi-select of Discussion
+					// messages into one Team Agent task (same send kernel as above).
+					r.Post("/chat/merge-forward", h.MergeForwardDiscussion)
 					// AIFIRST: CR governance gates for this project's chat window
 					// (CR-2026-011 TASK-04, D7). Same approvalSvc feature flag as
 					// the workspace-level /crs routes above (SDD DD-8).

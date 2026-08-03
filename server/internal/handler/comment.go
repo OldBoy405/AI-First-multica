@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -1537,6 +1538,17 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 				"error", err)
 		}
 	case commentTriggerSourceMentionAgent:
+		// CR-2026-012 DD-5/DD-6: the two trigger classes admitted on a
+		// Discussion container (coordinator activation ∪ coordinator route to
+		// the Team Agent) need container-specific handling — the route is
+		// re-targeted onto the chat container, and a full queue becomes an
+		// auditable system comment instead of a silent log. Non-Discussion
+		// issues fall straight through to the ordinary enqueue.
+		if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" && issue.ProjectID.Valid {
+			if h.handleDiscussionContainerMentionTrigger(ctx, issue, triggerCommentID, trigger) {
+				return
+			}
+		}
 		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID); err != nil {
 			slog.Warn("enqueue mention agent task failed",
 				"issue_id", uuidToString(issue.ID),
@@ -1576,19 +1588,182 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 	}
 }
 
-func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
-	// CR-2026-009 red line: the Discussion container is the pure-human message
-	// surface — no comment on it may ever enqueue an agent run, regardless of
-	// mentions or reply targets. This is the single choke point all agent
-	// triggers pass through (explicit @agent/@squad mentions, the member-mention
-	// no-op branch, the assigned-squad-leader fallback, and parent-author
-	// continuation all live below), so short-circuiting here covers every
-	// caller — including a comment created directly against the API, not just
-	// through the Discussion tab's own send path.
-	if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
-		return nil
+// handleDiscussionContainerMentionTrigger dispatches the two trigger classes
+// the Discussion filter admits (CR-2026-012 §4.1). Returns true when it
+// consumed the trigger; false lets the caller fall back to the ordinary
+// in-place enqueue (defensive — with the filter in place that only happens
+// when the coordinator binding drifted mid-flight).
+func (h *Handler) handleDiscussionContainerMentionTrigger(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger) bool {
+	coordinatorID, teamAgentID := h.TaskService.ProjectDiscussionAgentIDs(ctx, issue.ProjectID)
+	if !coordinatorID.Valid {
+		return false
 	}
 
+	// Class ②: the coordinator routing converged work to the project Team
+	// Agent — re-target onto the chat container (DD-5).
+	if teamAgentID.Valid && trigger.Agent.ID == teamAgentID {
+		h.retargetDiscussionCoordinatorRoute(ctx, issue, triggerCommentID, coordinatorID, teamAgentID)
+		return true
+	}
+
+	// Class ①: activation — ordinary in-place enqueue on the Discussion
+	// container, except a full queue becomes an auditable system comment
+	// instead of a silent log (DD-6).
+	if trigger.Agent.ID == coordinatorID {
+		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID); err != nil {
+			var full *service.ErrProjectQueueFull
+			if errors.As(err, &full) {
+				h.TaskService.PostDiscussionSystemNotice(ctx, issue, coordinatorID, service.DiscussionQueueFullNotice(full))
+				return true
+			}
+			slog.Warn("enqueue discussion coordinator activation failed",
+				"issue_id", uuidToString(issue.ID),
+				"agent_id", uuidToString(trigger.Agent.ID),
+				"error", err)
+		}
+		return true
+	}
+	return false
+}
+
+// retargetDiscussionCoordinatorRoute implements DD-5: a coordinator-authored
+// @TeamAgent mention on the Discussion container becomes a routing comment on
+// the project chat container plus a Team Agent task hanging on that chat
+// container — the executed work surfaces on the Team Agent pane (AC-3) while
+// the coordinator's own completion output stays in Discussion as the
+// coordination record.
+//
+// TSUG-001 resolution (verified during TASK-03): resolveOriginatorForIssueTask
+// cannot pierce the route comment — service-created comments carry no
+// source_task_id, and its chain walk only reads that column. So this path
+// resolves the activation human explicitly from the trigger comment's parent
+// chain: the coordinator's completion output hangs under the human's
+// activating @-mention (createAgentComment stamps TriggerCommentID as
+// parent), making the parent comment's member author the top-of-chain human.
+// Unresolvable (abnormal chain) → fall through to the a2a unguarded
+// semantics with a log, per task_queue_capacity.go:49-57.
+func (h *Handler) retargetDiscussionCoordinatorRoute(ctx context.Context, issue db.Issue, triggerCommentID, coordinatorID, teamAgentID pgtype.UUID) {
+	triggerComment, err := h.Queries.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+		ID: triggerCommentID, WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil || triggerComment.AuthorType != "agent" || triggerComment.AuthorID != coordinatorID {
+		// Fail closed on container semantics: only a genuine
+		// coordinator-authored routing comment may be re-targeted. The T02
+		// filter guarantees this condition; reaching here means the filter
+		// contract drifted, and enqueuing onto Discussion would violate the
+		// execution-task container boundary.
+		slog.Warn("discussion route re-target skipped: trigger comment is not coordinator-authored",
+			"issue_id", uuidToString(issue.ID),
+			"trigger_comment_id", uuidToString(triggerCommentID))
+		return
+	}
+
+	originator := pgtype.UUID{}
+	if triggerComment.ParentID.Valid {
+		if parent, perr := h.Queries.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+			ID: triggerComment.ParentID, WorkspaceID: issue.WorkspaceID,
+		}); perr == nil && parent.AuthorType == "member" && parent.AuthorID.Valid {
+			originator = parent.AuthorID
+		}
+	}
+	if !originator.Valid {
+		slog.Info("discussion route originator unresolved; keeping a2a direct semantics",
+			"issue_id", uuidToString(issue.ID),
+			"trigger_comment_id", uuidToString(triggerCommentID))
+	}
+
+	// The chat container creator attribution only matters on lazy creation;
+	// use the activation human when resolved.
+	chatIssue, err := h.IssueService.EnsureProjectChatIssue(ctx, issue.WorkspaceID, issue.ProjectID, originator)
+	if err != nil {
+		slog.Warn("discussion route re-target failed: resolve chat container",
+			"issue_id", uuidToString(issue.ID),
+			"error", err)
+		return
+	}
+
+	_, _, err = h.TaskService.RouteDiscussionToTeamAgent(ctx, chatIssue, teamAgentID, coordinatorID, originator, triggerComment.Content)
+	if err != nil {
+		var full *service.ErrProjectQueueFull
+		if errors.As(err, &full) {
+			// DD-6: the auditable notice lands on the Discussion container —
+			// where the activation happened — not on the chat container.
+			h.TaskService.PostDiscussionSystemNotice(ctx, issue, coordinatorID, service.DiscussionQueueFullNotice(full))
+			return
+		}
+		// Any other failure already compensating-deleted the route comment in
+		// the service; nothing visible lingers, so a log is sufficient here.
+		slog.Warn("discussion route enqueue failed",
+			"issue_id", uuidToString(issue.ID),
+			"chat_issue_id", uuidToString(chatIssue.ID),
+			"error", err)
+		return
+	}
+	slog.Info("discussion route re-targeted to team agent chat",
+		"discussion_issue_id", uuidToString(issue.ID),
+		"chat_issue_id", uuidToString(chatIssue.ID),
+		"team_agent_id", uuidToString(teamAgentID),
+		"originator_user_id", uuidToString(originator))
+}
+
+func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
+	// CR-2026-009 red line, CR-2026-012 controlled opening: the Discussion
+	// container is the pure-human message surface — no comment on it may
+	// enqueue an agent run UNLESS the project bound a Discussion Coordinator.
+	// Unconfigured → reject everything, byte-for-byte the old red line.
+	// Configured → compute triggers through the general path and keep only
+	// the two sanctioned classes (DC activation ∪ DC-authored route to the
+	// project Team Agent). This dispatcher is the single choke point all
+	// agent triggers pass through (explicit @agent/@squad mentions, the
+	// member-mention no-op branch, the assigned-squad-leader fallback, and
+	// parent-author continuation all live below), so it covers every caller
+	// — including a comment created directly against the API, not just
+	// through the Discussion tab's own send path.
+	if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
+		coordinatorID, teamAgentID := h.TaskService.ProjectDiscussionAgentIDs(ctx, issue.ProjectID)
+		if !coordinatorID.Valid {
+			return nil
+		}
+		triggers := h.computeCommentAgentTriggersCore(ctx, issue, content, parentComment, actorType, actorID, opts)
+		return filterDiscussionContainerTriggers(triggers, coordinatorID, teamAgentID, actorType, actorID)
+	}
+	return h.computeCommentAgentTriggersCore(ctx, issue, content, parentComment, actorType, actorID, opts)
+}
+
+// filterDiscussionContainerTriggers narrows general-path triggers down to the
+// only two classes allowed on a Discussion container (CR-2026-012 SDD §4.1):
+//
+//  1. activation — the comment @-mentions the Discussion Coordinator itself;
+//  2. routing — a Discussion-Coordinator-authored comment explicitly
+//     @-mentions the project Team Agent (handed to the re-target enqueue in
+//     TASK-03; only the explicit-mention source qualifies).
+//
+// Every other trigger is dropped, so replies to agent parents, thread-root
+// continuation, and assignee/squad fallbacks stay red-lined even with a
+// coordinator bound. A DC @-mentioning itself is excluded — activation must
+// come from a human, never from the coordinator looping on its own output.
+func filterDiscussionContainerTriggers(triggers []commentAgentTrigger, coordinatorID, teamAgentID pgtype.UUID, actorType, actorID string) []commentAgentTrigger {
+	actorUUID, actorErr := util.ParseUUID(actorID)
+	actorIsCoordinator := actorErr == nil && actorType == "agent" && actorUUID == coordinatorID
+
+	filtered := make([]commentAgentTrigger, 0, len(triggers))
+	for _, trigger := range triggers {
+		if trigger.Agent.ID == coordinatorID {
+			if actorIsCoordinator {
+				continue // DC @ DC self-trigger is never a valid activation
+			}
+			filtered = append(filtered, trigger)
+			continue
+		}
+		if actorIsCoordinator && teamAgentID.Valid && trigger.Agent.ID == teamAgentID &&
+			trigger.Source == commentTriggerSourceMentionAgent {
+			filtered = append(filtered, trigger)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) computeCommentAgentTriggersCore(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) []commentAgentTrigger {
 	if isNoteComment(content) {
 		return nil
 	}

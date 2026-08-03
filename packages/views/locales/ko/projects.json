@@ -250,6 +250,29 @@
       "presenter_transferred": "{{from}}님이 발표자 권한을 {{to}}님에게 이전했습니다",
       "presenter_revoked": "{{approver}}님이 {{user}}님의 발표자 권한을 취소했습니다",
       "presenter_released": "{{user}}님이 발표자 권한을 해제했습니다"
+    },
+    "merged_forward": {
+      "select_entry": "선택",
+      "selected_count": "{{count}}개 선택됨",
+      "merge_cta": "팀 Agent로 전달",
+      "preview_title": "팀 Agent로 전달",
+      "trigger_message": "트리거 메시지",
+      "chat_history": "대화 기록",
+      "messages_in_conversation": "메시지 {{count}}개",
+      "register_cr_label": "변경 요청(CR)으로 등록",
+      "confirm": "전달",
+      "cancel": "취소",
+      "success": "팀 Agent로 전달되었습니다",
+      "send_failed": "전달에 실패했습니다. 선택 항목은 유지됩니다. 다시 시도하세요.",
+      "queue_full_error": "팀 Agent 대기열이 가득 찼습니다 ({{depth}}/{{limit}}). 선택 항목은 유지됩니다. 나중에 다시 시도하세요.",
+      "presenter_locked_error": "프레젠터가 단일 쓰기 권한을 보유하고 있습니다. 선택 항목은 유지됩니다. 해제 후 다시 시도하세요."
+    },
+    "dc": {
+      "coordinator_label": "토론 코디네이터",
+      "coordinator_pick_cta": "코디네이터 선택",
+      "coordinator_bound": "코디네이터: {{name}}",
+      "coordinator_setup_failed": "토론 코디네이터 설정에 실패했습니다",
+      "queue_full_notice": "팀 Agent 대기열이 가득 찼습니다 ({{depth}}/{{limit}}). 작업이 대기열에 등록되지 않았습니다."
     }
   },
   "governance": {

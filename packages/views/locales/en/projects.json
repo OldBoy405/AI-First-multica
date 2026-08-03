@@ -253,6 +253,29 @@
       "presenter_transferred": "{{from}} transferred presenter control to {{to}}",
       "presenter_revoked": "{{approver}} revoked {{user}}'s presenter access",
       "presenter_released": "{{user}} released presenter control"
+    },
+    "merged_forward": {
+      "select_entry": "Select",
+      "selected_count": "{{count}} selected",
+      "merge_cta": "Forward to Team Agent",
+      "preview_title": "Forward to Team Agent",
+      "trigger_message": "Trigger message",
+      "chat_history": "Conversation history",
+      "messages_in_conversation": "{{count}} messages",
+      "register_cr_label": "Register as a change request (CR)",
+      "confirm": "Forward",
+      "cancel": "Cancel",
+      "success": "Forwarded to the Team Agent",
+      "send_failed": "Forward failed. Your selection is kept — try again.",
+      "queue_full_error": "The Team Agent queue is full ({{depth}}/{{limit}}). Your selection is kept — try again later.",
+      "presenter_locked_error": "The presenter holds single-writer control. Your selection is kept — try again once it is released."
+    },
+    "dc": {
+      "coordinator_label": "Discussion Coordinator",
+      "coordinator_pick_cta": "Choose coordinator",
+      "coordinator_bound": "Coordinator: {{name}}",
+      "coordinator_setup_failed": "Failed to set the Discussion Coordinator",
+      "queue_full_notice": "The Team Agent queue is full ({{depth}}/{{limit}}). The task was not enqueued."
     }
   },
   "governance": {

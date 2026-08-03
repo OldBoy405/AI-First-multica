@@ -354,19 +354,24 @@ export const EMPTY_PROJECT_CHAT: ProjectChat = {
 };
 
 // Project Discussion context (CR-2026-009): the backing container issue id.
-// Unlike ProjectChat there is no agent binding — Discussion never drives one.
+// CR-2026-012 adds the optional Discussion Coordinator binding: when set,
+// @-mentioning that agent in Discussion activates it (controlled opening of
+// the CR-2026-009 red line); empty keeps Discussion agent-free.
 export interface ProjectDiscussion {
   issue_id: string;
+  coordinator_agent_id: string;
 }
 
 export const ProjectDiscussionSchema = z
   .object({
     issue_id: z.string().default(""),
+    coordinator_agent_id: z.string().default(""),
   })
   .loose();
 
 export const EMPTY_PROJECT_DISCUSSION: ProjectDiscussion = {
   issue_id: "",
+  coordinator_agent_id: "",
 };
 
 // Result of posting a Team Agent chat message (CR-2026-006 TASK-02):

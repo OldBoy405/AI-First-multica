@@ -219,7 +219,7 @@ function ModePane({
       ) : mode === "private_ask" ? (
         <PrivateAskPane projectId={projectId} />
       ) : (
-        <DiscussionPane projectId={projectId} />
+        <DiscussionPane projectId={projectId} canConfigure={canConfigure} />
       )}
     </div>
   );

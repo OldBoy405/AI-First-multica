@@ -5,6 +5,7 @@ import {
   registerForWorkspaceRehydration,
 } from "../platform/workspace-storage";
 import { defaultStorage } from "../platform/storage";
+import type { Attachment } from "../types";
 
 // The three chat modes of a project group-chat window (CR-2026-006).
 export type ProjectChatMode = "team_agent" | "private_ask" | "discussion";
@@ -33,10 +34,31 @@ interface ProjectChatStore {
    * the `{}` initial value below is what they rehydrate onto.
    */
   agentRequestFilter: Record<string, boolean>;
+  /**
+   * `${projectId}:${mode}` → attachment rows referenced by that composer
+   * draft (CR-2026-012 DD-10). Same isolation semantics as `drafts`:
+   * switching tabs or projects never leaks one composer's files into
+   * another. Older persisted snapshots lack this field; the `{}` initial
+   * value below is what they rehydrate onto (zustand's shallow merge keeps
+   * the initial for absent keys).
+   */
+  draftAttachments: Record<string, Attachment[]>;
   setDraft: (projectId: string, mode: ProjectChatMode, text: string) => void;
   setActiveMode: (projectId: string, mode: ProjectChatMode) => void;
   dismissTutorial: (projectId: string, mode: ProjectChatMode) => void;
   setAgentRequestFilter: (projectId: string, value: boolean) => void;
+  /** Replace the draft attachments for a composer slot. */
+  setDraftAttachments: (
+    projectId: string,
+    mode: ProjectChatMode,
+    attachments: Attachment[],
+  ) => void;
+  /** Append (or upsert by id) one attachment row to a composer slot. */
+  addDraftAttachment: (
+    projectId: string,
+    mode: ProjectChatMode,
+    attachment: Attachment,
+  ) => void;
 }
 
 // A dedicated store — deliberately NOT the global chat store, whose
@@ -49,13 +71,19 @@ export const useProjectChatStore = create<ProjectChatStore>()(
       activeMode: {},
       tutorialSeen: {},
       agentRequestFilter: {},
+      draftAttachments: {},
       setDraft: (projectId, mode, text) =>
         set((s) => {
           const key = projectChatDraftKey(projectId, mode);
           const drafts = { ...s.drafts };
           if (text) drafts[key] = text;
           else delete drafts[key];
-          return { drafts };
+          // Clearing the draft also drops its attachment slot — a cleared
+          // composer must not resurrect stale files on the next visit
+          // (DD-10 symmetry with the global chat store's clearInputDraft).
+          const draftAttachments = { ...s.draftAttachments };
+          if (!text) delete draftAttachments[key];
+          return { drafts, draftAttachments };
         }),
       setActiveMode: (projectId, mode) =>
         set((s) => ({ activeMode: { ...s.activeMode, [projectId]: mode } })),
@@ -70,6 +98,26 @@ export const useProjectChatStore = create<ProjectChatStore>()(
         set((s) => ({
           agentRequestFilter: { ...s.agentRequestFilter, [projectId]: value },
         })),
+      setDraftAttachments: (projectId, mode, attachments) =>
+        set((s) => {
+          const key = projectChatDraftKey(projectId, mode);
+          const next = { ...s.draftAttachments };
+          if (attachments.length > 0) next[key] = attachments;
+          else delete next[key];
+          return { draftAttachments: next };
+        }),
+      addDraftAttachment: (projectId, mode, attachment) =>
+        set((s) => {
+          if (!attachment.id) return s;
+          const key = projectChatDraftKey(projectId, mode);
+          const existing = s.draftAttachments[key] ?? [];
+          const nextForKey = existing.some((a) => a.id === attachment.id)
+            ? existing.map((a) => (a.id === attachment.id ? attachment : a))
+            : [...existing, attachment];
+          return {
+            draftAttachments: { ...s.draftAttachments, [key]: nextForKey },
+          };
+        }),
     }),
     {
       name: "multica_project_chat",

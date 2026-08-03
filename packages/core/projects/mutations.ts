@@ -63,7 +63,10 @@ export function useUpdateProject() {
 export function useSendProjectChatMessage(wsId: string, projectId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (content: string) => api.sendProjectChatMessage(projectId, content),
+    // CR-2026-012 FR-8: attachment ids ride along the same send (backend
+    // binds them to the chat comment); absent/empty keeps prior behavior.
+    mutationFn: (vars: { content: string; attachmentIds?: string[] }) =>
+      api.sendProjectChatMessage(projectId, vars.content, vars.attachmentIds),
     onError: (err) => {
       if (err instanceof ApiError && err.status === 409) {
         qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
@@ -168,6 +171,23 @@ export function useSetProjectTeamAgent(wsId: string, projectId: string) {
       api.updateProject(projectId, { settings: { team_agent_id: agentId } }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+    },
+  });
+}
+
+// Bind (or rebind) the project's Discussion Coordinator (CR-2026-012 DD-1):
+// writes settings.discussion_coordinator_agent_id, mirrored on the Team
+// Agent binding above. Invalidates the Discussion context query so the pane
+// header flips to the configured state.
+export function useSetProjectDiscussionCoordinator(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) =>
+      api.updateProject(projectId, {
+        settings: { discussion_coordinator_agent_id: agentId },
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.discussion(wsId, projectId) });
     },
   });
 }

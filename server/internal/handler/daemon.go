@@ -1549,6 +1549,18 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			resp.WorkspaceID = uuidToString(issue.WorkspaceID)
 			resp.ThreadName = issue.Title
 
+			// CR-2026-012: the Discussion container is a coordination-only
+			// surface — any task hanging on it (today only Discussion
+			// Coordinator runs) must execute read-only. The rule is keyed on
+			// the CONTAINER, not the agent, so a future task kind landing on
+			// the Discussion issue inherits the same sandbox. The daemon
+			// reuses the whole CR-2026-008 ask-only chain (no Repositories
+			// brief section, `multica repo checkout` rejected). The chat
+			// session ask-only rule below is untouched.
+			if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
+				resp.AskOnly = true
+			}
+
 			// Squad-leader briefing injection: keyed off the task being a
 			// leader-task (is_leader_task) carrying a squad_id — NOT off the
 			// issue being assigned to a squad. The task flag is stamped at
