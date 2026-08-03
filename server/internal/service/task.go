@@ -859,6 +859,18 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 // control is in effect). Every caller other than the project chat send path
 // passes false.
 func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, suppressPreemptPriority, pgtype.UUID{})
+}
+
+// enqueueMentionTaskWithCommentPlanAndOriginator is enqueueMentionTaskWithCommentPlan
+// with an optional explicit originator override (CR-2026-012 TSUG-001). A
+// non-zero explicitOriginator wins over the chain walk — the
+// Discussion-to-Team-Agent route posts its trigger comment through the
+// service (no source_task_id), which resolveOriginatorFromTriggerComment
+// cannot pierce, so the handler resolves the activation human from the route
+// comment's parent chain and passes it here. Zero keeps the ordinary
+// resolveOriginatorForIssueTask semantics.
+func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool, explicitOriginator pgtype.UUID) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -873,7 +885,10 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
 	}
 
-	originatorUserID := s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	originatorUserID := explicitOriginator
+	if !originatorUserID.Valid {
+		originatorUserID = s.resolveOriginatorForIssueTask(ctx, issue, triggerCommentID)
+	}
 	priority := priorityToInt(issue.Priority)
 	if override, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, originatorUserID); gerr != nil {
 		slog.Info("mention task enqueue rejected: project queue full", "issue_id", util.UUIDToString(issue.ID), "error", gerr)
