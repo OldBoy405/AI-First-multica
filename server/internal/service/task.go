@@ -759,9 +759,12 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:              issue.AssigneeID,
-		RuntimeID:            agent.RuntimeID,
-		IssueID:              issue.ID,
+		AgentID:   issue.AssigneeID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
+		// serialize this task against the project's shared worktree.
+		ProjectID:            issue.ProjectID,
 		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
@@ -833,10 +836,16 @@ func (s *TaskService) EnqueueTaskForSquadLeaderWithHandoff(ctx context.Context, 
 }
 
 func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote)
+	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote, false)
 }
 
-func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string) (db.AgentTaskQueue, error) {
+// suppressPreemptPriority, when true, keeps the enqueued task at its ordinary
+// issue-priority tier even if the caller would otherwise qualify for the
+// owner/admin preempt tier (CR-2026-010 DD-6: an active presenter's own
+// messages must not be jumped by owner/admin queue-priority while presenter
+// control is in effect). Every caller other than the project chat send path
+// passes false.
+func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
@@ -856,14 +865,17 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	if override, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, originatorUserID); gerr != nil {
 		slog.Info("mention task enqueue rejected: project queue full", "issue_id", util.UUIDToString(issue.ID), "error", gerr)
 		return db.AgentTaskQueue{}, gerr
-	} else if override != 0 {
+	} else if override != 0 && !suppressPreemptPriority {
 		priority = override
 	}
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		AgentID:              agentID,
-		RuntimeID:            agent.RuntimeID,
-		IssueID:              issue.ID,
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
+		// serialize this task against the project's shared worktree.
+		ProjectID:            issue.ProjectID,
 		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
@@ -910,9 +922,12 @@ func (s *TaskService) EnqueueDeferredAssigneeFallback(ctx context.Context, issue
 
 	isLeader := squadID.Valid
 	task, err := s.Queries.CreateDeferredAgentTask(ctx, db.CreateDeferredAgentTaskParams{
-		AgentID:             agentID,
-		RuntimeID:           agent.RuntimeID,
-		IssueID:             issue.ID,
+		AgentID:   agentID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   issue.ID,
+		// AIFIRST: CR-2026-010 stamps project_id so the promoted task can
+		// serialize against the project's shared worktree.
+		ProjectID:           issue.ProjectID,
 		Priority:            priorityToInt(issue.Priority),
 		TriggerCommentID:    triggerCommentID,
 		TriggerSummary:      s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
@@ -1399,6 +1414,54 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 		}
 
 		claimedTask := task
+
+		// AIFIRST: CR-2026-010 project-wide single-writer recheck.
+		// ClaimAgentTask's NOT EXISTS check runs under READ COMMITTED, so two
+		// agents claiming for the same project can both pass it before
+		// either commits (see agent.sql). Taking the advisory lock here,
+		// inside the same transaction as the UPDATE above, closes the race:
+		// a concurrent claimant for this project either already committed
+		// (and is visible to the recheck below) or is blocked on this same
+		// lock (and cannot commit until we do). Scoped to project-linked
+		// tasks only; the three pre-existing serialization branches are
+		// unaffected and never reach this block.
+		if claimedTask.ProjectID.Valid {
+			lockKey := strings.Join([]string{"claim-project", util.UUIDToString(claimedTask.ProjectID)}, "|")
+			if lockErr := qtx.LockIssueDuplicateKey(ctx, lockKey); lockErr != nil {
+				outcome = "error_claim_project_lock"
+				return fmt.Errorf("lock claim project key: %w", lockErr)
+			}
+			conflicts, cErr := qtx.CountActiveProjectTasksExcluding(ctx, db.CountActiveProjectTasksExcludingParams{
+				ProjectID: claimedTask.ProjectID,
+				ID:        claimedTask.ID,
+			})
+			if cErr != nil {
+				outcome = "error_claim_project_recheck"
+				return fmt.Errorf("recheck project claim: %w", cErr)
+			}
+			if conflicts > 0 {
+				// Lost the race: another agent's claim for this project
+				// committed first. Requeue; the daemon polls again next
+				// cycle and may pick up a different (or the same, now
+				// uncontested) task.
+				if _, rErr := qtx.RequeueAgentTaskAfterClaimFailure(ctx, db.RequeueAgentTaskAfterClaimFailureParams{
+					TaskID:       claimedTask.ID,
+					RuntimeID:    claimedTask.RuntimeID,
+					DispatchedAt: claimedTask.DispatchedAt,
+				}); rErr != nil {
+					outcome = "error_claim_project_requeue"
+					return fmt.Errorf("requeue after project claim conflict: %w", rErr)
+				}
+				slog.Info("task claim: lost project single-writer race, requeued",
+					"task_id", util.UUIDToString(claimedTask.ID),
+					"project_id", util.UUIDToString(claimedTask.ProjectID),
+					"agent_id", util.UUIDToString(agentID),
+				)
+				outcome = "project_claim_conflict"
+				return nil
+			}
+		}
+
 		claimed = &claimedTask
 		return nil
 	})
@@ -2376,7 +2439,7 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 		util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
 		return s.enqueueIssueTaskWithCommentPlan(ctx, issue, triggerCommentID, coalescedCommentIDs, true, "")
 	}
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "")
+	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", false)
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of

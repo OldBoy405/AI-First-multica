@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multica 项目深度解析报告</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1d23;
+    --muted: #5c6470;
+    --border: #e4e7ec;
+    --accent: #3b6fe0;
+    --accent-soft: #eef3fe;
+    --code-bg: #0d1117;
+    --card-bg: #f8f9fb;
+    --warn-bg: #fff8e6;
+    --warn-border: #f0d47a;
+    --ok-bg: #edf9f0;
+    --ok-border: #9fd8ae;
+    --sidebar-w: 300px;
+    --radius: 10px;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.75;
+  }
+  /* ---------- 布局 ---------- */
+  .layout { display: flex; min-height: 100vh; }
+  nav.toc {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding: 24px 16px 60px;
+    background: var(--card-bg);
+  }
+  nav.toc h2 { font-size: 0.95rem; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; margin: 8px 8px 12px; }
+  nav.toc a {
+    display: block; padding: 5px 10px; border-radius: 6px;
+    color: var(--fg); text-decoration: none; font-size: 0.88rem;
+  }
+  nav.toc a:hover { background: var(--accent-soft); color: var(--accent); }
+  nav.toc a.l2 { padding-left: 26px; font-size: 0.82rem; color: var(--muted); }
+  nav.toc a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  main {
+    flex: 1; min-width: 0;
+    max-width: 1020px;
+    padding: 48px 56px 120px;
+    margin: 0 auto;
+  }
+  @media (max-width: 980px) {
+    nav.toc { display: none; }
+    main { padding: 24px 20px 80px; }
+  }
+  /* ---------- 排版 ---------- */
+  h1 { font-size: 2.1rem; line-height: 1.3; margin: 0 0 6px; }
+  .subtitle { color: var(--muted); font-size: 1.02rem; margin-bottom: 28px; }
+  h2 {
+    font-size: 1.55rem; margin: 64px 0 18px; padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+  }
+  h2 .num { color: var(--accent); margin-right: 10px; }
+  h3 { font-size: 1.18rem; margin: 40px 0 12px; }
+  h4 { font-size: 1.02rem; margin: 28px 0 8px; }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  code {
+    font-family: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+    background: #eef1f5; padding: 1px 6px; border-radius: 5px; font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg); border-radius: var(--radius);
+    padding: 16px 18px; overflow-x: auto; font-size: 0.84rem; line-height: 1.6;
+  }
+  pre code { background: transparent; padding: 0; color: #e6edf3; font-size: inherit; }
+  table {
+    border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.88rem;
+  }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--card-bg); font-weight: 600; }
+  tr:nth-child(even) td { background: #fcfcfd; }
+  ul, ol { padding-left: 26px; }
+  li { margin: 5px 0; }
+  /* ---------- 组件 ---------- */
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 22px; margin: 18px 0;
+  }
+  .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 0 var(--radius) var(--radius) 0; padding: 12px 18px; margin: 16px 0; }
+  .callout.warn { border-color: var(--warn-border); background: var(--warn-bg); }
+  .callout.ok { border-color: var(--ok-border); background: var(--ok-bg); }
+  .callout .t { font-weight: 700; display: block; margin-bottom: 4px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 22px; }
+  .badge {
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid #c9d9f7; border-radius: 999px;
+    font-size: 0.78rem; padding: 3px 12px; font-weight: 600;
+  }
+  .mermaid { margin: 22px auto; text-align: center; background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  figure { margin: 22px 0; }
+  figcaption { text-align: center; color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .top-link { position: fixed; right: 22px; bottom: 22px; background: var(--accent); color: #fff; border-radius: 999px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; text-decoration: none; font-size: 1.1rem; box-shadow: 0 4px 14px rgba(59,111,224,.35); }
+  svg text { font-family: inherit; }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" id="toc">
+  <h2>目录</h2>
+  <a href="#sec1">1. 设计理念与目标</a>
+  <a href="#sec2">2. 整体架构分析</a>
+  <a class="l2" href="#sec2-topo">2.1 系统拓扑</a>
+  <a class="l2" href="#sec2-mono">2.2 Monorepo 与依赖方向</a>
+  <a class="l2" href="#sec2-task">2.3 任务执行生命周期</a>
+  <a class="l2" href="#sec2-state">2.4 状态管理架构</a>
+  <a href="#sec3">3. 各模块功能结构</a>
+  <a class="l2" href="#sec3-server">3.1 server/ — Go 后端</a>
+  <a class="l2" href="#sec3-web">3.2 apps/web — Next.js</a>
+  <a class="l2" href="#sec3-desktop">3.3 apps/desktop — Electron</a>
+  <a class="l2" href="#sec3-mobile">3.4 apps/mobile — Expo/RN</a>
+  <a class="l2" href="#sec3-docs">3.5 apps/docs — 文档站</a>
+  <a class="l2" href="#sec3-pkg">3.6 packages/ — 共享包</a>
+  <a class="l2" href="#sec3-deploy">3.7 deploy/helm — 部署</a>
+  <a href="#sec4">4. 环境搭建与运行指南</a>
+  <a class="l2" href="#sec4-quick">4.1 一键启动</a>
+  <a class="l2" href="#sec4-env">4.2 环境变量</a>
+  <a class="l2" href="#sec4-make">4.3 Makefile 目标</a>
+  <a class="l2" href="#sec4-worktree">4.4 Worktree 并行开发</a>
+  <a class="l2" href="#sec4-selfhost">4.5 自托管部署</a>
+  <a href="#sec5">5. 使用方法详解</a>
+  <a class="l2" href="#sec5-flow">5.1 五分钟上手路径</a>
+  <a class="l2" href="#sec5-cli">5.2 CLI 与守护进程</a>
+  <a class="l2" href="#sec5-agent">5.3 触发智能体的四种方式</a>
+  <a href="#sec6">6. 最佳实践案例</a>
+</nav>
+<main>
+<h1>Multica 项目深度解析报告</h1>
+<p class="subtitle">AI 原生任务管理平台 · 架构 / 模块 / 环境搭建 / 使用指南 / 最佳实践 &nbsp;·&nbsp; 生成日期：2026-07-28</p>
+<div class="badges">
+  <span class="badge">Go 1.26 + Chi + sqlc</span>
+  <span class="badge">Next.js 16</span>
+  <span class="badge">Electron 39</span>
+  <span class="badge">Expo 55 / RN 0.83</span>
+  <span class="badge">PostgreSQL 17 + sqlc</span>
+  <span class="badge">pnpm + Turborepo</span>
+  <span class="badge">Helm / Docker Compose</span>
+</div>
+
+<!-- ============ 1 ============ -->
+<h2 id="sec1"><span class="num">1</span>设计理念与目标</h2>
+<p>Multica 的口号是 <strong>“Your next 10 hires won't be human”（你的下 10 位新员工不会是人类）</strong>。它是一个开源的<strong>托管智能体平台（managed agents platform）</strong>：把编码智能体变成真正的团队成员——你像给同事派活一样把 Issue 指派给智能体，它自主领取任务、写代码、汇报阻塞、发表评论、更新状态。</p>
+<p>名字来源：<strong>Mul</strong>tiplexed <strong>I</strong>nformation and <strong>C</strong>omputing <strong>A</strong>gent——致敬分时操作系统 Multics，寓意人类与智能体在同一团队中“分时复用”协作。</p>
+
+<h3>1.1 核心设计哲学</h3>
+<div class="card">
+<ul>
+  <li><strong>智能体是一等公民（Agents as Teammates）</strong>：智能体拥有档案、出现在看板上、可被指派/评论/@提及，是多态的 assignee（<code>assignee_type + assignee_id</code> 可指向成员或智能体）。与人类不同：它会自主开工，且不接收任何收件箱通知。</li>
+  <li><strong>厂商中立（Vendor-neutral）</strong>：支持 14 种智能体 CLI——Claude Code、Codex、GitHub Copilot CLI、Gemini、Cursor Agent、OpenCode、Kimi 等。平台不绑定任何模型厂商。</li>
+  <li><strong>本地执行、隐私优先</strong>：智能体永远运行在<strong>用户自己的机器</strong>上（通过本地 daemon），服务器永远看不到你的 API Key、代码目录和授权工具链。云端和自托管都遵循这一原则。</li>
+  <li><strong>人机混合团队</strong>：Squads（小队）可以把智能体和人类编入同一小组，由一个 Leader 智能体负责路由分工（@FrontendTeam 而不是 @alice-or-bob）。</li>
+  <li><strong>可自托管的开源产品</strong>：Docker Compose 两条命令起全栈，或用 Helm chart 上 Kubernetes。</li>
+</ul>
+</div>
+
+<h3>1.2 工程理念（从代码库归纳）</h3>
+<ul>
+  <li><strong>防御性 API 边界</strong>：前端所有网络 JSON 必须经 zod schema + <code>parseWithFallback</code> 解析，永不 <code>as T</code> 硬转——因为已安装的桌面客户端可能连接更新版本的后端，响应漂移不能白屏。</li>
+  <li><strong>严格的状态二分法</strong>：TanStack Query 独占服务器状态，Zustand 独占客户端/视图状态，二者不得互相镜像。</li>
+  <li><strong>三层共享包 + 单向依赖</strong>：<code>views → core + ui</code>，core 与 ui 相互独立；平台差异全部收敛到适配器（NavigationAdapter / StorageAdapter / LocaleAdapter）。</li>
+  <li><strong>移动端刻意独立</strong>：只共享类型和纯函数，“复制设计而非复制导入”，UI 可以为手机场景自由发挥，但产品语义（计数、权限、枚举、数据身份）必须与 Web 完全一致。</li>
+  <li><strong>推送优先的实时性</strong>：React Query 默认 <code>staleTime: Infinity</code>，数据新鲜度靠 WebSocket 推送而非轮询。</li>
+  <li><strong>内部代码不留兼容层</strong>：非边界代码禁止兼容垫片/双写/遗留适配器；被替换的流程直接删除旧路径。</li>
+</ul>
+
+<h3>1.3 核心产品概念</h3>
+<table>
+<tr><th>概念</th><th>说明</th></tr>
+<tr><td><strong>Workspace</strong></td><td>自包含的协作空间；每个 Issue、成员、评论、智能体都恰好属于一个工作区。所有查询按 <code>workspace_id</code> 过滤，<code>X-Workspace-ID</code> 请求头选择工作区。</td></tr>
+<tr><td><strong>Issue</strong></td><td>工作的核心单元，可指派给人或智能体；具有状态/优先级/截止日期/看板排序位置、子 Issue、所属项目、元数据键值对和订阅者。</td></tr>
+<tr><td><strong>Project</strong></td><td>聚合相关 Issue；Project Resources 可挂接类型化的资源指针（Git 仓库、本地目录）作为智能体的上下文范围。</td></tr>
+<tr><td><strong>Agent</strong></td><td>一等工作区成员：可指派、可评论、可 @ 提及；自主开工，不收通知。</td></tr>
+<tr><td><strong>Runtime</strong></td><td>计算环境 = “daemon × 一个 AI 编码工具”。一台装了 Claude Code + Codex、加入 2 个工作区的机器会注册 <strong>4</strong> 个 Runtime。</td></tr>
+<tr><td><strong>Task</strong></td><td>每次智能体运行的单元。状态机：<code>queued → dispatched → running → completed | failed</code>（外加 <code>cancelled</code>；可重试的失败回到 queued）。超时保护：派发后 5 分钟未启动、运行超 2.5 小时判超时，服务器每 30 秒扫描。</td></tr>
+<tr><td><strong>Autopilot</strong></td><td>周期性/触发式的智能体工作（cron、webhook、手动）；每次运行创建一个 Issue 并路由给智能体。</td></tr>
+<tr><td><strong>Skill</strong></td><td>附加给智能体的可复用知识包，兼容 Anthropic Agent Skills 开放标准。</td></tr>
+<tr><td><strong>Inbox / Chat</strong></td><td>Inbox 是人类被打断的地方（指派、提及、订阅动态、失败任务）；Chat 是与智能体的私密 1:1 会话，完全沙箱化（智能体看不到 Issue），通过 provider 会话恢复保持多轮上下文。</td></tr>
+</table>
+
+<!-- ============ 2 ============ -->
+<h2 id="sec2"><span class="num">2</span>整体架构分析</h2>
+
+<h3 id="sec2-topo">2.1 系统拓扑</h3>
+<p>Multica 是典型的“云端协调 + 本地执行”架构：服务器负责任务编排、状态与实时推送；智能体的实际执行发生在用户机器上的 daemon 里。</p>
+<div class="mermaid">
+flowchart TB
+  subgraph Clients["客户端层"]
+    WEB["apps/web<br/>Next.js 16 App Router"]
+    DESK["apps/desktop<br/>Electron 39 + react-router"]
+    MOB["apps/mobile<br/>Expo 55 / React Native 0.83"]
+    DOCS["apps/docs<br/>Next.js 15 + Fumadocs"]
+    CLI["multica CLI<br/>(Go 单二进制)"]
+  end
+  subgraph Shared["共享包 (raw TS, 由消费方编译)"]
+    VIEWS["packages/views<br/>业务页面/组件"]
+    CORE["packages/core<br/>API 客户端 · Query · Store"]
+    UI["packages/ui<br/>原子组件 · 设计令牌"]
+  end
+  subgraph Server["服务端 (Go 1.26)"]
+    API["cmd/server<br/>Chi 路由 · REST API"]
+    WS["gorilla/websocket<br/>实时事件推送"]
+    MIG["cmd/migrate<br/>数据库迁移"]
+  end
+  DB[("PostgreSQL 17<br/>sqlc · pg_trgm/pg_bigm")]
+  subgraph Local["用户本机"]
+    DAEMON["multica daemon<br/>轮询领取任务"]
+    AGENTS["本地智能体 CLI ×14<br/>claude / codex / gemini / ..."]
+  end
+  WEB --> VIEWS --> CORE
+  DESK --> VIEWS
+  VIEWS --> UI
+  MOB -. "仅 import type + 纯函数" .-> CORE
+  DOCS -. "仅 @multica/ui" .-> UI
+  WEB & DESK & MOB -- "REST /api/*" --> API
+  WEB & DESK & MOB -- "WS /ws" --> WS
+  CLI --> API
+  API --> DB
+  MIG --> DB
+  DAEMON -- "轮询任务 / 心跳 / 回传结果" --> API
+  DAEMON --> AGENTS
+</div>
+
+<h3 id="sec2-mono">2.2 Monorepo 与依赖方向</h3>
+<p>仓库使用 pnpm workspaces（<code>apps/*</code> + <code>packages/*</code>）+ Turborepo。共享包导出<strong>原始 <code>.ts</code>/<code>.tsx</code></strong>（通过 package.json 的 exports 映射），由消费应用自行编译——因此 Turbo 的 <code>typecheck</code> 任务采用拓扑依赖（<code>^typecheck</code>），且 <code>test</code>/<code>lint</code> 都以 typecheck 为门槛。</p>
+<div class="mermaid">
+flowchart LR
+  subgraph apps
+    web[apps/web]
+    desktop[apps/desktop]
+    mobile[apps/mobile]
+    docsapp[apps/docs]
+  end
+  views[packages/views]
+  core[packages/core]
+  ui[packages/ui]
+  web --> views
+  desktop --> views
+  views --> core
+  views --> ui
+  mobile -. "import type / 纯函数" .-> core
+  docsapp -.-> ui
+  style core fill:#eef3fe,stroke:#3b6fe0
+  style ui fill:#eef3fe,stroke:#3b6fe0
+  style views fill:#eef3fe,stroke:#3b6fe0
+</div>
+<div class="callout">
+<span class="t">硬性边界约束（CLAUDE.md 明文规定）</span>
+<ul style="margin:6px 0">
+  <li><code>packages/core</code>：禁止 react-dom、localStorage（用 StorageAdapter）、process.env、UI 库。</li>
+  <li><code>packages/ui</code>：禁止导入 @multica/core，禁止业务逻辑。</li>
+  <li><code>packages/views</code>：禁止 next/*、react-router-dom、stores——用 NavigationAdapter / useNavigation() / &lt;AppLink&gt;。</li>
+  <li>共享依赖统一走 pnpm <code>catalog:</code>（一处定版本，杜绝两个 React / 两个 zod）；mobile 的 Expo/RN 相关版本单独锁定。</li>
+</ul>
+</div>
+
+<h3 id="sec2-task">2.3 任务执行生命周期</h3>
+<p>智能体执行的核心链路：服务器只做编排，daemon 在用户本机领取任务、创建隔离工作目录、拉起对应的智能体 CLI、把结果流式回传。</p>
+<div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 用户 (Web/桌面/CLI)
+  participant S as Go Server
+  participant D as 本地 Daemon
+  participant A as 智能体 CLI (claude/codex...)
+  U->>S: 指派 Issue 给智能体 (REST)
+  S->>S: 创建 Task (queued)
+  D->>S: 轮询 (每 3s) 领取任务
+  S-->>D: Task → dispatched
+  D->>D: 创建隔离工作目录
+  D->>A: 拉起智能体进程
+  S-->>U: WebSocket 推送状态变更
+  A-->>D: 流式输出 / 评论 / 状态更新
+  D->>S: 回传进度与结果 (心跳 15s)
+  S-->>U: WS 实时更新 (running → completed/failed)
+</div>
+<figure>
+<svg viewBox="0 0 860 130" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Task 状态机">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5c6470"/>
+    </marker>
+  </defs>
+  <g font-size="14" font-weight="600" text-anchor="middle">
+    <rect x="20" y="40" width="120" height="42" rx="21" fill="#eef3fe" stroke="#3b6fe0"/><text x="80" y="66" fill="#3b6fe0">queued</text>
+    <rect x="220" y="40" width="130" height="42" rx="21" fill="#eef3fe" stroke="#3b6fe0"/><text x="285" y="66" fill="#3b6fe0">dispatched</text>
+    <rect x="430" y="40" width="120" height="42" rx="21" fill="#fff8e6" stroke="#d9ab26"/><text x="490" y="66" fill="#8a6d00">running</text>
+    <rect x="640" y="8" width="130" height="42" rx="21" fill="#edf9f0" stroke="#3d9e5c"/><text x="705" y="34" fill="#22703c">completed</text>
+    <rect x="640" y="74" width="130" height="42" rx="21" fill="#fdeeee" stroke="#d16060"/><text x="705" y="100" fill="#a33">failed</text>
+  </g>
+  <g stroke="#5c6470" stroke-width="1.6" fill="none" marker-end="url(#arr)">
+    <line x1="140" y1="61" x2="216" y2="61"/>
+    <line x1="350" y1="61" x2="426" y2="61"/>
+    <path d="M550 52 C 590 40, 610 32, 636 30"/>
+    <path d="M550 70 C 590 82, 610 90, 636 94"/>
+    <path d="M700 116 C 500 160, 200 150, 78 86" stroke-dasharray="5 4"/>
+  </g>
+  <g font-size="11" fill="#5c6470" text-anchor="middle">
+    <text x="178" y="52">daemon 领取</text>
+    <text x="388" y="52">进程启动</text>
+    <text x="400" y="150">可重试失败 → 回到 queued（虚线）</text>
+    <text x="285" y="102">5 分钟未启动判超时</text>
+    <text x="490" y="102">运行上限 2.5h</text>
+  </g>
+</svg>
+<figcaption>图：Task 状态机与超时保护（服务器每 30 秒扫描一次）</figcaption>
+</figure>
+
+<h3 id="sec2-state">2.4 状态管理架构</h3>
+<p>前端状态被严格切成两半，这是整个代码库最具纪律性的约定之一：</p>
+<table>
+<tr><th></th><th>TanStack Query（服务器状态）</th><th>Zustand（客户端状态）</th></tr>
+<tr><td>管什么</td><td>Issues、用户、工作区、收件箱、智能体、成员——一切来自 API 的数据</td><td>筛选器、草稿、模态框、标签页布局、导航历史</td></tr>
+<tr><td>缓存策略</td><td><code>staleTime: Infinity</code>，新鲜度靠 WebSocket 推送（patch 或 invalidate）</td><td><code>persist</code> 中间件 + 工作区命名空间存储（<code>key:slug</code>）</td></tr>
+<tr><td>Key 约定</td><td>工作区级 Query Key 必须包含 <code>wsId</code>；key 工厂区分“失效前缀”与“完整 key”</td><td>共享 store 只能放 <code>packages/core</code>；selector 必须返回稳定引用</td></tr>
+<tr><td>禁区</td><td>WS 事件严禁把服务器数据镜像进 Zustand</td><td>严禁持久化服务器数据或临时 UI 状态</td></tr>
+</table>
+<div class="callout ok">
+<span class="t">乐观更新准则</span>
+只有同时满足四个条件才允许乐观更新：结果本地可预测、用户停留在同一屏（无导航）、失败罕见、回滚trivial。典型场景是状态/指派/开关字段的 patch。会导航或需确认的流程（创建、删除、退出）必须先等服务器响应；聊天发送采用“pending 消息”模式——立即渲染可见的等待态并支持失败重试，而不是静默乐观。
+</div>
+
+<!-- ============ 3 ============ -->
+<h2 id="sec3"><span class="num">3</span>各模块功能结构</h2>
+
+<h3 id="sec3-server">3.1 server/ — Go 后端服务</h3>
+<p>Go 模块 <code>github.com/multica-ai/multica/server</code>，Go <strong>1.26.1</strong>。没有 Web 框架（仅 Chi 路由）、没有 ORM（sqlc 生成类型安全查询）、没有迁移库（手写运行器）。</p>
+
+<h4>入口二进制（cmd/）</h4>
+<table>
+<tr><th>二进制</th><th>职责</th></tr>
+<tr><td><code>cmd/server</code></td><td>API 服务器：启动 slog、特性开关、pgx 连接池、事件总线、两个 WebSocket Hub、Redis 中继、指标注册表，然后构建路由。还承载后台工作者：运行时清扫器（标记失联 Runtime 离线）、Autopilot 失败监控、批量心跳调度器、DB 调度器、渠道 Supervisor。优雅关闭有明确顺序：HTTP 排空 → 清扫器 → 心跳刷写 → 渠道 Supervisor → 指标。</td></tr>
+<tr><td><code>cmd/multica</code></td><td>单一 cobra 二进制 = CLI + daemon。命令组：issue/project/agent/autopilot/workspace/skill/squad/chat + daemon/runtime + auth/login/setup/config/update。智能体自己也会调用这个 CLI（如 <code>multica repo checkout</code>）。</td></tr>
+<tr><td><code>cmd/migrate</code></td><td>迁移运行器 <code>up|down</code>（详见下文）。</td></tr>
+<tr><td><code>cmd/backfill_*</code></td><td>两个一次性运维回填工具。</td></tr>
+</table>
+
+<h4>internal/ 包职责（核心部分）</h4>
+<table>
+<tr><th>包</th><th>规模</th><th>职责</th></tr>
+<tr><td><code>internal/handler</code></td><td>183 文件</td><td>HTTP 处理器，每个领域一个文件（issue.go、agent.go、chat.go、runtime*.go、daemon.go…）；<code>handler.go</code> 的 Handler 结构体携带全部服务与存储。</td></tr>
+<tr><td><code>internal/service</code></td><td>24 文件</td><td>业务逻辑；最大的是 <code>task.go</code>（任务队列 enqueue/claim/生命周期）；<code>issue_trigger.go</code> 决定一次 Issue 写入是否触发智能体运行。</td></tr>
+<tr><td><code>internal/middleware</code></td><td>18 文件</td><td>auth、daemon_auth、workspace（X-Workspace-ID/slug 作用域）、限流、CSP、请求日志。</td></tr>
+<tr><td><code>internal/realtime</code></td><td>11 文件</td><td>面向浏览器的 WS Hub + Redis 扇出。</td></tr>
+<tr><td><code>internal/daemonws</code></td><td>4 文件</td><td>面向 <strong>daemon</strong> 的独立 WS Hub（任务唤醒通知）。</td></tr>
+<tr><td><code>internal/events</code></td><td>2 文件</td><td><strong>同步的</strong>进程内发布/订阅总线，是领域事件的唯一接缝。</td></tr>
+<tr><td><code>internal/daemon</code> + <code>daemon/execenv</code></td><td>51 + 33 文件</td><td>本地智能体运行时（编进 CLI）：注册、工作区同步、心跳、领取循环；execenv 负责每任务隔离执行环境（工作目录、注入上下文文件、各 provider 专属配置、git、技能物化）。</td></tr>
+<tr><td><code>internal/scheduler</code></td><td>14 文件</td><td>基于 <code>sys_cron_executions</code> 表的分布式 DB Cron（用量小时汇总、Autopilot 触发）。</td></tr>
+<tr><td><code>internal/integrations/*</code></td><td>~120 文件</td><td>渠道引擎（平台无关的入站聊天运行时）+ Lark/飞书（WS 长连接）+ Slack（Socket Mode）+ Composio（MCP 应用连接）。</td></tr>
+<tr><td><code>pkg/agent</code></td><td>66 文件</td><td>统一的编码智能体后端抽象（见下）。</td></tr>
+<tr><td><code>pkg/db</code></td><td>38 SQL + 41 生成文件</td><td>sqlc 输入/输出；~72 个行类型。</td></tr>
+<tr><td><code>pkg/redact</code> / <code>pkg/taskfailure</code></td><td>—</td><td>智能体输出写库/广播前的密钥检测脱敏；失败原因规范分类法。</td></tr>
+</table>
+
+<h4>路由与中间件（cmd/server/router.go，~1490 行）</h4>
+<p>全局中间件链：RequestID → ClientMetadata → RequestLogger → HTTP 指标 → Recoverer → CSP → CORS。路由分四大组：</p>
+<ul>
+  <li><strong>公开组</strong>：<code>/health</code>、<code>/readyz</code>、<code>/ws</code>、认证端点（每 IP Redis 限流）、Webhook（凭证在载荷里：GitHub HMAC-SHA256、Autopilot token、Stripe）。</li>
+  <li><strong>Daemon 组</strong>：<code>/api/daemon/*</code>，专用 DaemonAuth——注册/心跳/WS/任务领取（claim、prepare-lease）/生命周期回调（start/progress/complete/fail/usage）。</li>
+  <li><strong>用户级保护组</strong>：<code>/api/me</code>、PAT 管理、邀请、计费（额外 <code>RequireHumanActor</code>——任务令牌被 403）。</li>
+  <li><strong>工作区作用域组</strong>：issues/labels/projects/squads/autopilots/agents/skills/chat/inbox 等全部业务端点，由 <code>RequireWorkspaceMember</code> 把守；URL 参数型工作区路由再分 member/admin/owner 三档角色。</li>
+</ul>
+<h4>认证令牌模型（前缀分派）</h4>
+<table>
+<tr><th>前缀</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>mat_</code></td><td>智能体任务令牌</td><td>服务器按任务铸造；绑定单一工作区、标记 <code>X-Actor-Source: task_token</code>，被账户级端点拒绝——智能体的 API 权限被严格限制在任务作用域内</td></tr>
+<tr><td><code>mul_</code></td><td>个人访问令牌（PAT）</td><td>哈希查找 + Redis 缓存，异步更新 last_used_at；CLI 登录默认 90 天</td></tr>
+<tr><td><code>mdt_</code></td><td>daemon 令牌</td><td>仅 DaemonAuth 路径</td></tr>
+<tr><td><code>mcn_</code></td><td>Cloud Node PAT</td><td>远程向 Fleet 服务校验；未配置 Fleet 时直接 401，绝不降级放行</td></tr>
+<tr><td>（无前缀）</td><td>JWT</td><td>浏览器会话</td></tr>
+</table>
+<p>中间件会先<strong>剥掉客户端自带的 <code>X-Actor-Source</code></strong> 再走分支，然后由服务器重新盖章 <code>X-User-ID</code>/<code>X-Workspace-ID</code>——身份头永远不可伪造。工作区解析优先级：任务令牌绑定（不可覆盖）→ 中间件上下文 → <code>X-Workspace-Slug</code> 头 → 查询参数 → <code>X-Workspace-ID</code> 头。非成员一律返回 404（不泄漏存在性）。</p>
+
+<h4>数据库</h4>
+<ul>
+  <li><strong>pgx/v5 + pgxpool</strong>，无 ORM；另建一个小连接池专供指标采样器，防止卡住的抓取饿死请求流量。</li>
+  <li><strong>sqlc</strong>：查询在 <code>pkg/db/queries/</code>（38 个 .sql 按领域划分），schema 即 <code>migrations/</code>，生成到 <code>pkg/db/generated</code>。</li>
+  <li><strong>迁移</strong>：198 对 up/down；跨副本并发安全靠<strong>会话级 advisory lock</strong>（固定在单个连接上）+ <code>schema_migrations</code> 版本表跳过已应用项；刻意不包成单事务（部分迁移用 <code>CREATE INDEX CONCURRENTLY</code>）；支持按版本号挂前置钩子。<code>/readyz</code> 校验磁盘上<strong>每个</strong>版本都已记录，而非只看最新。</li>
+  <li><strong>扩展</strong>：pgcrypto、pg_trgm、pg_bigm（Issue 全文/三元组搜索）。<strong>未使用 pgvector</strong>——虽然镜像是 pgvector/pg17，但没有任何向量列或嵌入。</li>
+</ul>
+
+<h4>实时系统：两个独立的 WebSocket Hub</h4>
+<div class="mermaid">
+flowchart LR
+  H["Handler / Service"] -- "同步 events.Bus" --> L["cmd/server/listeners.go<br/>事件 → WS 载荷"]
+  L --> B["Broadcaster 接口"]
+  B --> HUB["realtime.Hub<br/>作用域房间: workspace / user / task / chat"]
+  B --> RELAY["ShardedStreamRelay<br/>Redis Streams ×8 分片<br/>跨节点扇出"]
+  RELAY --> HUB2["其他 API 节点的 Hub"]
+  HUB --> BR["浏览器客户端<br/>GET /ws"]
+  HUB2 --> BR2["浏览器客户端"]
+  W["service.TaskWakeupNotifier"] --> DH["daemonws.Hub<br/>GET /api/daemon/ws"]
+  DH -- "task_available 唤醒提示" --> DM["本地 Daemon<br/>(领取仍走 HTTP claim)"]
+</div>
+<ul>
+  <li><strong>浏览器 Hub</strong>（internal/realtime）：连接即自动订阅 <code>workspace:{id}</code> 与 <code>user:{id}</code>，task/chat 等更细作用域通过 subscribe 帧按需订阅并经 ScopeAuthorizer 授权。个人事件（inbox、邀请）只走 <code>SendToUser</code>，永不进工作区广播。</li>
+  <li><strong>多节点扇出</strong>：设置 REDIS_URL 后由 <code>REALTIME_RELAY_MODE</code> 选择——默认 <code>sharded</code>（Redis Streams，8 分片、MAXLEN 10 万、5 分钟启动重放窗口，客户端用 ULID 去重）；保留 legacy pub/sub 与 dual 双写模式用于迁移。中继读/写/存储使用独立 Redis 客户端，阻塞式流读取不会饿死请求路径。</li>
+  <li><strong>Daemon Hub</strong>（internal/daemonws）：唤醒是纯提示（低延迟），任务领取仍走 HTTP claim——WS 断连不影响正确性，只影响延迟。</li>
+</ul>
+
+<h4>智能体子系统</h4>
+<ul>
+  <li><strong>多态指派</strong>：<code>issue.assignee_type ∈ {member, agent, squad}</code> + <code>assignee_id</code>。<code>issue_trigger.go</code> 决定写入是否触发运行（指派触发 / 从 backlog 提升状态触发），并通过 <code>preview-trigger</code> 端点让 UI 在写入前预演同一决策。</li>
+  <li><strong>TaskService</strong>：拥有 <code>agent_task_queue</code> 表和全部入口（按 Issue/提及/线程/小队 Leader/快速创建/聊天 enqueue），每次入队还会计算该任务的 Composio MCP overlay；Redis <code>EmptyClaimCache</code> 短路“该 Runtime 无任务”的空轮询。</li>
+  <li><strong>pkg/agent 统一后端</strong>：一个 <code>Backend</code> 接口——<code>Execute(ctx, prompt, ExecOptions) (*Session, error)</code>，Session 流式产出统一的 Message（text/thinking/tool-use/tool-result/status/error）。14 种后端全部是<strong>子进程包装器</strong>而非 API 客户端（如拉起 <code>claude --output-format stream-json</code> 解析 NDJSON）。<code>ExecOptions</code> 归一化跨厂商关注点（模型、系统提示、超时、会话恢复 ResumeSessionID、MCP 配置、思考等级），后端对不理解的字段选择忽略而非报错。</li>
+  <li><strong>内置技能</strong>：<code>go:embed</code> 嵌入 8 个 <code>multica-</code> 前缀技能（working-on-issues、creating-agents、squads 等），每个智能体在工作区技能之上自动获得。</li>
+  <li><strong>渠道引擎</strong>：Lark（WS 长连接）与 Slack（Socket Mode）注册到平台无关的 Registry/Supervisor/Router，共享与 HTTP 相同的 IssueService/TaskService——消息突发经防抖批处理折叠成一次智能体运行；各集成按环境变量门控，未配置时返回 503 而不阻塞启动。</li>
+</ul>
+
+<h4>关键依赖（go.mod 精选）</h4>
+<table>
+<tr><th>依赖</th><th>版本</th><th>用途</th></tr>
+<tr><td>go-chi/chi/v5</td><td>v5.2.5</td><td>HTTP 路由</td></tr>
+<tr><td>jackc/pgx/v5</td><td>v5.9.2</td><td>PostgreSQL 驱动 + 连接池（sqlc 目标）</td></tr>
+<tr><td>gorilla/websocket</td><td>v1.5.3</td><td>浏览器 WS、daemon WS、Lark 长连接</td></tr>
+<tr><td>redis/go-redis/v9</td><td>v9.18.0</td><td>中继、缓存、限流</td></tr>
+<tr><td>golang-jwt/jwt/v5</td><td>v5.3.1</td><td>会话 JWT</td></tr>
+<tr><td>spf13/cobra</td><td>v1.10.2</td><td>CLI</td></tr>
+<tr><td>openai/openai-go/v3</td><td>v3.41.1</td><td>pkg/llm 内部辅助（聊天标题生成）</td></tr>
+<tr><td>prometheus/client_golang</td><td>v1.23.2</td><td>指标</td></tr>
+<tr><td>slack-go/slack · resend-go/v2 · robfig/cron/v3 · oklog/ulid/v2 · AWS SDK v2</td><td>—</td><td>Slack / 邮件 / cron 解析 / 事件 ID / S3 与 CloudFront</td></tr>
+</table>
+
+<h3 id="sec3-web">3.2 apps/web — Next.js Web 应用</h3>
+<p><strong>技术栈</strong>：Next.js <code>^16.2.5</code>（App Router、ESM），构建刻意使用 <code>--webpack</code>（fumadocs-mdx@12 在 Next 16 Turbopack 下不兼容）。编辑器为 TipTap 3.27（表格、@提及、代码高亮、Markdown 等大量扩展），UI 基于 @base-ui/react + shadcn 4，数据层为 TanStack Query + Zustand + zod。</p>
+<h4>路由结构（app/）</h4>
+<table>
+<tr><th>路由组</th><th>内容</th></tr>
+<tr><td><code>(auth)</code></td><td>login、onboarding、invitations、invite/[id]、workspaces/new</td></tr>
+<tr><td><code>(landing)</code></td><td>营销页：首页、about、changelog、contact-sales、download、usecases/[slug]</td></tr>
+<tr><td><code>[workspaceSlug]/</code></td><td>认证后的应用壳。<code>layout.tsx</code> 是认证 + onboarding + 工作区解析的门卫；<code>(dashboard)</code> 组下有 issues、projects、my-issues、inbox、chat、agents/[id]、autopilots/[id]、skills/[id]、squads/[id]、runtimes/[id]、members/[id]、settings、usage、billing</td></tr>
+<tr><td>集成回调</td><td>auth/callback、lark/bind、slack/bind；另有 robots.ts / sitemap.ts</td></tr>
+</table>
+<p><strong>关键设计</strong>：<code>apps/web/platform/</code> 目录只有一个文件——<code>navigation.tsx</code>（Web 版 NavigationAdapter，包装 next/navigation，提供 <code>prefetch</code>）。几乎全部 UI 都住在 <code>packages/views</code> 里（web 自己的 components/ 只有 3 个文件）。工作区身份由路由驱动：<code>[workspaceSlug]/layout.tsx</code> 在渲染阶段调用 <code>setCurrentWorkspace(slug, id)</code>，保证第一个子查询就带上正确的 <code>X-Workspace-Slug</code> 请求头。</p>
+
+<h3 id="sec3-desktop">3.3 apps/desktop — Electron 桌面应用</h3>
+<p><strong>技术栈</strong>：Electron 39 + electron-vite 5 + electron-builder 26 + electron-updater；渲染层为 React + react-router-dom 7（内存路由）+ Tailwind 4。</p>
+<h4>三进程结构（src/）</h4>
+<ul>
+  <li><strong>main/</strong>：创建 BrowserWindow（hiddenInset 标题栏）、注册 <code>multica://</code> 协议、大量 IPC 模块——<code>daemon-manager.ts</code>（管理本地 daemon 生命周期）、<code>cli-bootstrap.ts</code>、<code>updater.ts</code>、快捷键/手势/右键菜单/外链安全打开等，大多带同目录测试。</li>
+  <li><strong>preload/</strong>：contextBridge 暴露 <code>desktopAPI</code>（运行时配置、通知、未读角标、目录选择等）与 <code>daemonAPI</code>（start/stop/restart/syncToken/日志流）。</li>
+  <li><strong>renderer/</strong>：React 应用，含独有的<strong>多标签页系统</strong>。</li>
+</ul>
+<h4>标签页系统（桌面独有）</h4>
+<p><code>stores/tab-store.ts</code> 用 Zustand + persist 维护 <code>byWorkspace: Record&lt;slug, {tabs, activeTabId}&gt;</code>——<strong>每个 Tab 拥有自己独立的 react-router DataRouter</strong>（<code>createMemoryRouter</code>）和历史索引；固定（pinned）标签排最前、仅图标、不可关闭，任何改变路径的跳转会自动开新标签。<code>tab-content.tsx</code> 用 React 的 <code>&lt;Activity mode="visible"|"hidden"&gt;</code> 渲染所有标签，隐藏标签保留 DOM 与状态。</p>
+<h4>WindowOverlay：预工作区流程不是路由</h4>
+<p>创建工作区、接受邀请、onboarding 这类“一次性动作”在桌面端被建模为窗口级覆盖层状态（<code>stores/window-overlay-store.ts</code>），而不是路由——因为桌面 URL 不可见、标签系统会尝试持久化路由、邀请深链没有分发目标。这是 CLAUDE.md 中“Transition flows are WindowOverlay state, not routes”规则的实现。</p>
+<h4>导航适配器的三个拦截器</h4>
+<p>桌面版 NavigationAdapter 在委托给 react-router 之前依次尝试：<code>tryRouteToOverlay</code>（过渡路径 → 窗口覆盖层）、<code>tryRouteToOtherWorkspace</code>（前导 slug 不同 → 切换工作区）、<code>tryRouteToPinnedNewTab</code>（固定标签上的路径变更 → 开新标签）。<code>push("/login")</code> 被直接翻译成登出。</p>
+
+<h3 id="sec3-mobile">3.4 apps/mobile — Expo / React Native</h3>
+<p><strong>技术栈</strong>（锁定基线）：Expo SDK 55、React Native 0.83.6、React 19.2.0（直接锁定、不走 catalog）、expo-router 55、<strong>NativeWind 4 + Tailwind 3.4</strong>（与 web/desktop 的 Tailwind 4 刻意不同——NativeWind 5 尚不稳定）、react-native-reusables 组件约定、TanStack Query 5（移动端自有 QueryClient）、expo-secure-store 存 token。</p>
+<div class="callout warn">
+<span class="t">移动端独立性原则</span>
+Mobile 只允许从 <code>@multica/core</code> 导入<strong>类型（import type）和纯函数</strong>（实测：types ×90、日期工具 ×6 等），完全不引用 @multica/ui / @multica/views。UI 与交互可以为手机自由发挥，但四件事必须与 web/desktop 完全一致：<strong>计数与可见性、权限、状态枚举与流转、数据身份</strong>。有记录的事故：mobile 直接渲染原始 <code>GET /api/inbox</code> 行，显示 3 个未读点而 web 显示 1 个——修复是把 <code>deduplicateInboxItems</code> 的逻辑镜像到 <code>apps/mobile/lib/inbox-display.ts</code>。教训被固化为规则：渲染列表前必须先查 core 里有没有 dedupe/coalesce 预处理。
+</div>
+<p><strong>路由</strong>（expo-router 文件路由）：<code>(auth)/login+verify</code> → <code>(app)/[workspace]/(tabs)/</code>（inbox、my-issues、chat、more）→ Issue/Project 详情栈 + 各种 formSheet 选择器。<strong>实时策略</strong>分三层：无 React 的 <code>ws-client.ts</code>（指数退避 + 全抖动）→ <code>realtime-provider.tsx</code>（随认证/工作区/AppState/NetInfo 重挂载）→ 每特性的订阅 hook；蜂窝数据规则是 <strong>patch 优先于 invalidate</strong>。移动端自己维护 <code>data/realtime/*-ws-updaters.ts</code>，明令禁止导入 core 的版本（“copy the design, not the import”）。</p>
+
+<h3 id="sec3-docs">3.5 apps/docs — 文档站</h3>
+<p>Next.js 15 + Fumadocs 15，<code>basePath: /docs</code>，由 web 应用的 rewrite 代理（<code>/docs/*</code> → <code>DOCS_URL</code>，默认 4000 端口）。<strong>四语言</strong>（en 默认无前缀 / zh / ko / ja），文件名点后缀模式（<code>page.zh.mdx</code>），共 136 个 MDX 文件。内容分区：入门（how-multica-works、cloud-quickstart、self-host-quickstart）、Workspace & team、Agents、How agents run、Collaborating with agents、Inbox、Integrations、Self-hosting & ops、Reference（CLI/令牌/桌面/移动）、Developers（conventions 命名与 i18n 词汇表——CLAUDE.md 指定的唯一权威来源）。文档站与应用运行时完全解耦：只依赖 @multica/ui 的 4 个导入。</p>
+
+<h3 id="sec3-pkg">3.6 packages/ — 共享包结构</h3>
+<h4>packages/core — 无头业务逻辑层</h4>
+<p>按<strong>领域</strong>组织（不是按技术层）：issues/、inbox/、agents/、chat/、runtimes/、projects/、autopilots/、billing/ 等 20+ 领域文件夹，每个领域内重复同一套文件词汇：<code>queries.ts</code>（key 工厂 + queryOptions）、<code>mutations.ts</code>、<code>ws-updaters.ts</code>（把 WS 增量直接打进 Query 缓存）、<code>stores/</code>。package.json 有约 110 个 exports 子路径入口，根 barrel 刻意极小。</p>
+<ul>
+  <li><strong>ApiClient 单例</strong>：模块级 Proxy 单例（boot 时 <code>setApiInstance()</code>），~89KB 的单类；预初始化访问返回 undefined 以兼容 HMR。</li>
+  <li><strong>parseWithFallback</strong>（api/schema.ts）：<code>safeParse</code> 成功返回数据，失败记录 warn 并返回 fallback，<strong>永不抛出</strong>——契约漂移让页面降级而不是白屏。schema 约定：枚举保持 <code>z.string()</code>（未知值仍可解析）、可选字段 union null、数组 <code>.default([])</code>、每个对象以 <code>.loose()</code> 结尾。</li>
+  <li><strong>工作区感知存储</strong>：<code>createWorkspaceAwareStorage</code> 把持久化 key 命名空间化为 <code>key:slug</code>；无活跃工作区时读返回 null、<strong>写直接丢弃</strong>（曾经的裸 key 回退导致状态跨工作区泄漏）。</li>
+  <li><strong>paths/</strong>：零依赖 URL 构建器，共享代码导航的强制入口（<code>paths.workspace(slug).issueDetail(id)</code>，22 个构建器），保留 slug 列表由脚本生成。</li>
+  <li><strong>i18n 三入口拆分</strong>：<code>i18n</code>（服务器安全，零 React/DOM）、<code>i18n/react</code>（react-i18next 会在模块加载时 createContext，在 RSC 下会崩）、<code>i18n/browser</code>（碰 document.cookie）——让错误在 import 处就暴露。</li>
+</ul>
+<h4>packages/ui — 原子组件与设计令牌</h4>
+<p>shadcn CLI 管理但基于 <strong>Base UI</strong>（style: base-nova，不是 Radix）。57 个 ui 原语 + 12 个 common 组件 + Markdown 渲染管线（react-markdown + Shiki + KaTeX）。<code>styles/tokens.css</code> 用 Tailwind 4 的 <code>@theme inline</code> 把工具类映射到 CSS 变量，<strong>全部颜色为 oklch()</strong>，半径由单一 <code>--radius</code> 派生；web 与 desktop 导入完全相同的令牌文件。</p>
+<h4>packages/views — 共享业务视图层</h4>
+<p>完整的功能屏幕：issues（52 个组件）、inbox、agents、chat、settings（14 个标签页组件）、layout（应用壳：DashboardLayout/AppSidebar/DashboardGuard）等。两个关键机制：</p>
+<ul>
+  <li><strong>NavigationAdapter 端口</strong>（navigation/types.ts）：必选成员是 Next.js 与 react-router 能力的交集；两个可选成员精确编码平台差异——<code>openInNewTab?</code>（仅桌面标签页）与 <code>prefetch?</code>（仅 Web RSC）。<code>NavigationProvider</code> 把 push/replace 包进 <code>useTransition</code>，给出跨平台一致的 pending 信号；<code>AppLink</code> 渲染真实 <code>&lt;a href&gt;</code>（中键/复制链接/无障碍可用）再 preventDefault 走适配器，修饰键点击委托给 openInNewTab。</li>
+  <li><strong>i18n</strong>：4 语言 × 25 命名空间 = 100 个 JSON；<code>parity.test.ts</code> 从磁盘推导命名空间清单并断言 EN 与其他语言的 key 完全对齐（归一化 i18next 复数后缀，因为中文没有语法数）；eslint-plugin-i18next 禁止硬编码文案。</li>
+</ul>
+<h4>packages/tsconfig</h4>
+<p>两个配置：<code>base.json</code>（ESNext、bundler resolution、strict + <code>noUncheckedIndexedAccess</code> 等额外严格项）与 <code>react-library.json</code>；core/ui/views 均继承后者。</p>
+
+<h3 id="sec3-deploy">3.7 deploy/helm/multica — 部署架构</h3>
+<div class="mermaid">
+flowchart TB
+  subgraph NS["Kubernetes 命名空间 (每命名空间一个 release)"]
+    ING1["Ingress: multica.dev.lan → :3000"]
+    ING2["Ingress: api.multica.dev.lan → :8080"]
+    FE["Deployment: multica-frontend<br/>(multica-web 镜像)"]
+    BE["Deployment: multica-backend<br/>entrypoint: migrate up → server"]
+    ALIAS["Service 'backend' (ExternalName)<br/>兼容镜像内嵌的 REMOTE_API_URL"]
+    PG["Deployment: multica-postgres<br/>pgvector/pg17 + 10Gi PVC"]
+    UP[("uploads PVC 5Gi RWO<br/>(未配 S3 时)")]
+    CM["ConfigMap: 非机密配置"]
+    SEC["Secret: multica-secrets<br/>(kubectl 手工创建, 不入 git)"]
+  end
+  ING1 --> FE
+  ING2 --> BE
+  FE --> ALIAS --> BE
+  BE --> PG
+  BE --- UP
+  CM --> BE
+  SEC --> BE
+</div>
+<ul>
+  <li><strong>无子 chart、无迁移 Job</strong>：迁移在后端容器 entrypoint 内执行（<code>./migrate up && exec ./server</code>），用 <code>startupProbe</code>（30×10s ≈ 5 分钟预算）保证 Pod 不在迁移中被杀；并发安全靠 Postgres 会话级 advisory lock。</li>
+  <li><strong>Secret 永不模板化</strong>：chart 只引用 <code>existingSecret: multica-secrets</code>，由运维用 <code>kubectl create secret</code> 带外创建；Pod 模板带 <code>checksum/config</code> 与 <code>checksum/secret</code>（live lookup）注解，保证 helm upgrade 后滚动更新。</li>
+  <li><strong>ExternalName 别名的妥协</strong>：multica-web 镜像在构建期烘焙了 <code>REMOTE_API_URL=http://backend:8080</code>，Next.js standalone 不会在运行时重估 rewrite 目标，所以 chart 附带一个字面叫 <code>backend</code> 的 ExternalName Service——代价是每命名空间只能装一个 release。</li>
+  <li><strong>chart 里没有任何 AI 供应商密钥</strong>——模型凭证不是服务器的关心事项，智能体在用户机器上用本地 CLI 的认证运行。</li>
+  <li><strong>daemon 不由任何部署产物承载</strong>：它是客户端组件，通过 Homebrew / install.sh / 桌面应用内置分发。</li>
+</ul>
+<h4>Docker 镜像</h4>
+<ul>
+  <li><code>Dockerfile</code>（后端，两阶段）：golang:1.26-alpine 静态编译 <strong>5 个二进制</strong>（server、multica、migrate、两个 backfill 工具）→ alpine:3.21 运行时 + 迁移文件 + entrypoint。</li>
+  <li><code>Dockerfile.web</code>（三阶段）：deps（只拷 lockfile + 各 workspace 的 package.json 做层缓存）→ builder（offline 重装修复被 COPY 破坏的 pnpm 符号链接，standalone 构建）→ runner（node:22-alpine 非 root 运行）。</li>
+</ul>
+
+<!-- ============ 4 ============ -->
+<h2 id="sec4"><span class="num">4</span>环境搭建与运行指南</h2>
+
+<h3 id="sec4-quick">4.1 一键启动（本地开发）</h3>
+<p><strong>前置要求</strong>（由 <code>scripts/dev.sh</code> 强制校验）：Node.js 20+、pnpm 10.28+、Go 1.26+、Docker（必须是 <code>docker compose</code> 插件，拒绝旧版 docker-compose v1）。</p>
+<pre><code class="language-bash">git clone https://github.com/multica-ai/multica.git
+cd multica
+make dev</code></pre>
+<p><code>make dev</code>（即 <code>scripts/dev.sh</code>）依次执行：</p>
+<div class="mermaid">
+flowchart LR
+  A["校验 node/pnpm/go/docker"] --> B{".git 是文件?<br/>(worktree 检测)"}
+  B -- 是 --> C["ENV_FILE=.env.worktree<br/>(缺失则自动生成)"]
+  B -- 否 --> D["ENV_FILE=.env<br/>(缺失则 cp .env.example)"]
+  C & D --> E["source 环境 + 派生端口变量"]
+  E --> F["pnpm install<br/>(仅当 node_modules 缺失)"]
+  F --> G["ensure-postgres.sh<br/>docker compose up -d postgres<br/>pgvector:pg17 + 建库"]
+  G --> H["go run ./cmd/migrate up"]
+  H --> I["并行启动<br/>go run ./cmd/server (:8080)<br/>pnpm dev:web (:3000)"]
+</div>
+<p>启动后：前端 <code>http://localhost:3000</code>，后端 <code>http://localhost:8080</code>（健康检查 <code>/health</code>、依赖感知 <code>/readyz</code>）。登录验证码在未配邮件服务时会打印到后端 stdout（<code>[DEV] Verification code for ...</code>），或设置 <code>MULTICA_DEV_VERIFICATION_CODE=888888</code> 获得确定性验证码（仅限本地，production 下被忽略）。</p>
+
+<h3 id="sec4-env">4.2 关键环境变量（.env.example）</h3>
+<table>
+<tr><th>类别</th><th>变量</th><th>说明</th></tr>
+<tr><td>数据库</td><td><code>DATABASE_URL</code> / <code>POSTGRES_DB|USER|PASSWORD|PORT</code></td><td>默认 <code>postgres://multica:multica@localhost:5432/multica</code></td></tr>
+<tr><td>认证</td><td><code>JWT_SECRET</code></td><td>生产部署<strong>必须</strong>修改（make selfhost 会自动注入随机值）</td></tr>
+<tr><td>端口</td><td><code>PORT=8080</code> / <code>FRONTEND_PORT=3000</code> / <code>FRONTEND_ORIGIN</code></td><td>大多数派生变量由脚本自动计算</td></tr>
+<tr><td>本地开发</td><td><code>MULTICA_DEV_VERIFICATION_CODE</code></td><td>固定登录验证码；严禁用于公网实例</td></tr>
+<tr><td>邮件</td><td><code>RESEND_API_KEY</code> 或 <code>SMTP_*</code></td><td>登录验证码投递；SMTP_HOST 存在时 SMTP 优先</td></tr>
+<tr><td>内部 LLM</td><td><code>MULTICA_LLM_API_KEY|BASE_URL|DEFAULT_MODEL</code></td><td>仅用于聊天标题生成等内部辅助；<strong>运行智能体不需要任何模型 API Key</strong>（智能体走本地 CLI 自己的认证）；两项为空时该层静默禁用</td></tr>
+<tr><td>存储</td><td><code>S3_BUCKET</code> 等 / <code>LOCAL_UPLOAD_DIR</code></td><td>附件存储，S3 未配置时落本地目录</td></tr>
+<tr><td>注册管控</td><td><code>ALLOW_SIGNUP</code> / <code>ALLOWED_EMAIL_DOMAINS</code> / <code>DISABLE_WORKSPACE_CREATION</code></td><td>自托管邀请制的常用组合；运行时从 <code>/api/config</code> 读取，改后只需重启后端</td></tr>
+<tr><td>Daemon</td><td><code>MULTICA_DAEMON_POLL_INTERVAL=3s</code> / <code>HEARTBEAT_INTERVAL=15s</code> / <code>MULTICA_&lt;AGENT&gt;_PATH|MODEL</code></td><td>每种智能体 CLI 可单独覆盖路径与模型</td></tr>
+</table>
+
+<h3 id="sec4-make">4.3 Makefile 目标速查</h3>
+<table>
+<tr><th>目标</th><th>作用</th></tr>
+<tr><td><code>make dev</code></td><td>自动检测环境 + 完整引导 + 启动（推荐入口）</td></tr>
+<tr><td><code>make setup</code> / <code>start</code> / <code>stop</code></td><td>安装依赖+建库+迁移 / 并行启动前后端 / 按端口杀进程（不停 Postgres）</td></tr>
+<tr><td><code>make server</code> / <code>daemon</code></td><td>只跑 Go 服务器 / 以 local profile 重启本地 daemon</td></tr>
+<tr><td><code>make test</code></td><td>Go 测试（-race；pkg/agent 限制并发）</td></tr>
+<tr><td><code>make check</code></td><td>五步流水线：typecheck → vitest → go test → 按需起服务 → Playwright</td></tr>
+<tr><td><code>make sqlc</code></td><td>SQL 变更后重新生成 sqlc 代码</td></tr>
+<tr><td><code>make migrate-up</code> / <code>migrate-down</code> / <code>db-reset</code></td><td>迁移管理；db-reset 拒绝远程库，只重建当前 POSTGRES_DB</td></tr>
+<tr><td><code>make selfhost</code> / <code>selfhost-build</code> / <code>selfhost-stop</code></td><td>自托管：拉官方镜像 / 本地构建 / 停止</td></tr>
+<tr><td><code>make build</code></td><td>产出 server/bin/{server,multica,migrate}</td></tr>
+</table>
+<p>前端侧常用：<code>pnpm dev:web</code>、<code>pnpm dev:desktop</code>（自动隔离渲染端口/应用名）、<code>pnpm dev:docs</code>、<code>pnpm dev:mobile</code>、<code>pnpm typecheck</code>、<code>pnpm test</code>、<code>pnpm lint</code>、<code>pnpm exec playwright test</code>、<code>pnpm ui:add &lt;component&gt;</code>。</p>
+
+<h3 id="sec4-worktree">4.4 Worktree 并行开发（值得借鉴的设计）</h3>
+<p>所有 git worktree 共享<strong>一个</strong> PostgreSQL 容器（端口 5432 不变），隔离发生在<strong>数据库名</strong>层面。<code>scripts/init-worktree-env.sh</code> 从 worktree 路径确定性地派生一切：</p>
+<pre><code class="language-bash"># slug = 目录名小写化; offset = cksum(路径) % 1000
+POSTGRES_DB=multica_${slug}_${offset}
+PORT=$((18080 + offset))            # 后端
+FRONTEND_PORT=$((13000 + offset))   # 前端</code></pre>
+<p>于是主检出（multica/8080/3000）与任意多个 worktree（如 multica_my_feature_702 / 18782 / 13702）可同时运行。桌面开发再叠一层：<code>DESKTOP_RENDERER_PORT = 5174 + offset</code>、独立应用名后缀、独立 daemon profile（<code>~/.multica/profiles/dev-&lt;slug&gt;-&lt;hash&gt;/</code>）。</p>
+<div class="callout warn">
+<span class="t">已知陷阱</span>
+① 永远不要把 <code>.env</code> 复制进 worktree——环境文件解析优先 <code>.env</code>，会静默连到主库；② <code>docker compose down -v</code> 会删掉共享卷，抹掉<strong>所有</strong>检出的数据库；③ <code>make stop*</code> 从不停 Postgres（专用 <code>make db-down</code>）。
+</div>
+
+<h3 id="sec4-selfhost">4.5 自托管部署</h3>
+<h4>Docker Compose（推荐）</h4>
+<pre><code class="language-bash"># 两条命令：装 CLI + 起服务器，然后配置 + 登录 + 启 daemon
+curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash -s -- --with-server
+multica setup self-host
+
+# 或从检出仓库
+make selfhost          # 生成 .env(随机 JWT_SECRET/POSTGRES_PASSWORD) + 拉 GHCR 镜像 + up -d + 等 /health
+make selfhost-build    # 用本地代码构建镜像
+make selfhost-stop</code></pre>
+<div class="callout warn">
+<span class="t">安全默认值</span>
+selfhost compose 的所有端口只绑定 <code>127.0.0.1</code>，明确警告不要改成 0.0.0.0（Docker 会绕过 UFW/iptables 防火墙直接暴露端口）。跨机访问应经 Caddy/nginx/Cloudflare Tunnel 终结 TLS，代理 <code>/ws</code>（关闭缓冲）与 <code>/api/*</code> 到 8080、其余到 3000，并设置 <code>FRONTEND_ORIGIN=https://your-domain</code>。
+</div>
+<h4>Kubernetes / Helm</h4>
+<pre><code class="language-bash">kubectl create namespace multica
+kubectl -n multica create secret generic multica-secrets \
+  --from-literal=JWT_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 16)" \
+  --from-literal=RESEND_API_KEY="" \
+  --from-literal=GOOGLE_CLIENT_SECRET="" \
+  --from-literal=CLOUDFRONT_PRIVATE_KEY="" \
+  --from-literal=MULTICA_DEV_VERIFICATION_CODE=""
+
+helm install multica oci://ghcr.io/multica-ai/charts/multica --version &lt;chart-version&gt; -n multica
+# 或从检出: helm install multica deploy/helm/multica -n multica</code></pre>
+<p>覆盖项集中在 <code>ingress.frontend.host</code> / <code>ingress.backend.host</code> 与 <code>backend.config.*</code>（appUrl、frontendOrigin 等）。卸载：<code>helm uninstall</code> 保留 PVC 与 Secret；删命名空间才会清空。</p>
+
+<!-- ============ 5 ============ -->
+<h2 id="sec5"><span class="num">5</span>使用方法详解</h2>
+
+<h3 id="sec5-flow">5.1 五分钟上手路径（cloud-quickstart 规范流程）</h3>
+<div class="mermaid">
+flowchart LR
+  A["① 注册账号<br/>邮箱验证码或 Google"] --> B["② 安装 CLI<br/>brew install multica-ai/tap/multica"]
+  B --> C["③ multica setup<br/>浏览器登录 + 自动启动 daemon"]
+  C --> D["④ Settings → Runtimes<br/>确认每个本地 AI 工具注册为 Runtime"]
+  D --> E["⑤ Settings → Agents → New Agent<br/>选 Provider/Model/Instructions"]
+  E --> F["⑥ 创建 Issue 并指派给智能体<br/>3 秒内 daemon 领取执行"]
+</div>
+<pre><code class="language-bash">multica issue create --title "Add an ASCII architecture diagram to the README"
+multica issue assign MUL-1 --to my-agent-name   # 名称子串匹配；或 --to-id &lt;uuid&gt;
+multica issue runs MUL-1                        # 查看执行历史与 token 用量</code></pre>
+<p>Web 界面通过 WebSocket 实时看到 <code>queued → dispatched → running → completed</code> 的全过程。桌面应用会自动管理 daemon，无需手动启动。</p>
+
+<h3 id="sec5-cli">5.2 CLI 与守护进程</h3>
+<h4>安装方式</h4>
+<pre><code class="language-bash">brew install multica-ai/tap/multica                    # macOS/Linux 推荐
+curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash
+irm https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.ps1 | iex   # Windows
+multica update                                          # 自动识别安装方式升级</code></pre>
+<h4>命令面板（按域组织）</h4>
+<table>
+<tr><th>域</th><th>常用命令</th></tr>
+<tr><td>认证/配置</td><td><code>multica setup [self-host]</code>、<code>login [--token]</code>（90 天 PAT）、<code>auth status|logout</code>、<code>config show|set</code></td></tr>
+<tr><td>守护进程</td><td><code>daemon start [--foreground] [--profile p]</code>、<code>stop|restart|status [--output json]</code>、<code>logs [-f]</code>（日志在 <code>~/.multica/daemon.log</code>）</td></tr>
+<tr><td>工作区</td><td><code>workspace list|switch|get</code>、<code>workspace member list</code>、<code>agent list</code></td></tr>
+<tr><td>Issue</td><td><code>issue list|get|create|update|assign|status|reorder</code>、<code>issue comment list|add|reply</code>（支持 --thread/--tail/--since 线程操作）、<code>issue metadata|subscriber|runs|usage</code></td></tr>
+<tr><td>项目/自动驾驶</td><td><code>project list|create|status</code>、<code>autopilot create|trigger|runs</code>、<code>autopilot trigger-add &lt;id&gt; --cron "0 9 * * 1-5" --timezone "America/New_York"</code></td></tr>
+</table>
+<p><strong>daemon 的职责链</strong>：检测已安装的 AI CLI → 为（工作区 × CLI）注册 Runtime → 每 3 秒轮询领取任务 → 创建隔离工作目录（<code>~/multica_workspaces/</code>）→ 拉起智能体进程 → 流式回传 → 15 秒心跳 → 关闭时注销 Runtime。内置工作区 GC（完成/取消 24h 后清理，孤儿 72h，<code>node_modules/.next/.turbo</code> 等产物 12h）。<code>--profile</code> 提供完全隔离（独立配置目录、daemon 状态、健康端口、工作区根目录），是多环境/多 worktree 开发的基础。</p>
+
+<h3 id="sec5-agent">5.3 触发智能体的四种方式</h3>
+<table>
+<tr><th>方式</th><th>行为</th><th>适用场景</th></tr>
+<tr><td>① 指派 Issue</td><td>智能体领取并进入完整任务生命周期，更新状态、发评论</td><td>正式的工作项</td></tr>
+<tr><td>② 评论中 @提及</td><td>智能体响应但不改变 assignee/状态</td><td>快速咨询、让智能体补充信息</td></tr>
+<tr><td>③ Chat 私聊</td><td>完全沙箱化（看不到也改不了 Issue），provider 会话恢复保持多轮上下文</td><td>头脑风暴、与智能体私下讨论</td></tr>
+<tr><td>④ Autopilot</td><td>cron/webhook/手动触发；每次运行建 Issue 并路由（<code>--mode create_issue|run_only</code>）</td><td>日报、定时巡检、监控响应</td></tr>
+</table>
+<p><strong>通知与订阅</strong>：创建/被指派/评论/被提及会自动订阅 Issue；<code>@all</code> 通知全工作区；子 Issue 的<strong>状态</strong>变更会冒泡给父 Issue 订阅者；失败的智能体任务会进入人类的收件箱。智能体永远不收通知。</p>
+<p><strong>API 调用</strong>：所有能力同时暴露为 REST API（<code>/api/*</code>，Bearer PAT 认证，<code>X-Workspace-ID</code> 选择工作区）；CLI 全部命令支持 <code>--output json</code> 供脚本消费。三种令牌：浏览器会话 / CLI PAT（90 天）/ daemon 令牌。</p>
+
+<!-- ============ 6 ============ -->
+<h2 id="sec6"><span class="num">6</span>最佳实践案例</h2>
+
+<h3>6.1 端口-适配器模式做多端复用</h3>
+<p>同一个 <code>IssuesPage</code> 组件同时运行在 Next.js App Router 与 Electron 内存路由中，靠的是把平台差异压缩到一个 8 成员的接口：</p>
+<pre><code class="language-typescript">// packages/views/navigation/types.ts —— 必选成员是两个路由器能力的交集
+interface NavigationAdapter {
+  push(path): void; replace(path): void; back(): void;
+  pathname: string; searchParams: URLSearchParams;
+  getShareableUrl: (path) =&gt; string;
+  openInNewTab?: (path, title?, opts?) =&gt; void;  // 仅桌面（标签页）
+  prefetch?: (path) =&gt; void;                      // 仅 Web（RSC 预取）
+}</code></pre>
+<p>两个可选成员精确编码了平台分歧点，调用方必须可选调用（<code>prefetch?.(href)</code>），使缺失能力自然退化为 no-op，而不是运行时错误。同样的思路复制到 <code>StorageAdapter</code>（3 方法）与 <code>LocaleAdapter</code>（3 方法）。</p>
+
+<h3>6.2 防御性 API 边界：宽 schema + 窄类型</h3>
+<pre><code class="language-typescript">// packages/core/api/schema.ts —— 永不抛出，漂移降级而非白屏
+export function parseWithFallback&lt;T&gt;(data, schema, fallback: T, opts): T
+// schema 约定:
+//  - 枚举用 z.string() 而非 z.enum()  → 未知枚举值仍可解析, UI 走 default 分支
+//  - 数组 .default([])               → 缺字段不塌页
+//  - 对象以 .loose() 结尾            → zod 4 默认剥离未知键, 会让 as T 变成谎言
+//  - 返回类型锚定 fallback 的 T      → schema 宽松, TS 类型严格, 由调用方断言兼容</code></pre>
+<p>覆盖是<strong>风险导向</strong>而非穷举——集中在历史上白屏过的端点（时间线、评论、列表、搜索、用户）。这套设计的动机很现实：已安装的桌面客户端会连接更新的后端，响应解析必须容忍前向漂移。</p>
+
+<h3>6.3 事故驱动的规则固化（移动端 CLAUDE.md）</h3>
+<p>移动端的规则文件是“事故→规则”工作方式的范本：每条硬规则都附带日期与事故复盘。例如 2026-05-09 的未读数不一致事故固化为“渲染列表前必须先 grep core 的 dedupe/coalesce 预处理”；2026-05-11 的卡死加载事故固化为“硬性 30s 超时 + 手动 AbortController（Hermes 缺 AbortSignal.timeout）+ 每个 queryFn 必须解构 signal”，并给出可机检的验证命令（<code>grep -n "queryFn: () =&gt;"</code> 必须零匹配）。</p>
+
+<h3>6.4 确定性派生的环境隔离</h3>
+<p>Worktree 隔离方案不引入任何注册表或配置中心——一切从路径哈希确定性派生（DB 名、后端/前端/渲染器端口、daemon profile、健康端口），主检出与任意多个特性分支可并行全栈运行且互不干扰。同一思想贯穿桌面开发（<code>pnpm dev:desktop</code> 自我隔离）与 daemon profile 系统。</p>
+
+<h3>6.5 部署中的实用主义权衡</h3>
+<ul>
+  <li><strong>迁移放进容器 entrypoint 而不是 Helm Job</strong>：用 startupProbe 给迁移 5 分钟预算 + Postgres advisory lock 保证并发安全，省掉一个需要编排的 Job 资源。</li>
+  <li><strong>ExternalName 别名 Service</strong>：为了让预构建镜像开箱即用，接受“每命名空间一个 release”的限制，并提供 <code>frontend.compatibility.backendAlias=false</code> 逃生口——权衡被明确文档化而非隐藏。</li>
+  <li><strong>selfhost 端口只绑 127.0.0.1</strong>：默认安全，把暴露决策交给显式的反向代理配置。</li>
+  <li><strong>Secret 带外创建 + checksum 注解滚动</strong>：机密不进 git，同时解决 envFrom 不感知 Secret 变更的滚动更新盲区。</li>
+</ul>
+
+<h3>6.6 i18n 的三重防线</h3>
+<p>① 结构防线：core 的 i18n 按执行环境拆三个入口，让 RSC 误导入在 import 时即失败；② 测试防线：<code>parity.test.ts</code> 从磁盘推导命名空间并断言 4 语言 key 完全对齐；③ lint 防线：eslint-plugin-i18next 禁止硬编码字符串。配合 docs 站的 conventions.mdx 作为词汇表唯一权威。</p>
+
+<h3>6.7 后端安全与实时性设计</h3>
+<ul>
+  <li><strong>令牌前缀分派 + 最小权限</strong>：<code>mat_</code>（任务）/ <code>mul_</code>（PAT）/ <code>mdt_</code>（daemon）/ <code>mcn_</code>（云节点）/ JWT 五类凭证在一个中间件里按前缀分派；任务令牌被硬性绑定到单一工作区，且计费等人类专属端点用 <code>RequireHumanActor</code> 拒绝它——智能体拿到的凭证天然无法越权。中间件先剥掉客户端自带的 <code>X-Actor-Source</code> 再重新盖章，身份头不可伪造；非成员访问返回 404 而非 403，不泄漏资源存在性。</li>
+  <li><strong>WS 唤醒只是提示，正确性在 HTTP</strong>：daemon 的任务唤醒走 WebSocket（低延迟），但领取始终走 HTTP claim + 3 秒轮询兜底——WS 断连只影响延迟、不影响正确性。这种“快路径提示 + 慢路径保证”的分层让实时系统的失败模式变得无害。</li>
+  <li><strong>作用域房间而非全工作区广播</strong>：WS 按 workspace/user/task/chat 作用域建房间，细粒度作用域需显式订阅并经授权器校验；个人事件永不进工作区广播。多节点扇出用 Redis Streams 分片中继，客户端以 ULID 去重容忍启动重放。</li>
+  <li><strong>输出脱敏在边界</strong>：智能体输出在写库或 WS 广播<strong>之前</strong>统一经过 <code>pkg/redact</code> 的密钥检测与掩码——脱敏是数据入口的义务，不是每个展示方的自觉。</li>
+</ul>
+
+<hr style="margin:60px 0 20px; border:none; border-top:1px solid var(--border)">
+<p style="color:var(--muted); font-size:0.85rem">本报告基于对 multica 仓库（main 分支）的静态代码探索生成 · 关键出处：CLAUDE.md、README、CONTRIBUTING.md、SELF_HOSTING*.md、CLI_AND_DAEMON.md、apps/docs 内容与各包源码。</p>
+</main>
+</div>
+<a class="top-link" href="#" title="回到顶部">↑</a>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", themeVariables: { fontSize: "14px" } });
+  if (typeof hljs !== "undefined") {
+    document.querySelectorAll("pre code").forEach(el => hljs.highlightElement(el));
+  }
+  // TOC active highlight
+  const links = [...document.querySelectorAll("nav.toc a")];
+  const targets = links.map(a => document.querySelector(a.hash)).filter(Boolean);
+  const obs = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.toggle("active", l.hash === "#" + e.target.id));
+      }
+    });
+  }, { rootMargin: "0px 0px -75% 0px" });
+  targets.forEach(t => obs.observe(t));
+</script>
+</body>
+</html>

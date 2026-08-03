@@ -8,6 +8,7 @@ export {
   projectQueueStatusOptions,
   projectGatesOptions,
   projectQueueItemsOptions,
+  projectPresenterOptions,
 } from "./queries";
 export { useProjectChatStore, projectChatDraftKey, type ProjectChatMode } from "./project-chat-store";
 export {
@@ -18,6 +19,12 @@ export {
   useSetProjectTeamAgent,
   useApproveCr,
   useCancelProjectQueueTask,
+  useRequestPresenter,
+  useApprovePresenter,
+  useRejectPresenter,
+  useTransferPresenter,
+  useRevokePresenter,
+  useReleasePresenter,
 } from "./mutations";
 export { useProjectDraftStore } from "./draft-store";
 export {

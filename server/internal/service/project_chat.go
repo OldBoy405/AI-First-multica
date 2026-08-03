@@ -170,18 +170,30 @@ func (s *IssueService) ensureContainerIssue(
 // group chat (a comment on the hidden container issue) and enqueues a run for
 // the bound agent (CR-2026-006).
 //
-// The capacity guard is front-loaded so a full queue is rejected before any
-// comment is persisted — no orphan message for the capacity failure case,
-// which dominates. If the enqueue still fails (a concurrent enqueue slipping
-// past the front-load check into the guard *inside* EnqueueTaskForMention, or a
-// DB error), the comment is compensated by physical delete (comment has no
-// soft-delete) so a failed send leaves nothing behind.
+// The presenter and capacity guards are front-loaded so a rejected sender
+// never gets an orphan comment — nothing is persisted for either rejection.
+// If the enqueue still fails after a comment is created (a concurrent enqueue
+// slipping past the front-load capacity check into the guard *inside*
+// enqueueMentionTaskWithCommentPlan, or a DB error), the comment is
+// compensated by physical delete (comment has no soft-delete) so a failed
+// send leaves nothing behind.
 //
 // Error contract for the handler:
+//   - *ErrPresenterRequired -> 403 (an active presenter holds single-writer
+//     control and the caller is neither the presenter nor owner/admin).
 //   - *ErrProjectQueueFull  -> 429 (queue full, try later). Covers both the
 //     front-load rejection and the inner-guard race (TSUG-001).
 //   - any other error       -> 502 (send failed, retryable).
+//
+// The presenter guard runs before the capacity guard (SDD §4.3/DD-6): a
+// rejected sender must see "presenter required", never "queue full", and
+// nothing is persisted (no comment, no task) for either rejection.
 func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
+	suppressPreempt, perr := s.guardProjectChatPresenter(ctx, issue, callerID)
+	if perr != nil {
+		return db.Comment{}, db.AgentTaskQueue{}, perr
+	}
+
 	if _, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, callerID); gerr != nil {
 		return db.Comment{}, db.AgentTaskQueue{}, gerr
 	}
@@ -198,11 +210,16 @@ func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue
 		return db.Comment{}, db.AgentTaskQueue{}, fmt.Errorf("create chat comment: %w", err)
 	}
 
-	// EnqueueTaskForMention re-runs the guard internally; a concurrent send can
-	// pass our front-load check and then trip that inner guard, returning
-	// *ErrProjectQueueFull here (TSUG-001). We return it verbatim so the handler
-	// maps it to 429 rather than the generic 502.
-	task, err := s.EnqueueTaskForMention(ctx, issue, agentID, comment.ID)
+	// enqueueMentionTaskWithCommentPlan re-runs the capacity guard internally;
+	// a concurrent send can pass our front-load check and then trip that inner
+	// guard, returning *ErrProjectQueueFull here (TSUG-001). We return it
+	// verbatim so the handler maps it to 429 rather than the generic 502.
+	//
+	// Called directly (bypassing the EnqueueTaskForMention wrapper) so
+	// suppressPreempt can reach the priority computation: DD-6 requires
+	// owner/admin sends to keep their capacity exemption but lose the
+	// queue-jump priority while a presenter other than themselves is active.
+	task, err := s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt)
 	if err != nil {
 		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
 			ID: comment.ID, WorkspaceID: issue.WorkspaceID,
@@ -240,4 +257,61 @@ func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue
 		},
 	})
 	return comment, task, nil
+}
+
+// ErrPresenterRequired is returned when a project has an active presenter and
+// the caller is neither that presenter nor a workspace owner/admin (SDD
+// §4.3, DD-6: the presenter is the group chat's single writer while active).
+type ErrPresenterRequired struct {
+	PresenterUserID string
+}
+
+func (e *ErrPresenterRequired) Error() string {
+	return "an active presenter holds single-writer control of this chat"
+}
+
+// guardProjectChatPresenter enforces CR-2026-010 single-writer control ahead
+// of the capacity guard (SDD §4.3):
+//
+//	active  = GetPresenterState(project).presenter
+//	allowed = active != nil ? (caller == active.user_id || role ∈ {owner,admin})
+//	                        : (role ∈ {owner,admin})
+//
+// With no active presenter the default state is a strict subset of the prior
+// CR-A behavior: owner/admin send, everyone else is rejected — there is no
+// separate "presenter feature disabled" branch because GetPresenterState
+// already returns presenter=nil for a project with no grant rows, which is
+// exactly this default state. With an active presenter: the presenter always
+// sends; owner/admin may still send (their capacity exemption is untouched)
+// but must not preempt the presenter's queue position, so the returned bool
+// tells the caller to suppress the queue-jump priority; anyone else is
+// rejected with the presenter's id so the frontend can show who holds it.
+func (s *TaskService) guardProjectChatPresenter(ctx context.Context, issue db.Issue, callerID pgtype.UUID) (suppressPreemptPriority bool, err error) {
+	if !issue.ProjectID.Valid {
+		return false, nil
+	}
+	project := db.Project{ID: issue.ProjectID, WorkspaceID: issue.WorkspaceID}
+	state, err := s.GetPresenterState(ctx, project, callerID)
+	if err != nil {
+		return false, fmt.Errorf("load presenter state for chat guard: %w", err)
+	}
+
+	member, merr := s.Queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+		UserID: callerID, WorkspaceID: issue.WorkspaceID,
+	})
+	callerIsOwnerOrAdmin := merr == nil && isOwnerOrAdmin(member.Role)
+
+	if state.Presenter == nil {
+		if callerIsOwnerOrAdmin {
+			return false, nil
+		}
+		return false, &ErrPresenterRequired{}
+	}
+	if state.Presenter.UserID == callerID {
+		return false, nil
+	}
+	if callerIsOwnerOrAdmin {
+		return true, nil
+	}
+	return false, &ErrPresenterRequired{PresenterUserID: util.UUIDToString(state.Presenter.UserID)}
 }

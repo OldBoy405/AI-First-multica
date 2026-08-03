@@ -981,7 +981,19 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     // - squad_leader_evaluated: never coalesce; outcome/reason are audit data
     const COALESCE_MS = 2 * 60 * 1000;
     const NO_TIME_LIMIT_ACTIONS = new Set(["task_completed", "task_failed"]);
-    const NEVER_COALESCE_ACTIONS = new Set(["squad_leader_evaluated"]);
+    const NEVER_COALESCE_ACTIONS = new Set([
+      "squad_leader_evaluated",
+      // CR-2026-010: presenter transitions are audit data, same as squad
+      // evaluations. The hidden project chat container issue never reaches
+      // this view, but keeping the set consistent avoids a silent gap if
+      // that ever changes.
+      "presenter_requested",
+      "presenter_approved",
+      "presenter_rejected",
+      "presenter_transferred",
+      "presenter_revoked",
+      "presenter_released",
+    ]);
     const coalesced: TimelineEntry[] = [];
     for (const entry of topLevel) {
       if (entry.type === "activity") {

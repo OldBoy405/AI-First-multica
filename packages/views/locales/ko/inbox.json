@@ -50,7 +50,12 @@
     "agent_completed": "에이전트 완료됨",
     "reaction_added": "반응 추가됨",
     "quick_create_done": "에이전트로 생성됨",
-    "quick_create_failed": "에이전트 생성 실패"
+    "quick_create_failed": "에이전트 생성 실패",
+    "presenter_requested": "발표자 신청됨",
+    "presenter_approved": "발표자 신청이 승인됨",
+    "presenter_rejected": "발표자 신청이 거부됨",
+    "presenter_transferred": "발표자 권한이 이전됨",
+    "presenter_revoked": "발표자 권한이 취소됨"
   },
   "labels": {
     "set_status_to": "상태 변경:",

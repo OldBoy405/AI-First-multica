@@ -82,6 +82,11 @@ const (
 	EventProjectResourceCreated = "project_resource:created"
 	EventProjectResourceUpdated = "project_resource:updated"
 	EventProjectResourceDeleted = "project_resource:deleted"
+	// EventProjectPresenterChanged fires whenever a presenter grant transition
+	// commits (CR-2026-010), even ones that don't change who is active (a new
+	// pending request also refreshes the header/panel). Payload:
+	// {project_id, presenter_user_id: string|null}.
+	EventProjectPresenterChanged = "project:presenter_changed"
 
 	// Label events
 	EventLabelCreated       = "label:created"

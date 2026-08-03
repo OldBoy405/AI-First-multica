@@ -218,6 +218,38 @@
       "stop": "중지",
       "stop_failed": "중지하지 못했습니다. 다시 시도해 주세요.",
       "model_follows_team_agent": "모델은 Team Agent 설정을 따릅니다"
+    },
+    "presenter": {
+      "label": "발표자",
+      "current": "현재 발표자: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "컨트롤 패널",
+      "locked_title": "{{name}}님이 발표 중입니다 — 전송하려면 권한을 요청하세요",
+      "locked_title_default": "전송하려면 권한을 요청하세요",
+      "request_cta": "권한 요청",
+      "requested": "요청됨"
+    },
+    "control": {
+      "title": "컨트롤 패널",
+      "presenter_badge": "발표자",
+      "pending_badge": "요청됨",
+      "request_cta": "Agent 접근 권한 요청",
+      "requested": "요청됨",
+      "approve": "승인",
+      "reject": "거부",
+      "revoke": "취소",
+      "transfer": "이전",
+      "transfer_to": "이전 대상 선택…",
+      "release": "권한 해제",
+      "action_failed": "작업에 실패했습니다. 다시 시도해 주세요"
+    },
+    "notices": {
+      "presenter_requested": "{{user}}님이 발표자 권한을 요청했습니다",
+      "presenter_approved": "{{approver}}님이 {{user}}님의 요청을 승인했습니다",
+      "presenter_rejected": "{{approver}}님이 {{user}}님의 요청을 거부했습니다",
+      "presenter_transferred": "{{from}}님이 발표자 권한을 {{to}}님에게 이전했습니다",
+      "presenter_revoked": "{{approver}}님이 {{user}}님의 발표자 권한을 취소했습니다",
+      "presenter_released": "{{user}}님이 발표자 권한을 해제했습니다"
     }
   },
   "governance": {

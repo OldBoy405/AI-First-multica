@@ -139,6 +139,25 @@ func (h *Handler) revokeAndRemoveMember(ctx context.Context, workspaceID, userID
 		return empty, err
 	}
 
+	// AIFIRST: CR-2026-010 presenter grants have no DB FK to member (matching
+	// the FK-free precedent above), so a departing member's presenter state
+	// must be closed explicitly in the same tx — otherwise they could remain
+	// the recorded active presenter (or a stuck pending requester) of a
+	// project they can no longer access, silently blocking every other
+	// member's Team Agent access until an owner notices and revokes by hand.
+	if _, err := qtx.RevokeActivePresenterGrantsForUser(ctx, db.RevokeActivePresenterGrantsForUserParams{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+	}); err != nil {
+		return empty, err
+	}
+	if _, err := qtx.RejectPendingPresenterGrantsForUser(ctx, db.RejectPendingPresenterGrantsForUserParams{
+		WorkspaceID: workspaceID,
+		UserID:      userID,
+	}); err != nil {
+		return empty, err
+	}
+
 	// Member row deletion lives inside the same tx so a successful revoke is
 	// never followed by a failed member-delete (which would leave the user
 	// still a member with a dead runtime), and a failed revoke never leaves

@@ -50,7 +50,12 @@
     "agent_completed": "Agent completed",
     "reaction_added": "Reacted",
     "quick_create_done": "Created with agent",
-    "quick_create_failed": "Create with agent failed"
+    "quick_create_failed": "Create with agent failed",
+    "presenter_requested": "Presenter requested",
+    "presenter_approved": "Presenter approved",
+    "presenter_rejected": "Presenter rejected",
+    "presenter_transferred": "Presenter transferred",
+    "presenter_revoked": "Presenter revoked"
   },
   "labels": {
     "set_status_to": "Set status to",

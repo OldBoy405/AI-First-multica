@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, CheckCircle2, Copy, Loader2, SendHorizontal, XCircle } from "lucide-react";
+import { Ban, CheckCircle2, Copy, Loader2, Mic, SendHorizontal, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
@@ -10,9 +10,11 @@ import { taskMessagesOptions } from "@multica/core/chat/queries";
 import {
   projectChatDraftKey,
   projectGatesOptions,
+  projectPresenterOptions,
   projectQueueStatusOptions,
   useCancelProjectQueueTask,
   useProjectChatStore,
+  useRequestPresenter,
   useSendProjectChatMessage,
 } from "@multica/core/projects";
 import type { ProjectGateCR } from "@multica/core/api/schemas";
@@ -34,7 +36,20 @@ import { CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { ProjectQueueBar } from "./project-queue-bar";
+import { useTimeAgo } from "../../i18n/use-time-ago";
 import { useT } from "../../i18n";
+
+// CR-2026-010: the 5 presenter activity actions rendered as notice cards in
+// the message stream (release included — it has no inbox recipient but still
+// gets a card, same as the other five).
+const PRESENTER_NOTICE_ACTIONS = new Set([
+  "presenter_requested",
+  "presenter_approved",
+  "presenter_rejected",
+  "presenter_transferred",
+  "presenter_revoked",
+  "presenter_released",
+]);
 
 // ─── Container ───────────────────────────────────────────────────────────
 //
@@ -75,6 +90,17 @@ export function ProjectTeamAgentChat({
     () => timeline.filter((e) => e.type === "comment" && e.actor_type === "member"),
     [timeline],
   );
+  // CR-2026-010: presenter transitions ride the same activity_log + WS
+  // activity:created path as any other issue activity (see project_presenter.go's
+  // recordPresenterActivity), so useIssueTimeline already has them — this is
+  // purely a display-side filter, not a new data source.
+  const presenterNotices = useMemo(
+    () =>
+      timeline.filter(
+        (e) => e.type === "activity" && !!e.action && PRESENTER_NOTICE_ACTIONS.has(e.action),
+      ),
+    [timeline],
+  );
 
   // CR governance gates (CR-2026-011 TASK-06): the same query CrStatusBadge
   // reads, kept live by cr:updated (WS) — no separate subscription needed.
@@ -112,6 +138,7 @@ export function ProjectTeamAgentChat({
           comments={comments}
           tasks={tasks}
           crs={crs}
+          presenterNotices={presenterNotices}
           currentUserId={userId}
           wsId={wsId}
           projectId={projectId}
@@ -141,6 +168,7 @@ export function TeamAgentStreamView({
   comments,
   tasks,
   crs = [],
+  presenterNotices = [],
   wsId,
   projectId,
   currentUserId,
@@ -152,6 +180,7 @@ export function TeamAgentStreamView({
   /** CR governance gates (CR-2026-011 TASK-06) — each gate_node becomes a
    *  third kind of stream item, interleaved with comments and task cards. */
   crs?: ProjectGateCR[];
+  presenterNotices?: TimelineEntry[];
   wsId: string;
   projectId: string;
   currentUserId?: string;
@@ -220,10 +249,28 @@ export function TeamAgentStreamView({
         });
       }
     }
+    for (const notice of presenterNotices) {
+      merged.push({
+        key: `p:${notice.id}`,
+        at: new Date(notice.created_at).getTime(),
+        node: <PresenterNoticeCard key={`p:${notice.id}`} entry={notice} />,
+      });
+    }
     // Stable order: by timestamp, then key so equal timestamps don't jitter.
     merged.sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
     return merged;
-  }, [comments, tasks, crs, currentUserId, withdrawnCommentIds, canConfigure, filterOn, wsId, projectId]);
+  }, [
+    comments,
+    tasks,
+    crs,
+    presenterNotices,
+    currentUserId,
+    withdrawnCommentIds,
+    canConfigure,
+    filterOn,
+    wsId,
+    projectId,
+  ]);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-3">
@@ -310,6 +357,46 @@ function UserBubble({
           {copyButton}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Presenter notice card (CR-2026-010) ──────────────────────────────────
+// A narrow centered system-status bar, not a message bubble — presenter
+// transitions are audit events, not something anyone "said". Deliberately
+// distinct from UserBubble/TaskExecutionCard's containers.
+
+function PresenterNoticeCard({ entry }: { entry: TimelineEntry }) {
+  const { t } = useT("projects");
+  const { getActorName } = useActorName();
+  const timeAgo = useTimeAgo();
+  const details = (entry.details ?? {}) as Record<string, string>;
+
+  const toName = details.to_user_id ? getActorName("member", details.to_user_id) : "";
+  const fromName = details.from_user_id ? getActorName("member", details.from_user_id) : "";
+  const approverName = details.by_user_id ? getActorName("member", details.by_user_id) : "";
+  const params = {
+    user: toName || fromName,
+    approver: approverName,
+    to: toName,
+    from: fromName,
+  };
+
+  const action = entry.action ?? "";
+  const text = PRESENTER_NOTICE_ACTIONS.has(action)
+    ? t(($) => $.chat.notices[action as keyof typeof $.chat.notices], params)
+    : action;
+
+  return (
+    <div
+      data-testid="project-chat-presenter-notice"
+      data-action={action}
+      className="flex items-center justify-center gap-1.5 py-1 text-center text-xs text-muted-foreground"
+    >
+      <Mic className="h-3 w-3 shrink-0" />
+      <span>{text}</span>
+      <span className="text-muted-foreground/60">·</span>
+      <span className="tabular-nums text-muted-foreground/70">{timeAgo(entry.created_at)}</span>
     </div>
   );
 }
@@ -505,6 +592,7 @@ export function TeamAgentComposer({
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
+  const { getActorName } = useActorName();
   const qc = useQueryClient();
   const draftKey = projectChatDraftKey(projectId, "team_agent");
   const draft = useProjectChatStore((s) => s.drafts[draftKey] ?? "");
@@ -585,7 +673,33 @@ export function TeamAgentComposer({
       ? { depth: queue.queue_depth, limit: queue.queue_limit }
       : null;
   const queueFull = canConfigure ? null : sendQueueFull ?? liveFull;
-  const locked = queueFull != null;
+
+  // CR-2026-010: presenter (single-writer control) rejection. Latched the
+  // same way as sendQueueFull — the backend rejection is the source of
+  // truth, WS project:presenter_changed invalidates this query so a
+  // transition that resolves the block clears it without a manual refresh.
+  //
+  // The only real "unblocked" transition for a plain member is *becoming*
+  // the presenter — presenter turning back to null does NOT unblock them
+  // (SDD §4.3: presenter=null's default state is itself owner/admin-only,
+  // so a plain member stays rejected either way). Clearing on presenter ===
+  // null here would be wrong: it's the permanent blocked default for this
+  // caller, not a resolution.
+  const userId = useAuthStore((s) => s.user?.id);
+  const { data: presenterState } = useQuery(projectPresenterOptions(wsId, projectId));
+  const [presenterRequired, setPresenterRequired] = useState<{ presenterUserId: string } | null>(null);
+  const requestPresenter = useRequestPresenter(wsId, projectId);
+
+  useEffect(() => {
+    if (presenterState?.presenter != null && presenterState.presenter.user_id === userId) {
+      setPresenterRequired(null);
+    }
+  }, [presenterState, userId]);
+
+  // Independent lock reasons (SDD §4.3): capacity and presenter control are
+  // separate dimensions of "why can't I send right now" — combined with OR,
+  // never merged into one branch.
+  const locked = queueFull != null || presenterRequired != null;
 
   // Pending-message pattern (CLAUDE.md: render immediately with a visible
   // pending state and retry on failure, not silent optimism). The real
@@ -606,7 +720,15 @@ export function TeamAgentComposer({
           code?: string;
           queue_depth?: number;
           queue_limit?: number;
+          presenter_user_id?: string;
         };
+        if (body.code === "presenter_required") {
+          // Active presenter holds single-writer control and this caller
+          // isn't it — distinct rejection reason from queue_full, must not
+          // be conflated into the same banner/copy.
+          setPresenterRequired({ presenterUserId: body.presenter_user_id ?? "" });
+          return; // keep the draft so the user can resend once unblocked
+        }
         if (body.code === "project_queue_full") {
           // Full shared queue: latch the disabled state with the live pair.
           // Owner/admin are exempt, so only latch for non-privileged users.
@@ -639,6 +761,31 @@ export function TeamAgentComposer({
             <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
             <span className="break-words">{pendingMessage}</span>
           </div>
+        </div>
+      )}
+      {presenterRequired && (
+        <div
+          data-testid="project-chat-presenter-required"
+          className="mb-2 flex items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
+        >
+          <span className="font-medium text-foreground">
+            {presenterRequired.presenterUserId
+              ? t(($) => $.chat.presenter.locked_title, {
+                  name: getActorName("member", presenterRequired.presenterUserId),
+                })
+              : t(($) => $.chat.presenter.locked_title_default)}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={requestPresenter.isPending || !!presenterState?.my_request}
+            onClick={() => requestPresenter.mutate()}
+          >
+            {presenterState?.my_request
+              ? t(($) => $.chat.presenter.requested)
+              : t(($) => $.chat.presenter.request_cta)}
+          </Button>
         </div>
       )}
       {queueFull && (

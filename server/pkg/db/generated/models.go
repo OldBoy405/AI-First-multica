@@ -129,6 +129,7 @@ type AgentTaskQueue struct {
 	DeliveredCommentIds  []pgtype.UUID `json:"delivered_comment_ids"`
 	CrID                 pgtype.Text   `json:"cr_id"`
 	PipelineNodeRunID    pgtype.UUID   `json:"pipeline_node_run_id"`
+	ProjectID            pgtype.UUID   `json:"project_id"`
 }
 
 type ApprovalRecord struct {
@@ -782,6 +783,18 @@ type Project struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	Priority    string             `json:"priority"`
 	Settings    []byte             `json:"settings"`
+}
+
+type ProjectPresenterGrant struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	ProjectID   pgtype.UUID        `json:"project_id"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	Status      string             `json:"status"`
+	GrantedBy   pgtype.UUID        `json:"granted_by"`
+	ResolvedBy  pgtype.UUID        `json:"resolved_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ResolvedAt  pgtype.Timestamptz `json:"resolved_at"`
 }
 
 type ProjectResource struct {
