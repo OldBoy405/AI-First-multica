@@ -166,12 +166,19 @@ func requireHumanActor(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // latestEvidence returns the newest non-empty evidence snapshot for a CR.
+// cr_sync_event has no workspace_id of its own (cr_id alone isn't globally
+// unique — only UNIQUE(workspace_id, cr_id) on the cr table), so this joins
+// through cr to scope the lookup to the caller's workspace; otherwise a
+// same-named CR in another workspace could leak its evidence (file paths +
+// sha256 digests) through this workspace's approval card.
 func (a *ApprovalService) latestEvidence(r *http.Request, crID string) (map[string]string, error) {
+	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 	var evidence map[string]string
 	err := a.pool.QueryRow(r.Context(), `
-		SELECT evidence FROM cr_sync_event
-		WHERE cr_id = $1 AND evidence <> '{}'::jsonb
-		ORDER BY id DESC LIMIT 1`, crID).Scan(&evidence)
+		SELECT cse.evidence FROM cr_sync_event cse
+		JOIN cr ON cr.cr_id = cse.cr_id
+		WHERE cr.workspace_id = $1::uuid AND cse.cr_id = $2 AND cse.evidence <> '{}'::jsonb
+		ORDER BY cse.id DESC LIMIT 1`, workspaceID, crID).Scan(&evidence)
 	if err != nil {
 		if err.Error() == "no rows in result set" || strings.Contains(err.Error(), "no rows") {
 			return map[string]string{}, nil
@@ -210,6 +217,18 @@ func (a *ApprovalService) HandleApprove(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.Decision != "approve" && req.Decision != "reject" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "decision must be approve or reject"})
+		return
+	}
+	// SDD DD-5 (CR-2026-011 TASK-04): this endpoint had no role check before
+	// this task, only requireHumanActor. See canApprove's doc comment
+	// (project_gates.go) for why it checks workspace owner/admin only.
+	if allowed, err := canApprove(r.Context(), a.pool, workspaceID, r.Header.Get("X-User-ID")); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "approver check failed"})
+		return
+	} else if !allowed {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "FORBIDDEN_APPROVER", "detail": "only workspace owners/admins may approve or reject",
+		})
 		return
 	}
 	evidence, err := a.latestEvidence(r, crID)

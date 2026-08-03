@@ -35,6 +35,7 @@ import {
 } from "../../issues/components/pickers/property-picker";
 import { useNavigation } from "../../navigation";
 import { ProjectTeamAgentChat } from "./project-team-agent-chat";
+import { CrStatusBadge } from "./cr-status-badge";
 import { ProjectPrivateAsk } from "./project-private-ask";
 import { DiscussionPane } from "./discussion-pane";
 import { PresenterControlSheet } from "./presenter-control-sheet";
@@ -66,8 +67,8 @@ export function ProjectChatPanel({
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
-  const router = useNavigation();
   const wsId = useWorkspaceId();
+  const router = useNavigation();
   const activeMode =
     useProjectChatStore((s) => s.activeMode[projectId]) ?? "team_agent";
   const setActiveMode = useProjectChatStore((s) => s.setActiveMode);
@@ -90,29 +91,34 @@ export function ProjectChatPanel({
       onValueChange={(v) => setActiveMode(projectId, v as ProjectChatMode)}
       className="flex-1 min-h-0"
     >
-      <TabsList variant="line" className="mx-4 mt-2">
-        {MODES.map((mode) => {
-          const Icon = MODE_ICON[mode];
-          return (
-            <Tooltip key={mode}>
-              <TooltipTrigger
-                render={
-                  <TabsTrigger value={mode} className="flex-none">
-                    <Icon className="h-4 w-4" />
-                    {t(($) => $.chat.tabs[mode])}
-                  </TabsTrigger>
-                }
-              />
-              <TooltipContent side="bottom">
-                {t(($) => $.chat.tooltips[mode])}
-              </TooltipContent>
-            </Tooltip>
-          );
-        })}
-        {activeMode === "team_agent" && (
-          <PresenterHeader wsId={wsId} projectId={projectId} />
-        )}
-      </TabsList>
+      <div className="mx-4 mt-2 flex items-center justify-between gap-2">
+        <TabsList variant="line">
+          {MODES.map((mode) => {
+            const Icon = MODE_ICON[mode];
+            return (
+              <Tooltip key={mode}>
+                <TooltipTrigger
+                  render={
+                    <TabsTrigger value={mode} className="flex-none">
+                      <Icon className="h-4 w-4" />
+                      {t(($) => $.chat.tabs[mode])}
+                    </TabsTrigger>
+                  }
+                />
+                <TooltipContent side="bottom">
+                  {t(($) => $.chat.tooltips[mode])}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </TabsList>
+        <div className="flex items-center gap-2">
+          {activeMode === "team_agent" && (
+            <PresenterHeader wsId={wsId} projectId={projectId} />
+          )}
+          <CrStatusBadge wsId={wsId} projectId={projectId} />
+        </div>
+      </div>
 
       {MODES.map((mode) => (
         <TabsContent key={mode} value={mode} className="min-h-0">

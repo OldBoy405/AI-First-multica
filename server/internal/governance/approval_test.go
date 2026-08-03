@@ -116,20 +116,43 @@ func newTestApprovalService(t *testing.T) (*ApprovalService, ed25519.PublicKey) 
 	return NewApprovalService(testPool, priv, "approval-test"), pub
 }
 
+// testUserID returns a user who is also an owner member of testWorkspaceID.
+// CR-2026-011 TASK-04 added a role check to HandleApprove (canApprove,
+// project_gates.go) — every test exercising a successful approve/reject path
+// needs its caller to actually hold that role, not just exist as a user row.
 func testUserID(t *testing.T) string {
 	t.Helper()
+	ctx := context.Background()
 	var id string
-	if err := testPool.QueryRow(context.Background(), `
+	if err := testPool.QueryRow(ctx, `
 		INSERT INTO "user" (email, name) VALUES ('governance-approver@test', 'Approver')
 		ON CONFLICT (email) DO UPDATE SET updated_at = now()
 		RETURNING id::text`).Scan(&id); err != nil {
 		t.Fatalf("test user fixture: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1::uuid, $2::uuid, 'owner')
+		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'owner'`,
+		testWorkspaceID, id); err != nil {
+		t.Fatalf("test owner member fixture: %v", err)
 	}
 	return id
 }
 
 func seedEvidenceEvent(t *testing.T, crID string, evidence map[string]string) {
 	t.Helper()
+	// latestEvidence joins cr_sync_event through cr, scoped to the caller's
+	// workspace (cr_id alone isn't globally unique — only
+	// UNIQUE(workspace_id, cr_id) on cr). Real ingestion always has a cr
+	// projection row by the time evidence exists; seed the same invariant
+	// here rather than exercising the shortcut of evidence with no owning CR.
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO cr (workspace_id, cr_id, status)
+		VALUES ($1::uuid, $2, 'developing')
+		ON CONFLICT (workspace_id, cr_id) DO NOTHING`, testWorkspaceID, crID); err != nil {
+		t.Fatal(err)
+	}
 	_, err := testPool.Exec(context.Background(), `
 		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
 		VALUES ($1, $2, 'status', '{}', $3, now())
@@ -163,6 +186,47 @@ func TestApproveRejectsTaskTokens(t *testing.T) {
 	rec := approveHTTP(t, svc, testUserID(t), "CR-9002-001", approveRequest{Stage: "requirement", Decision: "approve"}, true)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("mat_ (task token) must be 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// testMemberUserID returns a user who is a plain 'member' (not owner/admin)
+// of testWorkspaceID — CR-2026-011 TASK-04's negative case for canApprove.
+func testMemberUserID(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (email, name) VALUES ('governance-plain-member@test', 'Plain Member')
+		ON CONFLICT (email) DO UPDATE SET updated_at = now()
+		RETURNING id::text`).Scan(&id); err != nil {
+		t.Fatalf("test member user fixture: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO member (workspace_id, user_id, role)
+		VALUES ($1::uuid, $2::uuid, 'member')
+		ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = 'member'`,
+		testWorkspaceID, id); err != nil {
+		t.Fatalf("test plain member fixture: %v", err)
+	}
+	return id
+}
+
+// TestApproveRejectsNonOwnerAdmin is the FORBIDDEN_APPROVER path (SDD DD-5):
+// a workspace member who is neither owner nor admin cannot approve, even
+// though they pass requireHumanActor cleanly.
+func TestApproveRejectsNonOwnerAdmin(t *testing.T) {
+	crID := "CR-9002-004"
+	resetCR(t, crID)
+	seedEvidenceEvent(t, crID, map[string]string{"a.yml": "sha256:" + hex.EncodeToString(make([]byte, 32))})
+	svc, _ := newTestApprovalService(t)
+	rec := approveHTTP(t, svc, testMemberUserID(t), crID, approveRequest{Stage: "requirement", Decision: "approve"}, false)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("plain member must be 403 FORBIDDEN_APPROVER, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["error"] != "FORBIDDEN_APPROVER" {
+		t.Fatalf("expected error=FORBIDDEN_APPROVER, got %+v", body)
 	}
 }
 
@@ -297,4 +361,63 @@ func TestGrantDeliveryQueue(t *testing.T) {
 		t.Fatalf("pending without daemon binding must be 403, got %d", noCtx.Code)
 	}
 	_ = time.Now()
+}
+
+// cr_id is only unique per workspace (UNIQUE(workspace_id, cr_id) on cr), but
+// cr_sync_event — the evidence source latestEvidence reads from — has no
+// workspace_id column at all. Regression for a real cross-workspace leak: a
+// same-named CR in another workspace must not surface its evidence (file
+// paths + sha256 digests) through this workspace's approval card.
+func TestApprovalCardDoesNotLeakEvidenceAcrossWorkspaces(t *testing.T) {
+	crID := "CR-9002-006"
+	resetCR(t, crID)
+
+	var otherWorkspaceID string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO workspace (name, slug) VALUES ('governance-tests-other', 'governance-tests-other')
+		ON CONFLICT (slug) DO UPDATE SET updated_at = now()
+		RETURNING id::text`).Scan(&otherWorkspaceID); err != nil {
+		t.Fatalf("other workspace fixture: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM cr WHERE workspace_id = $1::uuid`, otherWorkspaceID)
+	})
+
+	secretEvidence := map[string]string{
+		"change-requests/CR-9002-006/review-annotations/requirement.yml": "sha256:" + hex.EncodeToString(bytes.Repeat([]byte{0xcd}, 32)),
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO cr (workspace_id, cr_id, status) VALUES ($1::uuid, $2, 'developing')`,
+		otherWorkspaceID, crID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
+		VALUES ($1, $2, 'status', '{}', $3, now())`, crID, "ev-other-"+crID, secretEvidence); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, _ := newTestApprovalService(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+testWorkspaceID+"/crs/"+crID+"/approval", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("workspaceID", testWorkspaceID)
+	rctx.URLParams.Add("crID", crID)
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.SetMemberContext(ctx, testWorkspaceID, db.Member{})
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	svc.HandleApprovalCard(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approval card: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Evidence map[string]string `json:"evidence"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Evidence) != 0 {
+		t.Fatalf("must not see the other workspace's evidence, got %+v", resp.Evidence)
+	}
 }

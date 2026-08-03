@@ -254,5 +254,47 @@
       "presenter_revoked": "{{approver}} revoked {{user}}'s presenter access",
       "presenter_released": "{{user}} released presenter control"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "Drafting",
+      "requirement-reviewing": "Requirement Review",
+      "requirement-approved": "Requirement Approved",
+      "tech-designing": "Tech Design",
+      "tech-design-review-pending": "Design Review Pending",
+      "tech-design-reviewed": "Design Reviewed",
+      "task-breakdown": "Task Breakdown",
+      "developing": "Developing",
+      "code-reviewing": "Code Review",
+      "code-approved": "Code Approved",
+      "merging": "Merging",
+      "writing-back": "Writing Back",
+      "archived": "Archived",
+      "rejected": "Rejected",
+      "withdrawn": "Withdrawn"
+    },
+    "multiple_active": "{{count}} active CRs",
+    "needs_reconcile": "Reconciling…",
+    "stage": {
+      "requirement": "Requirement",
+      "tech-design": "Tech Design",
+      "dev-start": "Dev Start",
+      "code": "Code"
+    },
+    "approve": "Approve",
+    "reject": "Reject",
+    "reject_reason_placeholder": "Reason for rejection…",
+    "reject_confirm": "Confirm reject",
+    "cancel": "Cancel",
+    "waiting_for_approval": "Waiting for {{stage}} approval",
+    "pending_advance": "Approved — waiting to advance",
+    "evidence_label": "Evidence",
+    "evidence_drift": "Evidence changed since this card loaded — reload and re-review",
+    "forbidden_approver": "You don't have permission to approve this",
+    "submit_failed": "Failed to submit, please try again",
+    "attempt_label": "Attempt {{attempt}}/3",
+    "review_blocked": "Review blocked",
+    "review_passed": "Review passed",
+    "node_cancelled": "Cancelled"
   }
 }

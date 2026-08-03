@@ -6,6 +6,7 @@ export {
   projectPrivateChatOptions,
   projectDiscussionOptions,
   projectQueueStatusOptions,
+  projectGatesOptions,
   projectQueueItemsOptions,
   projectPresenterOptions,
 } from "./queries";
@@ -16,6 +17,7 @@ export {
   useDeleteProject,
   useSendProjectChatMessage,
   useSetProjectTeamAgent,
+  useApproveCr,
   useCancelProjectQueueTask,
   useRequestPresenter,
   useApprovePresenter,

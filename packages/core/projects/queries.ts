@@ -17,6 +17,10 @@ export const projectKeys = {
     [...projectKeys.queueStatus(wsId, id), "items"] as const,
   chat: (wsId: string, id: string) =>
     [...projectKeys.all(wsId), "chat", id] as const,
+  gatesAll: (wsId: string) =>
+    [...projectKeys.all(wsId), "gates"] as const,
+  gates: (wsId: string, id: string) =>
+    [...projectKeys.gatesAll(wsId), id] as const,
   privateChat: (wsId: string, id: string) =>
     [...projectKeys.all(wsId), "private-chat", id] as const,
   discussion: (wsId: string, id: string) =>
@@ -65,6 +69,20 @@ export function projectChatOptions(wsId: string, id: string) {
   return queryOptions({
     queryKey: projectKeys.chat(wsId, id),
     queryFn: () => api.getProjectChat(id),
+  });
+}
+
+// CR governance gates (CR-2026-011 TASK-05): 16-state CR badge + pending
+// approval cards + gate-node history for the project chat window. An empty
+// `crs` array (feature off server-side, or genuinely no in-flight CRs) is
+// the natural "nothing to render" state — no separate enabled/disabled flag
+// needed (api.getProjectGates already folds the feature-off 404 into this
+// same empty shape).
+export function projectGatesOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: projectKeys.gates(wsId, id),
+    queryFn: () => api.getProjectGates(id),
+    select: (data) => data.crs,
   });
 }
 

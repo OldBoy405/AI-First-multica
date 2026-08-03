@@ -172,6 +172,13 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
+  EMPTY_PROJECT_GATES_RESPONSE,
+  ProjectGatesResponseSchema,
+  type ProjectGatesResponse,
+  EMPTY_APPROVE_CR_RESPONSE,
+  ApproveCrResponseSchema,
+  type ApproveCrResponse,
+  type ApproveCrRequest,
   EMPTY_QUEUE_STATUS_WITH_ITEMS,
   QueueStatusWithItemsSchema,
   type QueueStatusWithItems,
@@ -2023,6 +2030,44 @@ export class ApiClient {
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
+    });
+  }
+
+  // CR governance gates for a project's chat window (CR-2026-011 TASK-04/05):
+  // 16-state CR status + pending approval-stage detection + approval-card
+  // evidence + gate-node history, all in one round trip. The whole route is
+  // unmounted server-side when APPROVAL_SIGNING_KEY isn't configured (SDD
+  // DD-8) — that 404 means "governance feature is off", not "not found", so
+  // it resolves to the empty response instead of throwing (the query hook
+  // wrapping this, T06, disables the gate UI on empty rather than erroring).
+  async getProjectGates(id: string): Promise<ProjectGatesResponse> {
+    try {
+      const raw = await this.fetch<unknown>(`/api/projects/${id}/gates`);
+      return parseWithFallback(raw, ProjectGatesResponseSchema, EMPTY_PROJECT_GATES_RESPONSE, {
+        endpoint: "GET /api/projects/:id/gates",
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        return EMPTY_PROJECT_GATES_RESPONSE;
+      }
+      throw err;
+    }
+  }
+
+  // Approve or reject a CR's pending gate (CR-2026-011 TASK-04). Non-2xx
+  // responses (409 EVIDENCE_DRIFT / 403 FORBIDDEN_APPROVER / 403 human-actor)
+  // throw a structured ApiError the caller branches on via err.body.error.
+  async approveCr(
+    workspaceId: string,
+    crId: string,
+    body: ApproveCrRequest,
+  ): Promise<ApproveCrResponse> {
+    const raw = await this.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/crs/${crId}/approve`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+    return parseWithFallback(raw, ApproveCrResponseSchema, EMPTY_APPROVE_CR_RESPONSE, {
+      endpoint: "POST /api/workspaces/:wid/crs/:crId/approve",
     });
   }
 

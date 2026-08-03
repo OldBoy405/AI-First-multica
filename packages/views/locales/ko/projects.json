@@ -251,5 +251,47 @@
       "presenter_revoked": "{{approver}}님이 {{user}}님의 발표자 권한을 취소했습니다",
       "presenter_released": "{{user}}님이 발표자 권한을 해제했습니다"
     }
+  },
+  "governance": {
+    "status": {
+      "drafting": "초안 작성 중",
+      "requirement-reviewing": "요구사항 검토 중",
+      "requirement-approved": "요구사항 승인됨",
+      "tech-designing": "기술 설계 중",
+      "tech-design-review-pending": "설계 검토 대기",
+      "tech-design-reviewed": "설계 검토 완료",
+      "task-breakdown": "작업 분해",
+      "developing": "개발 중",
+      "code-reviewing": "코드 리뷰 중",
+      "code-approved": "코드 승인됨",
+      "merging": "병합 중",
+      "writing-back": "역기록 중",
+      "archived": "보관됨",
+      "rejected": "반려됨",
+      "withdrawn": "철회됨"
+    },
+    "multiple_active": "진행 중인 CR {{count}}건",
+    "needs_reconcile": "동기화 중…",
+    "stage": {
+      "requirement": "요구사항",
+      "tech-design": "기술 설계",
+      "dev-start": "개발 시작",
+      "code": "코드"
+    },
+    "approve": "승인",
+    "reject": "반려",
+    "reject_reason_placeholder": "반려 사유…",
+    "reject_confirm": "반려 확인",
+    "cancel": "취소",
+    "waiting_for_approval": "{{stage}} 승인 대기 중",
+    "pending_advance": "승인됨 — 진행 대기 중",
+    "evidence_label": "증거",
+    "evidence_drift": "이 카드가 로드된 이후 증거가 변경되었습니다 — 새로고침 후 다시 검토하세요",
+    "forbidden_approver": "이 항목을 승인할 권한이 없습니다",
+    "submit_failed": "제출에 실패했습니다. 다시 시도해 주세요",
+    "attempt_label": "{{attempt}}/3회차",
+    "review_blocked": "리뷰가 차단됨",
+    "review_passed": "리뷰 승인됨",
+    "node_cancelled": "취소됨"
   }
 }

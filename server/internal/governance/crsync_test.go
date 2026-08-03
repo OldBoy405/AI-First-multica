@@ -67,6 +67,13 @@ func resetCR(t *testing.T, crID string) {
 	t.Helper()
 	_, _ = testPool.Exec(context.Background(), `DELETE FROM cr_sync_event WHERE cr_id = $1`, crID)
 	_, _ = testPool.Exec(context.Background(), `DELETE FROM cr WHERE cr_id = $1`, crID)
+	// CR-2026-011 TASK-04: pre-existing gap — approval_test.go's tests each
+	// mint a fresh ed25519 keypair (newTestApprovalService) but
+	// approval_record's idempotency key is process-independent (cr_id, stage,
+	// evidence_digest). Without this cleanup, a second run against a
+	// persistent (non-ephemeral) DB hits the first run's stale grant, signed
+	// by a key this run's public key can no longer verify against.
+	_, _ = testPool.Exec(context.Background(), `DELETE FROM approval_record WHERE cr_id = $1`, crID)
 }
 
 func postEvents(t *testing.T, svc *SyncService, workspaceID string, evs []OutboxEvent) crEventsResponse {

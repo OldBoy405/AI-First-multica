@@ -79,7 +79,8 @@ export type WSEventType =
   | "github_installation:deleted"
   | "pull_request:linked"
   | "pull_request:updated"
-  | "pull_request:unlinked";
+  | "pull_request:unlinked"
+  | "cr:updated";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -389,6 +390,16 @@ export interface InvitationRevokedPayload {
   invitee_email: string;
 }
 
+// CR governance projection update (CR-2026-011 TASK-05; server const
+// governance.EventCRUpdated). Fired after any cr/pipeline_run/
+// pipeline_node_run projection change — the CR badge and gate cards both
+// invalidate on this single event rather than each tracking their own.
+export interface CRUpdatedPayload {
+  cr_id: string;
+  status: string;
+  needs_reconcile: boolean;
+}
+
 /**
  * Maps every WSEventType to its payload interface. Events whose payload
  * shape isn't formally typed (server emits an object the client doesn't
@@ -475,6 +486,7 @@ export interface WSEventPayloadMap {
   "pull_request:linked": unknown;
   "pull_request:updated": unknown;
   "pull_request:unlinked": unknown;
+  "cr:updated": CRUpdatedPayload;
 }
 
 /**

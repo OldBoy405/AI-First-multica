@@ -6,6 +6,7 @@ import { useRecentContextStore } from "../chat/recent-context-store";
 import { clearIssueSurfaceViewState } from "../issues/stores/surface-view-store";
 import { issueScopeKey } from "../issues/surface/scope";
 import type { Project, CreateProjectRequest, UpdateProjectRequest, ListProjectsResponse } from "../types";
+import type { ApproveCrRequest } from "../api/schemas";
 
 export function useCreateProject() {
   const qc = useQueryClient();
@@ -167,6 +168,24 @@ export function useSetProjectTeamAgent(wsId: string, projectId: string) {
       api.updateProject(projectId, { settings: { team_agent_id: agentId } }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+    },
+  });
+}
+
+// Approve/reject a CR's pending gate (CR-2026-011 TASK-05). No optimistic
+// update — the outcome isn't locally predictable (EVIDENCE_DRIFT/
+// FORBIDDEN_APPROVER can reject it, and pending_advance is server-derived),
+// so the card renders its own pending state and invalidates on settle
+// (CLAUDE.md's optimistic-update rule). cr:updated (WS) also invalidates the
+// same key once crctl actually advances the CR — this invalidate covers the
+// gap until that arrives.
+export function useApproveCr(wsId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ crId, ...body }: { crId: string } & ApproveCrRequest) =>
+      api.approveCr(wsId, crId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: projectKeys.gates(wsId, projectId) });
     },
   });
 }

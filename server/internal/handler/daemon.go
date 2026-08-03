@@ -2379,6 +2379,15 @@ func (h *Handler) ExtendTaskPrepareLease(w http.ResponseWriter, r *http.Request)
 }
 
 // StartTask marks a dispatched task as running.
+// TaskStartRequest is the optional body the daemon POSTs alongside start.
+// CRID is AIFIRST (CR-2026-011 TASK-04): the daemon derives it from the
+// task's workdir git branch (the "requirement/CR-*" naming convention) and
+// self-reports it here; the server does not trust it at face value — see
+// TaskService.AttributeTaskToCR / SetTaskCRAttributionIfValid.
+type TaskStartRequest struct {
+	CRID string `json:"cr_id"`
+}
+
 func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
@@ -2388,11 +2397,19 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var req TaskStartRequest
+	if r.ContentLength != 0 {
+		_ = json.NewDecoder(r.Body).Decode(&req) // best-effort: cr_id is an enhancement, malformed body must not block start
+	}
+
 	task, err := h.TaskService.StartTask(r.Context(), parseUUID(taskID))
 	if err != nil {
 		slog.Warn("start task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if req.CRID != "" {
+		h.TaskService.AttributeTaskToCR(r.Context(), task.ID, req.CRID)
 	}
 
 	slog.Info("task started", "task_id", taskID, "agent_id", uuidToString(task.AgentID))

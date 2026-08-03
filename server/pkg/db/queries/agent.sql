@@ -264,6 +264,12 @@ WHERE id = $1 AND issue_id IS NULL;
 -- run has not changed. The Composio overlay follows the agent's invocation
 -- permission and uses the agent owner's connection (MUL-3963); originator is
 -- carried for A2A/audit, not as an originator == agent.owner_id gate.
+--
+-- cr_id / pipeline_node_run_id (AIFIRST, CR-2026-011) are inherited alongside
+-- attempt/parent_task_id: a retry is the same gate-node work re-attempted, not
+-- a new task, so its CR/pipeline attribution carries over unchanged. Omitting
+-- these here would silently drop attribution on every auto-retry.
+--
 -- AIFIRST: CR-2026-010 inherits project_id from the parent row so a retried
 -- task keeps the project-wide single-writer claim branch instead of losing
 -- serialization on retry.
@@ -272,7 +278,8 @@ INSERT INTO agent_task_queue (
     status, priority, trigger_comment_id, coalesced_comment_ids, trigger_summary, context,
     session_id, work_dir,
     attempt, max_attempts, parent_task_id, force_fresh_session, is_leader_task,
-    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps, project_id
+    squad_id, originator_user_id, runtime_mcp_overlay, runtime_connected_apps,
+    cr_id, pipeline_node_run_id, project_id
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -286,7 +293,7 @@ SELECT
     p.originator_user_id,
     sqlc.narg(runtime_mcp_overlay),
     sqlc.narg(runtime_connected_apps),
-    p.project_id
+    p.cr_id, p.pipeline_node_run_id, p.project_id
 FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING *;
@@ -511,6 +518,22 @@ SET status = 'running',
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'waiting_local_directory')
 RETURNING *;
+
+-- name: SetTaskCRAttributionIfValid :execrows
+-- AIFIRST (CR-2026-011 TASK-04, SDD DD-4): best-effort cr_id attribution,
+-- written from the daemon's StartTask self-report (workdir branch name), not
+-- an enqueue-time param — no enqueue path has CR context. The EXISTS guard is
+-- the workspace check: the caller does not get to attribute a task to a CR
+-- outside its own workspace by self-reporting an arbitrary cr_id. Zero rows
+-- affected means the guard failed (unknown cr_id or cross-workspace) — the
+-- caller treats that as a silent no-op, matching CompleteTask's precedent of
+-- not trusting daemon-supplied audit data at face value.
+UPDATE agent_task_queue atq
+SET cr_id = $2
+FROM agent a
+WHERE atq.id = $1
+  AND atq.agent_id = a.id
+  AND EXISTS (SELECT 1 FROM cr WHERE cr.cr_id = $2 AND cr.workspace_id = a.workspace_id);
 
 -- name: MarkAgentTaskWaitingLocalDirectory :one
 -- Transitions a freshly-dispatched task into 'waiting_local_directory' while

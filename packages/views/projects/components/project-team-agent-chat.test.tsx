@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { ApiError } from "@multica/core/api";
 import type { AgentTask, TimelineEntry } from "@multica/core/types";
+import type { ProjectGateCR } from "@multica/core/api/schemas";
 import enProjects from "../../locales/en/projects.json";
 import enCommon from "../../locales/en/common.json";
 
@@ -133,6 +134,7 @@ const projectChatState = {
   }),
 };
 const sendMock = { mutateAsync: vi.fn(), isPending: false };
+const approveMock = { mutateAsync: vi.fn(), isPending: false };
 // CR-2026-007 T05: stop/cancel mutation shared instance, mirroring sendMock.
 const cancelMock = { mutateAsync: vi.fn(), isPending: false };
 const requestPresenterMock = { mutate: vi.fn(), isPending: false };
@@ -153,6 +155,8 @@ vi.mock("@multica/core/projects", () => ({
     { getState: () => projectChatState },
   ),
   useSendProjectChatMessage: () => sendMock,
+  // CR-2026-011 TASK-06: CrGateCard's ApprovalCard variant calls this.
+  useApproveCr: () => approveMock,
   useCancelProjectQueueTask: () => cancelMock,
   useRequestPresenter: () => requestPresenterMock,
   // Never resolves — keeps `queue` undefined so the live-queue path never
@@ -238,6 +242,35 @@ function task(id: string, at: string, overrides: Partial<AgentTask> = {}): Agent
   };
 }
 
+function gateCR(overrides: Partial<ProjectGateCR> & { nodeAt: string; nodeStatus: string; nodeKind?: string }): ProjectGateCR {
+  const { nodeAt, nodeStatus, nodeKind = "human_approval", ...rest } = overrides;
+  return {
+    cr_id: "CR-2026-011",
+    title: "t",
+    status: "requirement-reviewing",
+    needs_reconcile: false,
+    updated_at: nodeAt,
+    pending_stage: "requirement",
+    can_approve: true,
+    evidence: {},
+    evidence_digest: "",
+    key_id: "",
+    pending_advance: false,
+    gate_nodes: [
+      {
+        node_id: "n1",
+        kind: nodeKind,
+        seq: 5,
+        status: nodeStatus,
+        stage: "requirement",
+        attempt: 1,
+        started_at: nodeAt,
+      },
+    ],
+    ...rest,
+  };
+}
+
 beforeEach(() => {
   for (const k of Object.keys(projectChatState.drafts)) delete projectChatState.drafts[k];
   for (const k of Object.keys(projectChatState.agentRequestFilter)) {
@@ -297,6 +330,40 @@ describe("TeamAgentStreamView", () => {
       "project-chat-task-card",
       "project-chat-user-bubble",
       "project-chat-task-card",
+    ]);
+  });
+
+  it("interleaves gate-node cards from crs by timestamp (CR-2026-011 TASK-06)", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[comment("c1", "2026-01-01T00:00:02.000Z")]}
+        tasks={[task("t1", "2026-01-01T00:00:01.000Z")]}
+        crs={[
+          gateCR({ cr_id: "CR-A", nodeAt: "2026-01-01T00:00:00.500Z", nodeStatus: "running" }),
+          gateCR({
+            cr_id: "CR-B",
+            nodeAt: "2026-01-01T00:00:03.000Z",
+            nodeStatus: "blocked",
+            nodeKind: "skill",
+          }),
+        ]}
+        currentUserId="member-1"
+      />,
+    );
+
+    const nodes = Array.from(
+      container.querySelectorAll(
+        '[data-testid="project-chat-task-card"],[data-testid="project-chat-user-bubble"],[data-testid="cr-gate-approval-card"],[data-testid="cr-gate-blocked-card"]',
+      ),
+    ).map((el) => el.getAttribute("data-testid"));
+
+    // approval(0.5s) → task(1.0s) → comment(2.0s) → blocked(3.0s).
+    expect(nodes).toEqual([
+      "cr-gate-approval-card",
+      "project-chat-task-card",
+      "project-chat-user-bubble",
+      "cr-gate-blocked-card",
     ]);
   });
 });

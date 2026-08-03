@@ -147,4 +147,11 @@ const (
 	// invalidate the Slack installations query on either.
 	EventSlackInstallationCreated = "slack_installation:created"
 	EventSlackInstallationRevoked = "slack_installation:revoked"
+
+	// AIFIRST: CR governance projection update (CR-2026-011 TASK-05). Fired by
+	// internal/governance after any cr/pipeline_run/pipeline_node_run
+	// projection change (status advance, review verdict, gate node
+	// running/passed/blocked). governance.EventCRUpdated references this
+	// constant rather than duplicating the string literal.
+	EventCRUpdated = "cr:updated"
 )

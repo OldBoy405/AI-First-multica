@@ -9,6 +9,7 @@ import { issueKeys } from "@multica/core/issues/queries";
 import { taskMessagesOptions } from "@multica/core/chat/queries";
 import {
   projectChatDraftKey,
+  projectGatesOptions,
   projectPresenterOptions,
   projectQueueStatusOptions,
   useCancelProjectQueueTask,
@@ -16,6 +17,7 @@ import {
   useRequestPresenter,
   useSendProjectChatMessage,
 } from "@multica/core/projects";
+import type { ProjectGateCR } from "@multica/core/api/schemas";
 import { useAuthStore } from "@multica/core/auth";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { agentListOptions } from "@multica/core/workspace/queries";
@@ -30,6 +32,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { ReadonlyContent } from "../../editor";
 import { buildTimeline } from "../../common/task-transcript";
 import { TimelineView } from "../../chat/components/chat-message-list";
+import { CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { ProjectQueueBar } from "./project-queue-bar";
@@ -99,6 +102,10 @@ export function ProjectTeamAgentChat({
     [timeline],
   );
 
+  // CR governance gates (CR-2026-011 TASK-06): the same query CrStatusBadge
+  // reads, kept live by cr:updated (WS) — no separate subscription needed.
+  const { data: crs = [] } = useQuery(projectGatesOptions(wsId, projectId));
+
   // "Agent requests only" filter (CR-2026-007 DD-4). Read/write happens here
   // so the switch below is the single owner of the store round-trip; the
   // stream view underneath just receives the resolved boolean and stays a
@@ -130,6 +137,7 @@ export function ProjectTeamAgentChat({
         <TeamAgentStreamView
           comments={comments}
           tasks={tasks}
+          crs={crs}
           presenterNotices={presenterNotices}
           currentUserId={userId}
           wsId={wsId}
@@ -159,19 +167,23 @@ export function ProjectTeamAgentChat({
 export function TeamAgentStreamView({
   comments,
   tasks,
+  crs = [],
   presenterNotices = [],
-  currentUserId,
   wsId,
   projectId,
+  currentUserId,
   canConfigure,
   filterOn,
 }: {
   comments: TimelineEntry[];
   tasks: AgentTask[];
+  /** CR governance gates (CR-2026-011 TASK-06) — each gate_node becomes a
+   *  third kind of stream item, interleaved with comments and task cards. */
+  crs?: ProjectGateCR[];
   presenterNotices?: TimelineEntry[];
-  currentUserId?: string;
   wsId: string;
   projectId: string;
+  currentUserId?: string;
   /** Workspace owner/admin — can stop any running task, not just their own (DD-1). */
   canConfigure: boolean;
   /** "Agent requests only" filter (DD-4): switches task cards to summary form. */
@@ -225,6 +237,18 @@ export function TeamAgentStreamView({
         ),
       });
     }
+    for (const cr of crs) {
+      for (const node of cr.gate_nodes) {
+        const key = `g:${cr.cr_id}:${node.node_id}:${node.attempt}`;
+        merged.push({
+          key,
+          at: node.started_at ? new Date(node.started_at).getTime() : new Date(cr.updated_at).getTime(),
+          node: (
+            <CrGateCard key={key} cr={cr} node={node} wsId={wsId} projectId={projectId} />
+          ),
+        });
+      }
+    }
     for (const notice of presenterNotices) {
       merged.push({
         key: `p:${notice.id}`,
@@ -238,6 +262,7 @@ export function TeamAgentStreamView({
   }, [
     comments,
     tasks,
+    crs,
     presenterNotices,
     currentUserId,
     withdrawnCommentIds,

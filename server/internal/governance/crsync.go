@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // MaxEventsPerBatch bounds one report call (PRD FR-2).
@@ -32,7 +33,7 @@ const MaxEventsPerBatch = 100
 
 // EventCRUpdated is the WS event type broadcast to workspace rooms after a
 // projection change (board refresh signal).
-const EventCRUpdated = "cr:updated"
+const EventCRUpdated = protocol.EventCRUpdated
 
 var crIDRe = regexp.MustCompile(`^CR-\d{4}-\d{3}$`)
 
@@ -41,6 +42,7 @@ var knownEventKinds = map[string]bool{
 	"merge": true, "archive": true, "inbox": true,
 	"audit":    true, // TASK-10: activity_log rows, bypasses the cr ledger
 	"snapshot": true, // TASK-07: daemon-mode reconcile, bypasses the cr ledger
+	"review":   true, // CR-2026-011 TASK-03: review-verdict visibility (blocked/passed), not a status transition
 }
 
 // ledgerlessKinds carry no commit sha (the ledger's idempotency key) and may
@@ -215,6 +217,8 @@ func (s *SyncService) apply(ctx context.Context, workspaceID string, ev OutboxEv
 	switch ev.EventKind {
 	case "status", "archive":
 		return s.applyStatus(ctx, workspaceID, ev)
+	case "review":
+		return s.applyReview(ctx, workspaceID, ev)
 	case "checkpoint":
 		// Fills projected_commit; also the completion channel for --embedded
 		// status events that carried an empty commit_sha (source design §A.5 —
@@ -264,6 +268,13 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 		if err != nil {
 			return err
 		}
+		// Gate-node projection (CR-2026-011 TASK-02) is read-side only — only
+		// project when the transition is trusted (legalFresh); an untrusted
+		// first sighting is flagged needs_reconcile above and must not seed a
+		// pipeline_run off a from/to pair we don't believe.
+		if legalFresh {
+			s.projectGateTransition(ctx, workspaceID, ev.CRID, ev.FromStatus, ev.ToStatus)
+		}
 		s.publish(ctx, workspaceID, ev.CRID)
 		return nil
 	}
@@ -277,6 +288,7 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 		if err != nil {
 			return err
 		}
+		s.projectGateTransition(ctx, workspaceID, ev.CRID, ev.FromStatus, ev.ToStatus)
 	} else {
 		// Out-of-order or illegal: never force the projection — flag and let
 		// reconcile replay from the authority.

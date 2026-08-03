@@ -33,6 +33,8 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/multica-ai/multica/server/pkg/gitguard"
 )
 
@@ -151,12 +153,22 @@ func deliverGrants(ctx context.Context, roots []string, fetcher grantFetcher, lo
 	}
 }
 
-// The four stable [cr] commit-message contracts (P1 design §4.3 / SDD §4.3).
+// The four stable [cr] commit-message contracts (P1 design §4.3 / SDD §4.3),
+// plus a fifth (CR-2026-011 TASK-03) for review-verdict visibility: unlike the
+// other four, this one is not itself a status transition — a blocked review
+// never advances the CR, so it never produces a "[cr] status" commit at all,
+// and would otherwise be invisible to the platform (SDD DD-3).
 var (
 	crCommitStatusRe  = regexp.MustCompile(`^\[cr\] status (CR-\d{4}-\d{3}) (\S+) -> (\S+)$`)
 	crCommitMergeRe   = regexp.MustCompile(`^\[cr\] merge metadata (CR-\d{4}-\d{3})`)
 	crCommitArchiveRe = regexp.MustCompile(`^\[cr\] archive (CR-\d{4}-\d{3})`)
 	crCommitInboxRe   = regexp.MustCompile(`^\[cr\] inbox-emit (CR-\d{4}-\d{3}) event=(\S+)`)
+	// Matches only the three review-annotation stages the gate-node projector
+	// tracks (SDD DD-3) — dev-start has no preceding AI review, and
+	// write-test-report/review-planning-report are out of D7's scope. No `$`
+	// anchor: the commit subject continues with free text ("verdict=pass, 0
+	// blockers, ...") that this event does not need to parse.
+	crCommitReviewRe = regexp.MustCompile(`^\[cr\] review-(requirement|tech-design|code) (CR-\d{4}-\d{3}): verdict=(\w+)`)
 )
 
 type crEventCollector struct {
@@ -423,14 +435,17 @@ func scanCommitsSinceCursor(root string) ([]crOutboxEvent, string, error) {
 		if len(parts) != 3 {
 			continue
 		}
-		if ev, ok := parseCRCommitMessage(parts[0], parts[1], parts[2]); ok {
+		if ev, ok := parseCRCommitMessage(root, parts[0], parts[1], parts[2]); ok {
 			events = append(events, ev)
 		}
 	}
 	return events, head, nil
 }
 
-func parseCRCommitMessage(sha, isoTime, subject string) (crOutboxEvent, bool) {
+// parseCRCommitMessage matches one commit subject against the five stable
+// [cr] contracts. root is only used by the review contract (it needs to read
+// review-annotations/{stage}.yml off disk); the other four never touch it.
+func parseCRCommitMessage(root, sha, isoTime, subject string) (crOutboxEvent, bool) {
 	when, err := time.Parse(time.RFC3339, isoTime)
 	if err != nil {
 		when = time.Now()
@@ -453,7 +468,82 @@ func parseCRCommitMessage(sha, isoTime, subject string) (crOutboxEvent, bool) {
 		base.Payload = json.RawMessage(fmt.Sprintf(`{"event":%q}`, m[2]))
 		return base, true
 	}
+	if m := crCommitReviewRe.FindStringSubmatch(subject); m != nil {
+		stage, crID, verdict := m[1], m[2], m[3]
+		payload, ok := buildReviewPayload(root, crID, stage, verdict)
+		if !ok {
+			// Annotation file unreadable/unparsable: skip this event rather
+			// than report a payload we can't stand behind. Best-effort,
+			// matching the rest of the commit-scan fallback channel.
+			return crOutboxEvent{}, false
+		}
+		base.EventKind, base.CRID, base.Payload = "review", crID, payload
+		return base, true
+	}
 	return crOutboxEvent{}, false
+}
+
+// reviewAnnotationDoc is the subset of review-annotations/{stage}.yml this
+// event needs (SKILL.md's full schema has more fields — repair-instructions,
+// review-notes — not relevant to gate-node projection).
+type reviewAnnotationDoc struct {
+	Verdict    string          `yaml:"verdict"`
+	Reviewer   string          `yaml:"reviewer"`
+	ReviewedAt string          `yaml:"reviewed-at"`
+	Blockers   []reviewBlocker `yaml:"blockers"`
+	ReviewLoop struct {
+		CurrentAttempt int `yaml:"current-attempt"`
+	} `yaml:"review-loop"`
+}
+
+type reviewBlocker struct {
+	ID         string `yaml:"id" json:"id"`
+	Location   string `yaml:"location" json:"location"`
+	Issue      string `yaml:"issue" json:"issue"`
+	Suggestion string `yaml:"suggestion" json:"suggestion"`
+}
+
+// buildReviewPayload reads review-annotations/{stage}.yml directly off the
+// worktree's working tree rather than `git show {sha}:path` at the exact
+// historical commit.
+//
+// ponytail: this is a deliberate simplification with a real ceiling — `show`
+// is not in controlled-shell's git allowlist (rules.json, tools repo), and
+// adding it is a cross-repo change outside this CR's scope. A working-tree
+// read is exact for the common case (daemon scans promptly; the file at HEAD
+// still holds this commit's content) but can report the WRONG attempt's
+// content if the daemon's scan cursor falls behind across an entire
+// reviewLoop cycle (multiple review rounds land before the next scan) — the
+// batched-catchup events would all resolve to the same (latest) file state
+// instead of each round's own. Upgrade path: get `show` added to
+// controlled-shell/rules.json's git allowlist, then read the file with
+// `git show {sha}:path` here instead (the git plumbing is otherwise
+// identical — see gitLine/crGuardCheck in this file).
+func buildReviewPayload(root, crID, stage, verdict string) (json.RawMessage, bool) {
+	path := filepath.Join(root, "change-requests", crID, "review-annotations", stage+".yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var doc reviewAnnotationDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, false
+	}
+	if doc.Verdict == "" {
+		doc.Verdict = verdict // fall back to the commit subject if the file is mid-write
+	}
+	payload, err := json.Marshal(map[string]any{
+		"stage":       stage,
+		"verdict":     doc.Verdict,
+		"blockers":    doc.Blockers,
+		"attempt":     doc.ReviewLoop.CurrentAttempt,
+		"reviewer":    doc.Reviewer,
+		"reviewed_at": doc.ReviewedAt,
+	})
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
 // mergeCREvents dedupes the two channels by the server's idempotency key. The

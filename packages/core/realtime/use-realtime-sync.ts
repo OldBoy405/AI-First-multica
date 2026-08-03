@@ -86,6 +86,7 @@ import type {
   ChatMessagesPage,
   ChatSession,
   InvitationCreatedPayload,
+  CRUpdatedPayload,
 } from "../types";
 
 const chatWsLogger = createLogger("chat.ws");
@@ -614,6 +615,11 @@ export function useRealtimeSync(
       // every message would flood the network. Specific chat handlers below
       // still receive it via ws.on() (a separate subscription channel).
       "task:message",
+      // CR governance projection update (CR-2026-011 TASK-05) — handled
+      // explicitly below; broadly invalidates every project's gates query in
+      // the workspace since the payload only carries cr_id, not project_id
+      // (SDD DD-6: event frequency is low, over-invalidation is cheap).
+      "cr:updated",
       // task:completed / task:failed deliberately NOT here. They go through
       // both the task-prefix invalidate (refreshes the agent-task-snapshot
       // cache) AND the chat-specific ws.on() handlers below. The two
@@ -665,6 +671,18 @@ export function useRealtimeSync(
         onIssueDeleted(qc, wsId, issue_id);
         onInboxIssueDeleted(qc, wsId, issue_id);
       }
+    });
+
+    // CR governance projection update (CR-2026-011 TASK-05): status advance,
+    // review verdict, or gate node transition. cr_id is the only stable
+    // identifier in the payload — invalidating every gates(wsId, *) query is
+    // simpler and cheap at this event's frequency than threading project_id
+    // through the server payload just to narrow the invalidation.
+    const unsubCRUpdated = ws.on("cr:updated", (p) => {
+      const { cr_id } = p as CRUpdatedPayload;
+      if (!cr_id) return;
+      const wsId = getCurrentWsId();
+      if (wsId) qc.invalidateQueries({ queryKey: projectKeys.gatesAll(wsId) });
     });
 
     const unsubIssueLabelsChanged = ws.on("issue_labels:changed", (p) => {
@@ -1188,6 +1206,7 @@ export function useRealtimeSync(
       unsubIssueUpdated();
       unsubIssueCreated();
       unsubIssueDeleted();
+      unsubCRUpdated();
       unsubIssueLabelsChanged();
       unsubIssueMetadataChanged();
       unsubInboxNew();

@@ -218,7 +218,7 @@ func TestParseCRCommitMessageContracts(t *testing.T) {
 		{"feat: unrelated", "", "", false},
 	}
 	for _, c := range cases {
-		ev, ok := parseCRCommitMessage("abc", "2026-07-31T10:00:00+08:00", c.subject)
+		ev, ok := parseCRCommitMessage(t.TempDir(), "abc", "2026-07-31T10:00:00+08:00", c.subject)
 		if ok != c.ok {
 			t.Errorf("%q: ok=%v want %v", c.subject, ok, c.ok)
 			continue
@@ -226,6 +226,75 @@ func TestParseCRCommitMessageContracts(t *testing.T) {
 		if ok && (ev.EventKind != c.wantKind || ev.CRID != c.wantCR) {
 			t.Errorf("%q: got (%s,%s) want (%s,%s)", c.subject, ev.EventKind, ev.CRID, c.wantKind, c.wantCR)
 		}
+	}
+}
+
+// ── TASK-03: review-verdict commit contract (fifth [cr] message shape) ──────
+
+func writeReviewAnnotation(t *testing.T, root, crID, stage, content string) {
+	t.Helper()
+	dir := filepath.Join(root, "change-requests", crID, "review-annotations")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stage+".yml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseCRCommitMessageReviewContract(t *testing.T) {
+	root := t.TempDir()
+	writeReviewAnnotation(t, root, "CR-9003-001", "requirement", `
+verdict: block
+reviewer: ai-reviewer
+reviewed-at: "2026-08-02T10:00:00+08:00"
+blockers:
+  - id: REQ-BLOCK-001
+    location: "FR-3"
+    issue: "not testable"
+    suggestion: "add a number"
+review-loop:
+  current-attempt: 1
+`)
+
+	ev, ok := parseCRCommitMessage(root, "sha1", "2026-08-02T10:00:00+08:00",
+		"[cr] review-requirement CR-9003-001: verdict=block, 1 blocker")
+	if !ok {
+		t.Fatal("expected review commit to parse")
+	}
+	if ev.EventKind != "review" || ev.CRID != "CR-9003-001" {
+		t.Fatalf("got (%s,%s), want (review,CR-9003-001)", ev.EventKind, ev.CRID)
+	}
+	var payload struct {
+		Stage    string          `json:"stage"`
+		Verdict  string          `json:"verdict"`
+		Attempt  int             `json:"attempt"`
+		Blockers []reviewBlocker `json:"blockers"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("bad payload JSON: %v", err)
+	}
+	if payload.Stage != "requirement" || payload.Verdict != "block" || payload.Attempt != 1 {
+		t.Fatalf("payload mismatch: %+v", payload)
+	}
+	if len(payload.Blockers) != 1 || payload.Blockers[0].ID != "REQ-BLOCK-001" {
+		t.Fatalf("expected 1 blocker with id REQ-BLOCK-001, got %+v", payload.Blockers)
+	}
+}
+
+func TestParseCRCommitMessageReviewContractOnlyThreeStages(t *testing.T) {
+	root := t.TempDir()
+	if _, ok := parseCRCommitMessage(root, "sha1", "2026-08-02T10:00:00+08:00",
+		"[cr] review-dev-start CR-9003-002: verdict=pass"); ok {
+		t.Fatal("dev-start is not a review stage in the regex — it should not match at all")
+	}
+}
+
+func TestParseCRCommitMessageReviewContractMissingFileSkipped(t *testing.T) {
+	root := t.TempDir() // no review-annotations file written
+	if _, ok := parseCRCommitMessage(root, "sha1", "2026-08-02T10:00:00+08:00",
+		"[cr] review-code CR-9003-003: verdict=pass, 0 blockers"); ok {
+		t.Fatal("expected event to be skipped when the annotation file is unreadable")
 	}
 }
 
