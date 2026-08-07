@@ -151,7 +151,7 @@ func runDiscussionRouteEnqueue(t *testing.T, fx discussionRouteFixture) {
 	t.Helper()
 	ctx := context.Background()
 	content := "[@Team](mention://agent/" + fx.TeamAgentID + ") please implement the converged plan"
-	triggers := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, content, nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
+	triggers, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, content, nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
 	if len(triggers) != 1 {
 		t.Fatalf("expected exactly one routing trigger, got %d: %+v", len(triggers), triggers)
 	}
@@ -303,7 +303,7 @@ func TestDiscussionActivation_QueueFullPostSystemComment(t *testing.T) {
 	ctx := context.Background()
 
 	activation := "[@DC](mention://agent/" + fx.CoordinatorID + ") please coordinate"
-	triggers := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, activation, nil, "member", fx.ActivatorID, commentTriggerComputeOptions{})
+	triggers, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, activation, nil, "member", fx.ActivatorID, commentTriggerComputeOptions{})
 	if len(triggers) != 1 {
 		t.Fatalf("expected exactly one activation trigger, got %d: %+v", len(triggers), triggers)
 	}

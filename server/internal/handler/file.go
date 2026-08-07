@@ -97,7 +97,56 @@ type AttachmentResponse struct {
 	CreatedAt   string `json:"created_at"`
 }
 
-func (h *Handler) attachmentToResponse(a db.Attachment) AttachmentResponse {
+// attachmentURLMode selects how DownloadURL is rendered on a response.
+//
+// MUL-5372 / GitHub #5999. A CloudFront-signed DownloadURL is ~800 chars, of
+// which ~630 are a Policy+Signature pair that is re-minted on every request
+// (the policy embeds now+TTL at second granularity). Emitting it for every
+// attachment of every list response is expensive three times over: raw payload,
+// a fresh RSA sign per attachment per request, and — because the bytes differ on
+// each read — it defeats any cache keyed on response content. Agents pay all
+// three and use none of it: they fetch files through the single-attachment
+// endpoint, which needs only the id.
+//
+// The mode is a caller capability declaration, never a server-side default
+// flip, so a client that does not know about it is served byte-identically to
+// before. See attachmentURLModeFromRequest.
+type attachmentURLMode int
+
+const (
+	// attachmentURLModeSigned pre-binds authorization into DownloadURL so the
+	// caller can hand it straight to a native resource load (browser <img>,
+	// Linking.openURL) that cannot attach an Authorization header. This is the
+	// default for every caller that does not opt out.
+	attachmentURLModeSigned attachmentURLMode = iota
+	// attachmentURLModeStable renders DownloadURL as the stable
+	// /api/attachments/{id}/download path. That endpoint re-signs and 302s on
+	// every hit, so the value stays correct forever and costs ~95 chars instead
+	// of ~800. Callers that pick this mode must be able to follow an
+	// authenticated redirect, or fetch a fresh signature from the
+	// single-attachment endpoint before handing a URL to a native loader.
+	attachmentURLModeStable
+)
+
+// ClientCapabilityStableAttachmentURLs is the X-Client-Capabilities token a
+// caller advertises to receive stable attachment paths instead of pre-signed
+// URLs in bulk responses. Reusing the existing capability header (rather than a
+// query parameter) keeps the declaration client-wide: it is a property of what
+// the caller can process, not of the resource being requested.
+const ClientCapabilityStableAttachmentURLs = "stable_attachment_urls"
+
+// attachmentURLModeFromRequest resolves the mode a request asked for. Absent or
+// unrecognized declarations resolve to attachmentURLModeSigned, which is what
+// makes this change safe to ship ahead of any client: the server default never
+// moves, callers migrate on their own release cadence.
+func attachmentURLModeFromRequest(r *http.Request) attachmentURLMode {
+	if r != nil && requestHasClientCapability(r, ClientCapabilityStableAttachmentURLs) {
+		return attachmentURLModeStable
+	}
+	return attachmentURLModeSigned
+}
+
+func (h *Handler) attachmentToResponse(a db.Attachment, mode attachmentURLMode) AttachmentResponse {
 	id := uuidToString(a.ID)
 	resp := AttachmentResponse{
 		ID:           id,
@@ -112,7 +161,10 @@ func (h *Handler) attachmentToResponse(a db.Attachment) AttachmentResponse {
 		SizeBytes:    a.SizeBytes,
 		CreatedAt:    a.CreatedAt.Time.Format("2006-01-02T15:04:05Z07:00"),
 	}
-	if h.CFSigner != nil {
+	// Only CloudFront mode overrides the stable path here; the presign and proxy
+	// modes already leave DownloadURL as the stable path and resolve it at
+	// download time, so stable mode is a no-op for them.
+	if h.CFSigner != nil && mode != attachmentURLModeStable {
 		resp.DownloadURL = h.CFSigner.SignedURL(a.Url, time.Now().Add(h.attachmentDownloadURLTTL()))
 	}
 	if a.IssueID.Valid {
@@ -277,10 +329,11 @@ func (h *Handler) groupAttachments(r *http.Request, commentIDs []pgtype.UUID) ma
 		slog.Error("failed to load attachments for comments", "error", err)
 		return nil
 	}
+	mode := attachmentURLModeFromRequest(r)
 	grouped := make(map[string][]AttachmentResponse, len(commentIDs))
 	for _, a := range attachments {
 		cid := uuidToString(a.CommentID)
-		grouped[cid] = append(grouped[cid], h.attachmentToResponse(a))
+		grouped[cid] = append(grouped[cid], h.attachmentToResponse(a, mode))
 	}
 	return grouped
 }
@@ -304,7 +357,7 @@ func (h *Handler) groupChatMessageAttachments(ctx context.Context, workspaceID s
 	grouped := make(map[string][]AttachmentResponse, len(messageIDs))
 	for _, a := range attachments {
 		mid := uuidToString(a.ChatMessageID)
-		grouped[mid] = append(grouped[mid], h.attachmentToResponse(a))
+		grouped[mid] = append(grouped[mid], h.attachmentToResponse(a, attachmentURLModeSigned))
 	}
 	return grouped
 }
@@ -436,6 +489,62 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			}
 			params.ChatSessionID = session.ID
 		}
+		// task_id upload: an agent producing an image/file for its chat reply.
+		// The row is tagged with the producing task and its chat session so
+		// CompleteTask can bind it to the assistant message it synthesizes.
+		// Gate: the request must come from a task-scoped token, the form task_id
+		// must equal that token's task, the caller must be that task's agent,
+		// and it must be a chat task (has a chat_session_id).
+		if taskID := r.FormValue("task_id"); taskID != "" {
+			// Authoritative task-token boundary (load-bearing, mirrors
+			// chat_history.go:chatHistorySession). X-Task-ID is only trustworthy
+			// when the auth middleware set it from a task-scoped `mat_` token —
+			// that path is also the ONLY one that stamps X-Actor-Source=task_token
+			// and strips a client-forged X-Task-ID. A normal JWT / `mul_` PAT
+			// leaves X-Actor-Source empty and does NOT strip a forged X-Task-ID,
+			// and resolveActor's fallback will accept a real X-Agent-ID +
+			// X-Task-ID pair. So without this gate a member who learns a task ID
+			// could forge both headers and inject an attachment onto another chat
+			// task's assistant reply — a cross-session/privacy leak.
+			if r.Header.Get("X-Actor-Source") != "task_token" {
+				writeError(w, http.StatusForbidden, "task_id upload is only available from within an agent task")
+				return
+			}
+			taskUUID, ok := parseUUIDOrBadRequest(w, taskID, "task_id")
+			if !ok {
+				return
+			}
+			// Pin to the run's own task: the middleware-injected X-Task-ID is the
+			// single source of truth for which task this token may act on, so a
+			// run authorized for task A cannot tag an attachment onto task B —
+			// even another chat task of the same agent, whose session may belong
+			// to a different user.
+			boundTaskID := strings.TrimSpace(r.Header.Get("X-Task-ID"))
+			if boundTaskID == "" || !strings.EqualFold(boundTaskID, strings.TrimSpace(taskID)) {
+				writeError(w, http.StatusForbidden, "task_id must match the request's task token")
+				return
+			}
+			task, err := h.Queries.GetAgentTaskInWorkspace(r.Context(), db.GetAgentTaskInWorkspaceParams{
+				ID:          taskUUID,
+				WorkspaceID: parseUUID(workspaceID),
+			})
+			if err != nil {
+				writeError(w, http.StatusForbidden, "invalid task_id")
+				return
+			}
+			if uploaderType != "agent" || uuidToString(task.AgentID) != uploaderID {
+				writeError(w, http.StatusForbidden, "task_id upload requires the task's own agent")
+				return
+			}
+			if !task.ChatSessionID.Valid {
+				writeError(w, http.StatusBadRequest, "task_id upload requires a chat task")
+				return
+			}
+			params.TaskID = task.ID
+			// Bind the session too so reads (groupChatMessageAttachments) and
+			// GC classify the row consistently before it gains a message id.
+			params.ChatSessionID = task.ChatSessionID
+		}
 
 		link, err := h.Storage.Upload(r.Context(), key, data, contentType, header.Filename)
 		if err != nil {
@@ -451,7 +560,7 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 			// S3 upload succeeded but DB record failed — still return the link
 			// so the file is usable. Log the error for investigation.
 		} else {
-			writeJSON(w, http.StatusOK, h.attachmentToResponse(att))
+			writeJSON(w, http.StatusOK, h.attachmentToResponse(att, attachmentURLModeFromRequest(r)))
 			return
 		}
 
@@ -498,9 +607,10 @@ func (h *Handler) ListAttachments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode := attachmentURLModeFromRequest(r)
 	resp := make([]AttachmentResponse, len(attachments))
 	for i, a := range attachments {
-		resp[i] = h.attachmentToResponse(a)
+		resp[i] = h.attachmentToResponse(a, mode)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -515,7 +625,52 @@ func (h *Handler) GetAttachmentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, h.attachmentToResponse(att))
+	// Always signed, regardless of what the caller advertised: this endpoint is
+	// the single source of fresh, natively-loadable URLs. Stable-mode callers
+	// (CLI `attachment download`, the web inline-media re-sign hook) exchange a
+	// stable path for a signature HERE, so honoring the capability would break
+	// the very flow that makes stable mode safe elsewhere.
+	resp := h.attachmentToResponse(att, attachmentURLModeSigned)
+	// Token-mode clients use this authenticated endpoint to replace the
+	// auth-gated API path with a URL that native media elements can load.
+	// Assert the same storage.DownloadPresigner that resolveAttachmentDownloadMode
+	// keys its presign decision on, so the mode resolution and the presign call
+	// can never disagree. An empty content disposition inherits the object's
+	// stored Content-Disposition (inline for media, attachment otherwise), which
+	// keeps images renderable inline while preserving the original download
+	// filename.
+	switch mode := h.resolveAttachmentDownloadMode(att.Url); {
+	case h.CFSigner == nil && mode == attachmentDownloadModePresign:
+		if presigner, ok := h.Storage.(storage.DownloadPresigner); ok {
+			key := h.Storage.KeyFromURL(att.Url)
+			signedURL, err := presigner.PresignGetWithContentDisposition(r.Context(), key, h.attachmentDownloadURLTTL(), "")
+			if err != nil {
+				slog.Warn("failed to presign inline attachment URL", "id", uuidToString(att.ID), "key", key, "error", err)
+			} else {
+				resp.DownloadURL = signedURL
+			}
+		}
+	case h.CFSigner == nil && mode == attachmentDownloadModeProxy:
+		// Proxy mode has no signed storage URL to offer, so this response
+		// would otherwise hand back the auth-gated API path — which a
+		// native download on a token-mode client cannot authenticate,
+		// leaving the user with no file (MUL-5292). Mint a
+		// single-attachment, 60-second capability instead, so the same
+		// "replace the auth-gated path with something a native loader can
+		// fetch" contract holds in all three modes.
+		//
+		// Only here, never in attachmentToResponse: list responses are held
+		// far longer than the TTL, so a capability embedded in one would be
+		// expired by the time anything used it.
+		//
+		// Gated on CFSigner being nil for the same reason as the presign
+		// branch above: when a signer is configured attachmentToResponse has
+		// already produced a credential-free signed URL, which solves the
+		// native-download problem without a capability.
+		resp.DownloadURL = attachmentCapabilityPath(resp.ID, time.Now())
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) loadAttachmentForRequest(w http.ResponseWriter, r *http.Request) (db.Attachment, bool) {

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -44,7 +43,22 @@ func buildCodebuddyArgs(opts ExecOptions, logger *slog.Logger) []string {
 		"--verbose",
 		"--strict-mcp-config",
 		"--permission-mode", "bypassPermissions",
-		"--disallowedTools", "AskUserQuestion",
+		// CodeBuddy's interactive tools have no UI to render in under the
+		// daemon's headless stream-json transport. AskUserQuestion and
+		// ExitPlanMode are both exempted from CodeBuddy's permission-mode
+		// finalization, so --permission-mode bypassPermissions does NOT
+		// auto-approve them — they always reach the permission bridge and
+		// stall the turn waiting for a confirmation nobody can give
+		// (GitHub #6012). EnterPlanMode is denied alongside them: leaving it
+		// enabled would let the model enter a plan mode it then has no tool
+		// to leave. Plan-shaped work still happens — the plan is written as
+		// ordinary assistant output instead of behind an approval gate.
+		//
+		// Pass one value per tool: --disallowedTools is variadic and
+		// CodeBuddy compares each entry against the tool name exactly
+		// (PermissionUtils.matchPermissionRules), so a comma-joined string
+		// would match nothing despite what the CLI's own help text claims.
+		"--disallowedTools", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -163,11 +177,17 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 		}
 
 		startTime := time.Now()
-		var output strings.Builder
+		var lastAssistantText string
+		var finalResultText string
+		sawResult := false
+		resultIsError := false
 		var sessionID string
-		finalStatus := "completed"
-		var finalError string
 		usage := make(map[string]TokenUsage)
+		eventCount := 0
+		invalidEventCount := 0
+		assistantEventCount := 0
+		toolUseCount := 0
+		unreadableAssistantCount := 0
 
 		// Close stdout when the context is cancelled so scanner.Scan() unblocks.
 		go func() {
@@ -176,8 +196,7 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 			_ = stdout.Close()
 		}()
 
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+		scanner := newAgentStreamScanner(stdout)
 
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -187,12 +206,20 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 
 			var msg codebuddySDKMessage
 			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				invalidEventCount++
 				continue
 			}
+			eventCount++
 
 			switch msg.Type {
 			case "assistant":
-				b.handleAssistant(msg, msgCh, &output, usage)
+				assistantEventCount++
+				turn := b.handleAssistant(msg, msgCh, usage)
+				toolUseCount += turn.toolUses
+				if !turn.understood {
+					unreadableAssistantCount++
+				}
+				lastAssistantText = turn.resolveFallback(lastAssistantText)
 			case "user":
 				b.handleUser(msg, msgCh)
 			case "system":
@@ -201,17 +228,12 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 				}
 				trySend(msgCh, Message{Type: MessageStatus, Status: "running", SessionID: sessionID})
 			case "result":
+				sawResult = true
+				finalResultText = msg.ResultText
+				resultIsError = msg.IsError
 				sessionID = msg.SessionID
-				if msg.ResultText != "" {
-					output.Reset()
-					output.WriteString(msg.ResultText)
-				}
 				if resultUsage := codebuddyResultUsage(msg, opts.Model); len(resultUsage) > 0 {
 					usage = resultUsage
-				}
-				if msg.IsError {
-					finalStatus = "failed"
-					finalError = msg.ResultText
 				}
 				closeStdin()
 			case "log":
@@ -226,6 +248,12 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 				b.handleControlRequest(msg, stdin)
 			}
 		}
+		scanErr := scanner.Err()
+		if scanErr != nil {
+			// Stop a malformed/oversized writer from blocking cmd.Wait after the
+			// scanner has stopped consuming stdout.
+			_ = stdout.Close()
+		}
 
 		closeStdin()
 
@@ -237,56 +265,79 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 		// broken pipe, or been unblocked by the kill that ended cmd.
 		writeErr := <-writeDone
 
-		switch {
-		case runCtx.Err() == context.DeadlineExceeded:
-			finalStatus = "timeout"
-			finalError = fmt.Sprintf("codebuddy timed out after %s", timeout)
-		case runCtx.Err() == context.Canceled:
-			finalStatus = "aborted"
-			finalError = "execution cancelled"
-		case writeErr != nil && finalStatus == "completed" && sessionID == "":
-			// No result event landed and the prompt write failed — codebuddy
-			// died before reading the prompt. Surface the write error; the
-			// stderr tail attached below carries the real reason.
-			finalStatus = "failed"
-			finalError = fmt.Sprintf("write codebuddy input: %v", writeErr)
-		case exitErr != nil && finalStatus == "completed":
-			finalStatus = "failed"
-			finalError = fmt.Sprintf("codebuddy exited with error: %v", exitErr)
-		}
+		finalStatus, finalOutput, finalError := finalizeStreamResult(
+			"codebuddy",
+			timeout,
+			runCtx.Err(),
+			writeErr,
+			exitErr,
+			sessionID,
+			streamTerminalState{
+				lastAssistantText: lastAssistantText,
+				finalResultText:   finalResultText,
+				sawResult:         sawResult,
+				resultIsError:     resultIsError,
+				scanErr:           scanErr,
+			},
+			"",
+		)
 
 		if finalError != "" {
 			finalError = withAgentStderr(finalError, "codebuddy", stderrBuf.Tail())
 		}
+		logStreamProtocolObservation(b.cfg.Logger, streamProtocolObservation{
+			provider:                   "codebuddy",
+			cliVersion:                 b.cfg.CLIVersion,
+			model:                      opts.Model,
+			exitCode:                   streamProcessExitCode(exitErr),
+			eventCount:                 eventCount,
+			invalidEventCount:          invalidEventCount,
+			assistantEventCount:        assistantEventCount,
+			toolUseCount:               toolUseCount,
+			sawResult:                  sawResult,
+			resultIsError:              resultIsError,
+			resultBytes:                len(finalResultText),
+			lastAssistantBytes:         len(lastAssistantText),
+			scannerError:               scanErr != nil,
+			unreadableAssistantCount:   unreadableAssistantCount,
+			anthropicBaseURLConfigured: strings.TrimSpace(b.cfg.Env["ANTHROPIC_BASE_URL"]) != "",
+		})
 
 		b.cfg.Logger.Info("codebuddy finished", "pid", cmd.Process.Pid, "status", finalStatus, "duration", duration.Round(time.Millisecond).String())
 
-		reportedSessionID := resolveSessionID(opts.ResumeSessionID, sessionID, finalStatus == "failed")
-		if reportedSessionID != sessionID {
-			b.cfg.Logger.Info("codebuddy resume did not land; clearing fresh session id for daemon fallback",
+		resumeRejected := resumeWasRejected(opts.ResumeSessionID, sessionID, finalStatus == "failed", finalError)
+		reportedSessionID := resolveSessionID(opts.ResumeSessionID, sessionID, finalStatus == "failed", finalError)
+		if resumeRejected {
+			b.cfg.Logger.Info("codebuddy resume was rejected; dropping session id and signalling fresh-session retry",
 				"requested_resume", opts.ResumeSessionID,
 				"emitted_session", sessionID,
 			)
 		}
 
 		resCh <- Result{
-			Status:     finalStatus,
-			Output:     output.String(),
-			Error:      finalError,
-			DurationMs: duration.Milliseconds(),
-			SessionID:  reportedSessionID,
-			Usage:      usage,
+			Status:         finalStatus,
+			Output:         finalOutput,
+			Error:          finalError,
+			DurationMs:     duration.Milliseconds(),
+			SessionID:      reportedSessionID,
+			Usage:          usage,
+			ResumeRejected: resumeRejected,
 		}
 	}()
 
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
-func (b *codebuddyBackend) handleAssistant(msg codebuddySDKMessage, ch chan<- Message, output *strings.Builder, usage map[string]TokenUsage) {
+func (b *codebuddyBackend) handleAssistant(msg codebuddySDKMessage, ch chan<- Message, usage map[string]TokenUsage) assistantTurn {
 	var content codebuddyMessageContent
 	if err := json.Unmarshal(msg.Message, &content); err != nil {
-		return
+		// Unreadable body: understood stays false so the caller drops any
+		// fallback rather than let an older turn stand in for this one.
+		return assistantTurn{}
 	}
+	turn := assistantTurn{understood: true}
+	var assistantText strings.Builder
+	toolUseCount := 0
 
 	// Accumulate token usage per model.
 	if content.Usage != nil && content.Model != "" {
@@ -302,7 +353,7 @@ func (b *codebuddyBackend) handleAssistant(msg codebuddySDKMessage, ch chan<- Me
 		switch block.Type {
 		case "text":
 			if block.Text != "" {
-				output.WriteString(block.Text)
+				assistantText.WriteString(block.Text)
 				trySend(ch, Message{Type: MessageText, Content: block.Text})
 			}
 		case "thinking":
@@ -310,6 +361,7 @@ func (b *codebuddyBackend) handleAssistant(msg codebuddySDKMessage, ch chan<- Me
 				trySend(ch, Message{Type: MessageThinking, Content: block.Text})
 			}
 		case "tool_use":
+			toolUseCount++
 			var input map[string]any
 			if block.Input != nil {
 				_ = json.Unmarshal(block.Input, &input)
@@ -320,8 +372,17 @@ func (b *codebuddyBackend) handleAssistant(msg codebuddySDKMessage, ch chan<- Me
 				CallID: block.ID,
 				Input:  input,
 			})
+		default:
+			// A block type we do not render may be carrying the model's answer
+			// in a shape we cannot read, so we must not claim this turn was
+			// silent. Recognising a new no-text block is a deliberate one-line
+			// addition here, not an accident of falling through.
+			turn.understood = false
 		}
 	}
+	turn.text = assistantText.String()
+	turn.toolUses = toolUseCount
+	return turn
 }
 
 func (b *codebuddyBackend) handleUser(msg codebuddySDKMessage, ch chan<- Message) {
@@ -366,6 +427,11 @@ func (b *codebuddyBackend) handleControlRequest(msg codebuddySDKMessage, stdin i
 			"subtype":    "success",
 			"request_id": msg.RequestID,
 			"response": map[string]any{
+				// CodeBuddy's SdkPermissionClient reads `allowed` and treats a
+				// missing key as a denial; `behavior` is Claude Code's spelling,
+				// which the fork still honours on its other permission paths.
+				// Send both so an approval is never read as a silent reject.
+				"allowed":      true,
 				"behavior":     "allow",
 				"updatedInput": inputMap,
 			},
@@ -418,7 +484,7 @@ type codebuddySDKMessage struct {
 
 	// result fields
 	ResultText string                               `json:"result,omitempty"`
-	IsError    bool                                  `json:"is_error,omitempty"`
+	IsError    bool                                 `json:"is_error,omitempty"`
 	DurationMs float64                              `json:"duration_ms,omitempty"`
 	NumTurns   int                                  `json:"num_turns,omitempty"`
 	Usage      *codebuddyUsage                      `json:"usage,omitempty"`

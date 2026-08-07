@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
@@ -8,10 +8,9 @@ import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { isImeComposing } from "@multica/core/utils";
+import { getShortcut, shortcutMatchesEvent } from "@multica/core/shortcuts";
 import { useTimeAgo } from "../../i18n";
 import { agentListOptions, memberListOptions, squadMemberStatusOptions, workspaceKeys } from "@multica/core/workspace/queries";
-import { runtimeListOptions } from "@multica/core/runtimes";
-import { CreateAgentDialog } from "../../agents/components/create-agent-dialog";
 import { useNavigation } from "../../navigation";
 import { AppLink } from "../../navigation";
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
@@ -60,7 +59,7 @@ import {
 } from "../../issues/components/pickers/property-picker";
 import { ChevronDown, UserPlus } from "lucide-react";
 import { toast } from "sonner";
-import type { Squad, SquadMember, SquadMemberStatus, SquadMemberStatusValue, Agent, CreateAgentRequest, MemberWithUser } from "@multica/core/types";
+import type { Squad, SquadMember, SquadMemberStatus, SquadMemberStatusValue, Agent, MemberWithUser } from "@multica/core/types";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
@@ -102,10 +101,6 @@ export function SquadDetailPage() {
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: wsMembers = [] } = useQuery(memberListOptions(wsId));
 
-  // Runtimes are only fetched when the Create Agent dialog might open;
-  // gating on canManage below means users who can't manage this squad never
-  // trigger the request. The runtime list mirrors the agents page so the
-  // picker (and the "only my runtimes" filter) behaves identically here.
   const currentUser = useAuthStore((s) => s.user);
   const myRole = useMemo(() => {
     if (!currentUser) return null;
@@ -120,13 +115,7 @@ export function SquadDetailPage() {
   const canManage =
     isWorkspaceAdmin || (!!currentUser && squad?.creator_id === currentUser.id);
 
-  const { data: runtimes = [], isLoading: runtimesLoading } = useQuery({
-    ...runtimeListOptions(wsId),
-    enabled: !!wsId && canManage,
-  });
-
   const [showAddMember, setShowAddMember] = useState(false);
-  const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [confirmArchive, setConfirmArchive] = useState(false);
 
   const updateSquadMut = useMutation({
@@ -188,25 +177,6 @@ export function SquadDetailPage() {
       toast.error(err instanceof Error && err.message ? err.message : "Failed to archive squad"),
   });
 
-  // CreateAgentDialog's onCreate contract: hit POST /api/agents and
-  // return the created agent so the dialog can run its skill follow-up.
-  // We deliberately do NOT navigate to the agent detail page (that's
-  // the agents-page behaviour) — the user clicked Create Agent from
-  // inside this squad, so the dialog will stay open just long enough
-  // to also call addSquadMember (handled by the dialog when squadId
-  // is set), then close the user back to Members where they can
-  // verify the new agent appeared. Cache-update keeps the agents list
-  // fresh for any pickers that read from it.
-  const handleCreateAgent = async (data: CreateAgentRequest): Promise<Agent> => {
-    const agent = await api.createAgent(data);
-    queryClient.setQueryData<Agent[]>(workspaceKeys.agents(wsId), (current = []) => {
-      const exists = current.some((a) => a.id === agent.id);
-      return exists ? current.map((a) => (a.id === agent.id ? agent : a)) : [...current, agent];
-    });
-    queryClient.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
-    return agent;
-  };
-
   const getEntityName = (type: string, id: string) => {
     if (type === "agent") return agents.find((a: Agent) => a.id === id)?.name ?? id.slice(0, 8);
     return wsMembers.find((m) => m.user_id === id)?.name ?? id.slice(0, 8);
@@ -236,7 +206,7 @@ export function SquadDetailPage() {
         leaf={
           <>
             <SquadHeaderAvatar squad={squad} initials={initials} />
-            <h1 className="truncate text-sm font-medium text-foreground">{squad.name}</h1>
+            <h1 className="truncate text-body font-medium text-foreground">{squad.name}</h1>
           </>
         }
         actions={
@@ -273,7 +243,7 @@ export function SquadDetailPage() {
           isArchived={isArchived}
           getEntityName={getEntityName}
           onAddMemberClick={() => setShowAddMember(true)}
-          onCreateAgentClick={canManage ? () => setShowCreateAgent(true) : undefined}
+          onCreateAgentClick={canManage ? () => push(`${p.newAgent()}?squad=${encodeURIComponent(squadId)}`) : undefined}
           onSetLeader={(id) => setLeaderMut.mutate(id)}
           onRemoveMember={(m) => removeMemberMut.mutate(m)}
           onUpdateRole={async (m, role) => { await updateRoleMut.mutateAsync({ member: m, role }); }}
@@ -288,25 +258,6 @@ export function SquadDetailPage() {
           availableAgents={availableAgents}
           onClose={() => setShowAddMember(false)}
           onSubmit={async (input) => { await addMemberMut.mutateAsync(input); }}
-        />
-      )}
-
-      {/* Squad-scoped create flow: same dialog as the Agents page but
-          with squadId set, so the dialog runs api.addSquadMember after
-          api.createAgent and skips the agent-detail navigation. Only
-          mounted for users who can manage this squad (workspace owner/admin
-          or the creator); for everyone else the trigger never renders. The
-          newly created agent is owned by the creator, so it is always one
-          they can invoke and add to the squad. */}
-      {showCreateAgent && canManage && (
-        <CreateAgentDialog
-          runtimes={runtimes}
-          runtimesLoading={runtimesLoading}
-          members={wsMembers}
-          currentUserId={currentUser?.id ?? null}
-          squadId={squadId}
-          onClose={() => setShowCreateAgent(false)}
-          onCreate={handleCreateAgent}
         />
       )}
 
@@ -439,10 +390,10 @@ function SquadNameEditor({
         <button
           type="button"
           {...triggerProps}
-          className="group -mx-1 inline-flex items-center gap-1.5 self-start rounded px-1 text-left text-lg font-semibold leading-tight transition-colors hover:bg-accent/50"
+          className="group -mx-1 inline-flex items-center gap-1.5 self-start rounded px-1 text-left text-title font-semibold leading-tight transition-colors hover:bg-accent/50"
         >
           <span>{value}</span>
-          <Pencil className="h-3.5 w-3.5 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground" />
+          <Pencil className="h-3.5 w-3.5 shrink-0 text-transparent transition-colors group-hover:text-muted-foreground" />
         </button>
       )}
     </InlineEditPopover>
@@ -506,7 +457,7 @@ function InlineEditPopover({
       />
       <PopoverContent align="start" className="w-72 p-3">
         <div className="space-y-2">
-          <p className="text-xs font-medium">{title}</p>
+          <p className="text-caption font-medium">{title}</p>
           <Input
             autoFocus
             value={draft}
@@ -528,7 +479,7 @@ function InlineEditPopover({
             }}
             className="h-8"
           />
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {error && <p className="text-caption text-destructive">{error}</p>}
           <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={saving}>
               {t(($) => $.name_editor.cancel)}
@@ -594,9 +545,9 @@ function AddMemberDialog({
 
         <div className="space-y-4 min-w-0">
           <div>
-            <Label className="text-xs text-muted-foreground">{t(($) => $.add_member_dialog.label_member)}</Label>
+            <Label className="text-caption text-muted-foreground">{t(($) => $.add_member_dialog.label_member)}</Label>
             <Popover open={pickerOpen} onOpenChange={(v) => { setPickerOpen(v); if (!v) setPickerFilter(""); }}>
-              <PopoverTrigger className="flex w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 mt-1 text-left text-sm transition-colors hover:bg-muted">
+              <PopoverTrigger className="flex w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 mt-1 text-left text-body transition-colors hover:bg-muted">
                 {target ? (
                   <ActorAvatar actorType={target.type} actorId={target.id} size="sm" />
                 ) : (
@@ -607,7 +558,7 @@ function AddMemberDialog({
                     {target?.name ?? "Select a member or agent"}
                   </div>
                   {target && (
-                    <div className="truncate text-xs text-muted-foreground capitalize">{target.type}</div>
+                    <div className="truncate text-caption text-muted-foreground capitalize">{target.type}</div>
                   )}
                 </div>
                 <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${pickerOpen ? "rotate-180" : ""}`} />
@@ -620,7 +571,7 @@ function AddMemberDialog({
                     value={pickerFilter}
                     onChange={(e) => setPickerFilter(e.target.value)}
                     placeholder="Search members or agents..."
-                    className="w-full bg-transparent text-sm placeholder:text-muted-foreground outline-none"
+                    className="w-full bg-transparent text-body placeholder:text-muted-foreground outline-none"
                   />
                 </div>
                 <div className="p-1 max-h-72 overflow-y-auto">
@@ -667,9 +618,9 @@ function AddMemberDialog({
           </div>
 
           <div>
-            <Label className="text-xs text-muted-foreground">
+            <Label className="text-caption text-muted-foreground">
               {t(($) => $.add_member_dialog.label_role)}{" "}
-              <span className="text-muted-foreground/60">{t(($) => $.add_member_dialog.label_optional)}</span>
+              <span className="text-muted-foreground">{t(($) => $.add_member_dialog.label_optional)}</span>
             </Label>
             <Input
               type="text"
@@ -736,7 +687,7 @@ function RoleEditor({ value, onSave }: { value: string; onSave: (next: string) =
         }}
         disabled={saving}
         placeholder="Role (e.g. Reviewer)"
-        className="h-6 mt-0.5 text-xs px-1.5"
+        className="h-6 mt-0.5 text-caption px-1.5"
       />
     );
   }
@@ -745,7 +696,7 @@ function RoleEditor({ value, onSave }: { value: string; onSave: (next: string) =
     <button
       type="button"
       onClick={() => setEditing(true)}
-      className="text-xs text-muted-foreground mt-0.5 text-left hover:text-foreground transition-colors"
+      className="text-caption text-muted-foreground mt-0.5 text-left hover:text-foreground transition-colors"
     >
       {value || <span className="italic opacity-60">{t(($) => $.add_member_dialog.placeholder_role_inline)}</span>}
     </button>
@@ -813,13 +764,13 @@ function SquadDetailInspector({
           <>
             <SquadStaticAvatar squad={squad} initials={initials} />
             <div className="flex flex-col gap-1">
-              <span className="text-lg font-semibold leading-tight">{squad.name}</span>
+              <span className="text-title font-semibold leading-tight">{squad.name}</span>
               {squad.description ? (
-                <span className="text-xs leading-relaxed text-muted-foreground">
+                <span className="text-caption leading-relaxed text-muted-foreground">
                   {squad.description}
                 </span>
               ) : (
-                <span className="text-xs italic leading-relaxed text-muted-foreground/50">
+                <span className="text-caption italic leading-relaxed text-muted-foreground">
                   {t(($) => $.description_dialog.placeholder_empty)}
                 </span>
               )}
@@ -830,7 +781,7 @@ function SquadDetailInspector({
 
       {/* Details — read-only */}
       <div className="border-b px-5 py-4">
-        <div className="mb-1 -mx-2 px-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="mb-1 -mx-2 px-2 text-micro font-medium uppercase tracking-wider text-muted-foreground">
           {t(($) => $.inspector.details_section)}
         </div>
         <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
@@ -864,8 +815,8 @@ function SquadDetailInspector({
 function InspectorRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <>
-      <div className="px-2 py-1 text-xs text-muted-foreground">{label}</div>
-      <div className="min-w-0 px-2 py-1 text-xs">{children}</div>
+      <div className="px-2 py-1 text-caption text-muted-foreground">{label}</div>
+      <div className="min-w-0 px-2 py-1 text-caption">{children}</div>
     </>
   );
 }
@@ -888,14 +839,14 @@ function SquadDescriptionEditor({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="group -mx-1 inline-flex items-start gap-1.5 self-start rounded px-1 text-left text-xs leading-relaxed transition-colors hover:bg-accent/50"
+        className="group -mx-1 inline-flex items-start gap-1.5 self-start rounded px-1 text-left text-caption leading-relaxed transition-colors hover:bg-accent/50"
       >
         {value ? (
           <span className="text-muted-foreground">{value}</span>
         ) : (
-          <span className="italic text-muted-foreground/50">{t(($) => $.description_dialog.placeholder_empty)}</span>
+          <span className="italic text-muted-foreground">{t(($) => $.description_dialog.placeholder_empty)}</span>
         )}
-        <Pencil className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground/0 transition-colors group-hover:text-muted-foreground" />
+        <Pencil className="mt-0.5 h-3 w-3 shrink-0 text-transparent transition-colors group-hover:text-muted-foreground" />
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
@@ -925,10 +876,13 @@ function SquadDescriptionEditorBody({
   const { t } = useT("squads");
   const [draft, setDraft] = useState(initialValue);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const dirty = draft !== initialValue;
 
   const commit = async () => {
+    if (savingRef.current) return;
     if (!dirty) { onClose(); return; }
+    savingRef.current = true;
     setSaving(true);
     try {
       await onSave(draft);
@@ -936,6 +890,7 @@ function SquadDescriptionEditorBody({
     } catch {
       // toast handled by parent's mutation
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -953,13 +908,13 @@ function SquadDescriptionEditorBody({
         rows={6}
         onKeyDown={(e) => {
           if (e.key === "Escape") { onClose(); return; }
-          if (isImeComposing(e)) return;
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          if (e.defaultPrevented || e.repeat || isImeComposing(e)) return;
+          if (shortcutMatchesEvent(getShortcut("send"), e.nativeEvent)) {
             e.preventDefault();
             void commit();
           }
         }}
-        className="w-full resize-none rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-input"
+        className="w-full resize-none rounded-md border bg-transparent px-3 py-2 text-body outline-none focus-visible:border-input"
       />
       <DialogFooter>
         <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>{t(($) => $.description_dialog.cancel)}</Button>
@@ -1047,7 +1002,7 @@ function SquadOverviewPane({
             key={tab.id}
             type="button"
             onClick={() => requestTabChange(tab.id)}
-            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-xs font-medium transition-colors ${
+            className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-caption font-medium transition-colors ${
               activeTab === tab.id
                 ? "border-foreground text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground"
@@ -1164,8 +1119,8 @@ function SquadMembersTab({
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium">{t(($) => $.members_tab.section_title)}</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
+          <h3 className="text-body font-medium">{t(($) => $.members_tab.section_title)}</h3>
+          <p className="text-caption text-muted-foreground mt-0.5">
             {t(($) => $.members_tab.section_count, { count: members.length })}
           </p>
         </div>
@@ -1220,16 +1175,16 @@ function SquadMembersTab({
               />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{getEntityName(m.member_type, m.member_id)}</span>
-                  <span className="text-xs text-muted-foreground capitalize">{m.member_type}</span>
+                  <span className="text-body font-medium">{getEntityName(m.member_type, m.member_id)}</span>
+                  <span className="text-caption text-muted-foreground capitalize">{m.member_type}</span>
                   {isLeader(m) && (
-                    <span className="inline-flex items-center gap-0.5 text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded">
+                    <span className="inline-flex items-center gap-0.5 text-caption bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded">
                       <Crown className="size-3" />
                       {t(($) => $.members_tab.leader_chip)}
                     </span>
                   )}
                   {m.member_type === "agent" && statusLabel && (
-                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
                       <span className={`h-1.5 w-1.5 rounded-full ${dotClass ?? "bg-muted-foreground/40"}`} />
                       {statusLabel}
                     </span>
@@ -1241,18 +1196,18 @@ function SquadMembersTab({
                     onSave={async (next) => { await onUpdateRole(m, next); }}
                   />
                 ) : m.role ? (
-                  <div className="mt-0.5 text-xs text-muted-foreground">{m.role}</div>
+                  <div className="mt-0.5 text-caption text-muted-foreground">{m.role}</div>
                 ) : null}
                 {primaryIssue && (
-                  <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground min-w-0">
+                  <div className="mt-1 flex items-center gap-1 text-caption text-muted-foreground min-w-0">
                     <AppLink
                       href={p.issueDetail(primaryIssue.issue_id)}
                       className="inline-flex items-center gap-1 min-w-0 hover:text-foreground transition-colors"
                     >
-                      <span className="font-mono text-[10px] uppercase shrink-0">{primaryIssue.identifier}</span>
+                      <span className="font-mono text-micro uppercase shrink-0">{primaryIssue.identifier}</span>
                       <span className="truncate">{primaryIssue.title}</span>
                       {primaryIssue.issue_status === "blocked" && (
-                        <span className="shrink-0 inline-flex items-center text-[10px] uppercase tracking-wide text-warning">
+                        <span className="shrink-0 inline-flex items-center text-micro uppercase tracking-wide text-warning">
                           {t(($) => $.members_tab.issue_status_blocked)}
                         </span>
                       )}
@@ -1265,7 +1220,7 @@ function SquadMembersTab({
                   </div>
                 )}
                 {showLastActive && (
-                  <div className="mt-0.5 text-xs text-muted-foreground">
+                  <div className="mt-0.5 text-caption text-muted-foreground">
                     {t(($) => $.members_tab.last_active_label, {
                       time: timeAgo(status!.last_active_at!),
                     })}
@@ -1382,7 +1337,7 @@ function SquadInstructionsTab({
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <p className="text-xs text-muted-foreground">
+      <p className="text-caption text-muted-foreground">
         {t(($) => $.instructions_tab.description)}
       </p>
 
@@ -1398,7 +1353,7 @@ function SquadInstructionsTab({
       >
         <ContentEditor
           key={squad.id}
-          defaultValue={value}
+          value={value}
           onUpdate={canManage ? setValue : () => {}}
           placeholder={
             canManage
@@ -1414,7 +1369,7 @@ function SquadInstructionsTab({
       {canManage && (
         <div className="flex items-center justify-end gap-3">
           {isDirty && (
-            <span className="text-xs text-muted-foreground">{t(($) => $.instructions_tab.unsaved_changes)}</span>
+            <span className="text-caption text-muted-foreground">{t(($) => $.instructions_tab.unsaved_changes)}</span>
           )}
           <Button size="sm" onClick={handleSave} disabled={!isDirty || saving}>
             {saving ? (

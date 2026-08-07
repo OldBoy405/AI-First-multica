@@ -17,10 +17,13 @@ Go backend + monorepo frontend (pnpm workspaces + Turborepo) with shared package
 - `server/` - Go backend (Chi router, sqlc, gorilla/websocket)
 - `apps/web/` - Next.js frontend (App Router)
 - `apps/desktop/` - Electron desktop app
+- `apps/mobile/` - Expo / React Native iOS app (read `apps/mobile/CLAUDE.md` first)
+- `apps/docs/` - Fumadocs documentation site
 - `packages/core/` - Headless business logic (Zustand stores, React Query hooks, API client)
 - `packages/ui/` - Atomic UI components (shadcn/Base UI, zero business logic)
 - `packages/views/` - Shared business pages/components
 - `packages/tsconfig/` - Shared TypeScript config
+- `packages/eslint-config/` - Shared ESLint config
 
 ### State Management (critical)
 
@@ -35,6 +38,11 @@ Go backend + monorepo frontend (pnpm workspaces + Turborepo) with shared package
 - `packages/ui/` - zero `@multica/core` imports
 - `packages/views/` - zero `next/*`, zero `react-router-dom`, use `NavigationAdapter` for routing
 - `apps/web/platform/` - only place for Next.js APIs
+
+### Database Migrations (hard rules)
+
+- Never add database foreign keys or cascading actions. Enforce relationships and perform dependent cleanup explicitly in the application layer, using transactions when the operation must be atomic.
+- Every index created by a migration, including unique indexes and indexes on new tables, must use `CREATE [UNIQUE] INDEX CONCURRENTLY`. Keep each concurrent index build in its own single-statement migration file.
 
 ### Commands
 

@@ -353,9 +353,20 @@ var issueCancelTaskCmd = &cobra.Command{
 
 var issueSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search issues by title or description",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runIssueSearch,
+	Short: "Search issues by title, description, or comments",
+	Long: "Search issues in the current workspace. The query matches issue titles,\n" +
+		"descriptions, and comment bodies, so a conclusion that only lives in a\n" +
+		"comment thread is still findable.\n\n" +
+		"A bare number or an identifier-shaped query (\"412\", \"AGE-412\") matches\n" +
+		"the issue with that number. The prefix is not validated, and number\n" +
+		"matches rank first, so pasting an identifier from another tracker can\n" +
+		"put an unrelated local issue at the top of the results.\n\n" +
+		"The MATCH column (match_source in --output json) reports the strongest\n" +
+		"field that matched — title, description, or comment — and falls back to\n" +
+		"\"comment\" for a number-only hit. Treat it as a display hint, not a\n" +
+		"filter.",
+	Args: cobra.ExactArgs(1),
+	RunE: runIssueSearch,
 }
 
 var validIssueStatuses = []string{
@@ -511,11 +522,12 @@ func init() {
 	issueCommentListCmd.Flags().String("since", "", "Only return comments created after this timestamp (RFC3339)")
 	issueCommentListCmd.Flags().String("thread", "", "Comment UUID — return the thread containing this comment (root + every descendant). May be a root or a reply id.")
 	issueCommentListCmd.Flags().Int("tail", 0, "Only valid with --thread. Cap reply count to the N most recent replies; the thread root is always included (even with --tail 0). Use --before/--before-id to scroll to older replies.")
-	issueCommentListCmd.Flags().Int("recent", 0, "Return the N most recently active threads (root + descendants per thread). Use --before/--before-id from the previous response to scroll to older threads.")
+	issueCommentListCmd.Flags().Int("recent", 0, "Return the N most recently active threads. N caps THREADS, not comments: every thread carries its root plus EVERY descendant with no per-thread cap, so on an issue with fewer than N root threads this returns the entire history (minus folded resolved threads). Prefer two bounded reads: scan with --roots-only --summary, then open selected threads with --thread <id> --tail N. Use --before/--before-id from the previous response to scroll to older threads.")
 	issueCommentListCmd.Flags().Bool("roots-only", false, "Only return top-level comments (parent_id is null). Each root also carries reply_count + last_activity_at so you can triage which thread to open.")
+	issueCommentListCmd.Flags().Bool("compact", false, "JSON output only: drop response fields that carry no information for a reader — the issue_id echoed from the request path, source_task_id, updated_at when identical to created_at, null-valued fields, and empty arrays. Content and identity fields pass through untouched. Recommended for agent reads; composes with any mode.")
 	issueCommentListCmd.Flags().Bool("summary", false, "Clip each comment's content to a short preview (sets content_truncated) so you can scan a list without pulling full bodies. Composes with any mode.")
 	issueCommentListCmd.Flags().Bool("full", false, "Escape hatch: return every comment in resolved threads verbatim. By default the complete-thread reads (default list, --recent, --thread without --tail) are folded — a resolved thread collapses to its root + conclusion, with the dropped count reported on the root — so you do not pay tokens for settled discussion. Pass --full when you need the folded discussion. No effect on --since/--tail/--roots-only reads, which are never folded.")
-	issueCommentListCmd.Flags().String("before", "", "Cursor (RFC3339Nano timestamp). With --recent: thread cursor (last_activity_at). With --thread + --tail: reply cursor (reply created_at). Read from the X-Multica-Next-Before response header; must be paired with --before-id.")
+	issueCommentListCmd.Flags().String("before", "", "Cursor (RFC3339Nano timestamp). With --recent: thread cursor (last_activity_at). With --thread + --tail: reply cursor (reply created_at). Read from the X-Multica-Next-Before response header, printed on stderr as \"Next thread cursor\" / \"Next reply cursor\"; must be paired with --before-id.")
 	issueCommentListCmd.Flags().String("before-id", "", "Cursor UUID. With --recent: thread root UUID. With --thread + --tail: oldest reply UUID. Read from the X-Multica-Next-Before-Id response header; must be paired with --before.")
 
 	// issue runs
@@ -540,7 +552,7 @@ func init() {
 	issueCommentAddCmd.Flags().Bool("content-stdin", false, "Read comment content from stdin (preserves multi-line content verbatim)")
 	issueCommentAddCmd.Flags().String("content-file", "", "Read comment content from a UTF-8 file (preserves multi-line content verbatim; use this on Windows when stdin piping mangles non-ASCII bytes). The path must be inside the current working directory unless --allow-external-file is set.")
 	issueCommentAddCmd.Flags().Bool("allow-external-file", false, "Allow --content-file / --attachment to read a path outside the current working directory. Off by default so a stale file from another run/environment can't be picked up (MUL-4252).")
-	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID (reply to a specific comment)")
+	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID to reply under. A comment-triggered agent task must reply under its trigger comment; omitting --parent to post a top-level comment is rejected")
 	issueCommentAddCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times)")
 	issueCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
 
@@ -1087,6 +1099,10 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if hasDesc {
+		if err := guardLocalPathLinks(desc, "issue description",
+			"Deliver the file itself with `multica issue create --attachment <path>` (repeatable) and drop the link."); err != nil {
+			return err
+		}
 		body["description"] = desc
 	}
 	if statusFlag != "" {
@@ -1259,6 +1275,13 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("description") || cmd.Flags().Changed("description-stdin") || cmd.Flags().Changed("description-file") {
 		desc, _, err := resolveTextFlag(cmd, "description")
 		if err != nil {
+			return err
+		}
+		// `issue update` has no --attachment flag, so the hint must point at the
+		// command that does. Telling the agent to "pass --attachment" here would
+		// name an argument this command rejects.
+		if err := guardLocalPathLinks(desc, "issue description",
+			"`multica issue update` cannot carry files — deliver the file with `multica issue comment add <issue-id> --attachment <path>` instead, and drop the link."); err != nil {
 			return err
 		}
 		body["description"] = desc
@@ -1873,6 +1896,9 @@ func runIssueCommentList(cmd *cobra.Command, args []string) error {
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "json" {
+		if compact, _ := cmd.Flags().GetBool("compact"); compact {
+			compactComments(comments)
+		}
 		return cli.PrintJSON(os.Stdout, comments)
 	}
 
@@ -1913,6 +1939,10 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 	}
 	if !hasContent {
 		return fmt.Errorf("--content, --content-stdin, or --content-file is required")
+	}
+	if err := guardLocalPathLinks(content, "comment body",
+		"Deliver the file itself with `multica issue comment add <issue-id> --attachment <path>` (repeatable) and drop the link."); err != nil {
+		return err
 	}
 
 	client, err := newAPIClient(cmd)
@@ -2766,4 +2796,34 @@ func truncateID(id string) string {
 		return string(runes[:8])
 	}
 	return id
+}
+
+// compactComments strips response fields that carry no information for a
+// reader: the issue_id echoed from the request path, per-run bookkeeping
+// (source_task_id), updated_at when identical to created_at, null-valued
+// keys, and empty arrays. Everything else — content, identity, thread
+// summary fields — passes through untouched. Opt-in via --compact and
+// applied to JSON output only: the two bounded reads the agent workflow
+// prescribes are dominated by exactly this metadata (56% of a
+// --roots-only --summary scan, 21% of a --thread --tail read, measured on
+// a production issue), and it compounds through the prompt-cache prefix
+// (#5999 follow-up, MUL-5442).
+func compactComments(comments []map[string]any) {
+	for _, c := range comments {
+		delete(c, "issue_id")
+		delete(c, "source_task_id")
+		if ua, ok := c["updated_at"]; ok && ua == c["created_at"] {
+			delete(c, "updated_at")
+		}
+		for k, v := range c {
+			switch vv := v.(type) {
+			case nil:
+				delete(c, k)
+			case []any:
+				if len(vv) == 0 {
+					delete(c, k)
+				}
+			}
+		}
+	}
 }

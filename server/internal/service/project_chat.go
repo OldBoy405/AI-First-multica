@@ -256,7 +256,7 @@ func (s *TaskService) sendProjectChatCore(ctx context.Context, issue db.Issue, a
 	// suppressPreempt can reach the priority computation: DD-6 requires
 	// owner/admin sends to keep their capacity exemption but lose the
 	// queue-jump priority while a presenter other than themselves is active.
-	task, err := s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt)
+	task, err := s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{})
 	if err != nil {
 		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
 			ID: comment.ID, WorkspaceID: issue.WorkspaceID,

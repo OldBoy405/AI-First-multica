@@ -120,7 +120,7 @@ func (s *TaskService) RouteDiscussionToTeamAgent(ctx context.Context, chatIssue 
 	// The inner capacity guard can still trip on a concurrent enqueue (same
 	// race documented on SendProjectChatMessage); *ErrProjectQueueFull is
 	// returned verbatim.
-	task, err := s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, chatIssue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", false, originatorID)
+	task, err := s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, chatIssue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", false, originatorID, pgtype.UUID{}, originatorID)
 	if err != nil {
 		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
 			ID: comment.ID, WorkspaceID: chatIssue.WorkspaceID,

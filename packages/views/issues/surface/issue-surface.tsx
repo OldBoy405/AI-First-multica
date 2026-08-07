@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useMemo, type ReactNode } from "react";
-import { ListTodo, Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { FilterX, ListTodo, Plus } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { cn } from "@multica/ui/lib/utils";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { ViewStoreProvider } from "@multica/core/issues/stores/view-store-context";
+import {
+  useViewStore,
+  ViewStoreProvider,
+} from "@multica/core/issues/stores/view-store-context";
 import { getIssueSurfaceViewStore } from "@multica/core/issues/stores/surface-view-store";
 import { issueScopeKey } from "@multica/core/issues/surface/scope";
 import type { Issue } from "@multica/core/types";
@@ -16,7 +19,9 @@ import { GanttView } from "../components/gantt-view";
 import { IssuesHeader } from "../components/issues-header";
 import { ListView } from "../components/list-view";
 import { SwimLaneView } from "../components/swimlane-view";
+import { TableView } from "../components/table-view";
 import { useT } from "../../i18n";
+import { IssueContextMenuProvider } from "../actions";
 import { IssueSurfaceActionsProvider } from "./actions-context";
 import { IssueSurfaceSelectionProvider } from "./selection-context";
 import type { IssueCreateDefaults, IssueSurfaceProps } from "./types";
@@ -45,6 +50,7 @@ export function IssueSurface({
   modes,
   surfaceKey,
   createDefaults,
+  search,
   renderHeader,
   renderEmpty,
   renderLoading,
@@ -60,6 +66,18 @@ export function IssueSurface({
     [resolvedSurfaceKey],
   );
 
+  // Every change of this key tears down and remounts the ENTIRE surface
+  // (providers, DnD, all columns/cards) — by design for data-window changes,
+  // but expensive enough that unexpected flips are performance bugs. Dev-only
+  // breadcrumb so a Performance trace showing double mounts can be tied to
+  // the exact key transition.
+  const contentKey = `${wsId}:${issueScopeKey(scope)}`;
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(`[issue-surface] mount ${contentKey}`);
+    }
+  }, [contentKey]);
+
   return (
     <ViewStoreProvider store={store}>
       {/* Remount on data-window change: the list queries keep the previous
@@ -74,10 +92,11 @@ export function IssueSurface({
           workspaces share the same scope key (e.g. "workspace:all"). Keyed
           by data identity, not surfaceKey (view-preference identity). */}
       <IssueSurfaceContent
-        key={`${wsId}:${issueScopeKey(scope)}`}
+        key={contentKey}
         scope={scope}
         modes={modes}
         createDefaults={createDefaults}
+        search={search}
         renderHeader={renderHeader}
         renderEmpty={renderEmpty}
         renderLoading={renderLoading}
@@ -94,6 +113,7 @@ function IssueSurfaceContent({
   scope,
   modes,
   createDefaults,
+  search,
   renderHeader,
   renderEmpty,
   renderLoading,
@@ -107,7 +127,20 @@ function IssueSurfaceContent({
     scope,
     modes,
     createDefaults,
+    search,
   });
+  const [tableLoadedIssues, setTableLoadedIssues] = useState<Issue[]>([]);
+  const handleTableLoadedIssuesChange = useCallback((next: Issue[]) => {
+    setTableLoadedIssues((current) =>
+      current.length === next.length &&
+      current.every((issue, index) => issue === next[index])
+        ? current
+        : next,
+    );
+  }, []);
+  useEffect(() => {
+    if (controller.viewMode !== "table") setTableLoadedIssues([]);
+  }, [controller.viewMode]);
   const issues = useMemo(
     () =>
       clientFilter
@@ -132,24 +165,46 @@ function IssueSurfaceContent({
     },
     [controller],
   );
+  // Stable reference for BoardView's issues: the inline flatMap allocated a
+  // fresh array every render, defeating BoardView's memo.
+  const boardIssues = useMemo(
+    () =>
+      controller.assigneeGroups
+        ? controller.assigneeGroups.flatMap((group) => group.issues)
+        : issues,
+    [controller.assigneeGroups, issues],
+  );
   const shouldShowClientEmpty =
     !!clientFilter &&
     issues.length === 0 &&
     (showClientEmpty ? showClientEmpty(renderContext) : true);
   const shouldShowBatchToolbar =
     batchToolbar !== "never" &&
-    (batchToolbar === "always" || controller.viewMode === "list");
+    (batchToolbar === "always" ||
+      controller.viewMode === "list" ||
+      controller.viewMode === "table");
 
   return (
     <IssueSurfaceActionsProvider actions={controller.actions}>
+      {/* One shared right-click menu for every card/row this surface renders
+          — see IssueContextMenuProvider. Inside the actions provider so the
+          singleton's useIssueActions routes updates through surface
+          actions. */}
+      <IssueContextMenuProvider>
       <IssueSurfaceSelectionProvider selection={controller.selection}>
         {renderHeader ? (
           renderHeader(renderContext)
         ) : (
           <IssuesHeader
             scopedIssues={controller.surfaceIssues}
+            workingAgents={controller.workingAgents}
             allowGantt={controller.allowGantt}
             isRefreshing={controller.isRefreshing}
+            facetCountsExact={
+              controller.facetCountsExact
+            }
+            tableFacetCounts={controller.tableFacetCounts}
+            onTableFacetChange={controller.setActiveTableFacet}
           />
         )}
         {controller.isLoading ? (
@@ -159,13 +214,21 @@ function IssueSurfaceContent({
             <IssueSurfaceSkeleton mode={controller.viewMode} />
           )
         ) : controller.isEmpty || shouldShowClientEmpty ? (
-          renderEmpty ? (
+          // A filtered-empty surface is NOT an empty surface. Claiming "no
+          // issues here yet" and offering to create one is wrong when the rows
+          // exist and a filter is hiding them — and it is the state the
+          // agents-working chip drops you into most often (MUL-5525). This
+          // branch precedes `renderEmpty` on purpose: every surface's own empty
+          // copy describes the unfiltered case.
+          controller.hasActiveFilters ? (
+            <FilteredEmptyState />
+          ) : renderEmpty ? (
             renderEmpty(renderContext)
           ) : (
             <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-muted-foreground">
-              <ListTodo className="h-10 w-10 text-muted-foreground/40" />
-              <p className="text-sm">{t(($) => $.detail.empty_issues_title)}</p>
-              <p className="text-xs">{t(($) => $.detail.empty_issues_hint)}</p>
+              <ListTodo className="h-10 w-10 text-faint-foreground" />
+              <p className="text-body">{t(($) => $.detail.empty_issues_title)}</p>
+              <p className="text-caption">{t(($) => $.detail.empty_issues_hint)}</p>
               <Button
                 variant="outline"
                 size="sm"
@@ -181,11 +244,7 @@ function IssueSurfaceContent({
           <div className={cn("flex flex-col flex-1 min-h-0", contentClassName)}>
             {controller.viewMode === "board" && (
               <BoardView
-                issues={
-                  controller.assigneeGroups
-                    ? controller.assigneeGroups.flatMap((group) => group.issues)
-                    : issues
-                }
+                issues={boardIssues}
                 assigneeGroups={controller.assigneeGroups}
                 assigneeGroupQueryKey={controller.assigneeGroupQueryKey}
                 assigneeGroupFilter={controller.assigneeGroupFilter}
@@ -199,6 +258,8 @@ function IssueSurfaceContent({
                 sort={controller.sort}
                 projectId={controller.projectId}
                 onCreateIssue={openCreateIssue}
+                statusPagination={controller.statusPagination}
+                groupBranches={controller.groupBranches}
               />
             )}
             {controller.viewMode === "list" && (
@@ -207,12 +268,22 @@ function IssueSurfaceContent({
                 visibleStatuses={controller.visibleStatuses}
                 childProgressMap={controller.childProgressMap}
                 projectMap={controller.projectMap}
-                myIssuesScope={controller.loadMoreScope}
-                myIssuesFilter={controller.loadMoreFilter}
-                sort={controller.sort}
                 projectId={controller.projectId}
                 onMoveIssue={controller.moveIssue}
                 onCreateIssue={openCreateIssue}
+                statusPagination={controller.statusPagination!}
+              />
+            )}
+            {controller.viewMode === "table" && (
+              <TableView
+                serverQuery={controller.tableQuerySpec}
+                childProgressMap={controller.childProgressMap}
+                search={controller.tableSearch}
+                onSearchChange={controller.setTableSearch}
+                onLoadedIssuesChange={handleTableLoadedIssuesChange}
+                onCreateIssue={openCreateIssue}
+                exportIssues={controller.exportTableIssues}
+                resolveExportLookups={controller.resolveTableExportLookups}
               />
             )}
             {controller.viewMode === "gantt" && (
@@ -232,22 +303,55 @@ function IssueSurfaceContent({
                 myIssuesFilter={controller.loadMoreFilter}
                 sort={controller.sort}
                 projectId={controller.projectId}
-                activityByIssueId={controller.activity.activityByIssueId}
                 onCreateIssue={openCreateIssue}
+                groupBranches={controller.groupBranches}
               />
             )}
           </div>
         )}
-        {shouldShowBatchToolbar && <BatchActionToolbar issues={issues} />}
+        {shouldShowBatchToolbar && (
+          <BatchActionToolbar
+            issues={
+              controller.viewMode === "table" ? tableLoadedIssues : issues
+            }
+          />
+        )}
       </IssueSurfaceSelectionProvider>
+      </IssueContextMenuProvider>
     </IssueSurfaceActionsProvider>
   );
 }
 
+/**
+ * Shown when the surface has rows but the active filters match none of them.
+ * Shared by every surface, so no caller has to remember that its own empty
+ * copy only describes the unfiltered case. The action clears exactly the
+ * filters this state tests for, so it always restores content.
+ */
+function FilteredEmptyState() {
+  const { t } = useT("issues");
+  const clearFilters = useViewStore((s) => s.clearFilters);
+
+  return (
+    <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-muted-foreground">
+      <FilterX className="h-10 w-10 text-faint-foreground" />
+      <p className="text-body">{t(($) => $.filtered_empty.title)}</p>
+      <p className="text-caption">{t(($) => $.filtered_empty.hint)}</p>
+      <Button variant="outline" size="sm" className="mt-1" onClick={clearFilters}>
+        {t(($) => $.filtered_empty.clear_button)}
+      </Button>
+    </div>
+  );
+}
+
+// Table is deliberately absent. It owns its own placeholders, drawn as rows
+// inside its real grid so the header, column widths and toolbar are up before
+// any data is — a surface-level stand-in would replace all of that with bars
+// of a different shape and then jump when the rows arrived.
 function IssueSurfaceSkeleton({ mode }: { mode: string }) {
   if (mode === "list") {
     return (
-      <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
+      <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2">
         {Array.from({ length: 4 }).map((_, i) => (
           <Skeleton key={i} className="h-10 w-full rounded-lg" />
         ))}

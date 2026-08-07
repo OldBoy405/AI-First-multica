@@ -143,7 +143,7 @@ func TestDiscussionCoordinator_SilentBoundaryAndActivationChain(t *testing.T) {
 		"just chatting about the roadmap",
 		"Handler Test Agent what do you think?", // plain text, no @-mention markup
 	} {
-		triggers := testHandler.computeCommentAgentTriggers(ctx, issue, content, nil, "member", testUserID, commentTriggerComputeOptions{})
+		triggers, _ := testHandler.computeCommentAgentTriggers(ctx, issue, content, nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(triggers) != 0 {
 			t.Fatalf("AC-1 violated: %q produced %d triggers", content, len(triggers))
 		}
@@ -154,7 +154,7 @@ func TestDiscussionCoordinator_SilentBoundaryAndActivationChain(t *testing.T) {
 	// Discussion container.
 	activationID := fx.insertComment(t, discussionID, "member", testUserID,
 		"[@DC](mention://agent/"+fx.CoordinatorID+") please coordinate this thread", nil)
-	triggers := testHandler.computeCommentAgentTriggers(ctx, issue,
+	triggers, _ := testHandler.computeCommentAgentTriggers(ctx, issue,
 		"[@DC](mention://agent/"+fx.CoordinatorID+") please coordinate this thread",
 		nil, "member", testUserID, commentTriggerComputeOptions{})
 	if len(triggers) != 1 || uuidToString(triggers[0].Agent.ID) != fx.CoordinatorID {
@@ -240,7 +240,7 @@ func TestDiscussionCoordinator_SilentBoundaryAndActivationChain(t *testing.T) {
 	// activation human.
 	routeContent := "[@Team](mention://agent/" + fx.TeamAgentID + ") please implement what we converged on"
 	routeCommentID := fx.insertComment(t, discussionID, "agent", fx.CoordinatorID, routeContent, &activationID)
-	routeTriggers := testHandler.computeCommentAgentTriggers(ctx, issue, routeContent, nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
+	routeTriggers, _ := testHandler.computeCommentAgentTriggers(ctx, issue, routeContent, nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
 	if len(routeTriggers) != 1 {
 		t.Fatalf("AC-3: expected one routing trigger, got %+v", routeTriggers)
 	}

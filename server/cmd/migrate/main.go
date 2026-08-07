@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/attributionbackfill"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/migrations"
 	"github.com/multica-ai/multica/server/internal/taskusagebackfill"
@@ -37,8 +39,69 @@ type preMigrationHook func(ctx context.Context, pool *pgxpool.Pool) error
 // can advance the watermark. The hook runs the same idempotent
 // monthly-slice backfill that
 // `cmd/backfill_task_usage_hourly` exposes to operators.
+//
+// MUL-4897 / GH #5544: migration 198 VALIDATEs the strict attribution
+// constraint installed by 197, which drops migration 190's
+// originator_source IS NULL exemption. Self-hosted databases never ran the
+// out-of-band backfill that Multica's cloud did, so their legacy rows make
+// 198 fail closed and the backend refuses to start. The hook reconciles
+// those rows (accountable_user_id := originator_user_id) idempotently BEFORE
+// VALIDATE, so a stuck-at-197 instance auto-heals on `migrate up` with no
+// manual SQL. A higher-numbered migration cannot help — the instance never
+// reaches a version above the failing 198.
+//
+// GH #6388: migration 257 builds a replacement unique index concurrently. A
+// failed build can leave an INVALID relation that IF NOT EXISTS would otherwise
+// mistake for a successful retry. The hook removes only that invalid leftover;
+// migration 257 can then rebuild it while the valid v1 index remains in place.
+//
+// MUL-5823: migration 261 replaces the terminal-task partial index the same
+// way, so it carries the same hazard — an INVALID v2 leftover recorded as
+// success would let migration 262 drop the still-valid v1, leaving all four
+// dashboard rollups on a full table scan.
 var preMigrationHooks = map[string]preMigrationHook{
-	"103_drop_legacy_daily_rollups": runTaskUsageHourlyHook,
+	"103_drop_legacy_daily_rollups":                         runTaskUsageHourlyHook,
+	"198_agent_task_attribution_strict_constraint_validate": runAttributionStrictHook,
+	"257_agent_task_queue_channel_media_pending_unique_v2":  cleanupInvalidConcurrentIndexHook("idx_one_pending_task_per_issue_agent_v2"),
+	"261_agent_task_queue_terminal_completed_at_v2":         cleanupInvalidConcurrentIndexHook("idx_agent_task_queue_terminal_completed_at_v2"),
+}
+
+// cleanupInvalidConcurrentIndexHook removes an INVALID index left by an
+// interrupted or failed CREATE INDEX CONCURRENTLY before the migration retries.
+// Without this guard, CREATE INDEX ... IF NOT EXISTS would treat the leftover
+// relation as success and allow a later migration to drop the still-valid old
+// index. Non-index relations fail closed instead of being dropped implicitly.
+func cleanupInvalidConcurrentIndexHook(indexRegclass string) preMigrationHook {
+	return func(ctx context.Context, pool *pgxpool.Pool) error {
+		var schemaName, relationName string
+		var isIndex, isValid bool
+		err := pool.QueryRow(ctx, `
+			SELECT n.nspname, c.relname, c.relkind = 'i', COALESCE(i.indisvalid, FALSE)
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			LEFT JOIN pg_index i ON i.indexrelid = c.oid
+			WHERE c.oid = to_regclass($1)
+		`, indexRegclass).Scan(&schemaName, &relationName, &isIndex, &isValid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect concurrent index %q: %w", indexRegclass, err)
+		}
+		if !isIndex {
+			return fmt.Errorf("relation %q exists but is not an index", indexRegclass)
+		}
+		if isValid {
+			return nil
+		}
+
+		qualifiedName := pgx.Identifier{schemaName, relationName}.Sanitize()
+		if _, err := pool.Exec(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+qualifiedName); err != nil {
+			return fmt.Errorf("drop invalid concurrent index %s: %w", qualifiedName, err)
+		}
+		slog.Warn("removed invalid index before migration retry", "index", qualifiedName)
+		return nil
+	}
 }
 
 func runTaskUsageHourlyHook(ctx context.Context, pool *pgxpool.Pool) error {
@@ -57,6 +120,22 @@ func runTaskUsageHourlyHook(ctx context.Context, pool *pgxpool.Pool) error {
 		"rows_touched", res.RowsTouched,
 		"from", res.From.Format("2006-01-02T15:04:05Z07:00"),
 		"to", res.To.Format("2006-01-02T15:04:05Z07:00"))
+	return nil
+}
+
+// runAttributionStrictHook backfills accountable_user_id from
+// originator_user_id before migration 198 validates the strict attribution
+// constraint, so self-hosted upgrades that never ran the out-of-band
+// backfill recover automatically (GH #5544 / MUL-4897).
+func runAttributionStrictHook(ctx context.Context, pool *pgxpool.Pool) error {
+	res, err := attributionbackfill.Hook(ctx, pool, attributionbackfill.HookOptions{})
+	if err != nil {
+		return fmt.Errorf("attribution strict-constraint pre-198 hook: %w", err)
+	}
+	slog.Info("attribution backfill hook: complete",
+		"rows_backfilled", res.RowsBackfilled,
+		"batches", res.Batches,
+		"mismatch_normalized", res.MismatchNormalized)
 	return nil
 }
 

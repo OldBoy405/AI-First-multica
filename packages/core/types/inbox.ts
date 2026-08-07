@@ -21,6 +21,10 @@ export type InboxItemType =
   | "reaction_added"
   | "quick_create_done"
   | "quick_create_failed"
+  // Quick create whose outcome could not be verified. Distinct from
+  // quick_create_failed because it must NOT be rendered with failure framing:
+  // the issue may actually have been created.
+  | "quick_create_unconfirmed"
   // CR-2026-010 presenter (single-writer control) transitions. Not added to
   // notifTypeToGroup on the backend — permission notifications are always
   // delivered, never muted.

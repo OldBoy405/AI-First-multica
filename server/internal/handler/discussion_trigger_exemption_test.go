@@ -135,14 +135,14 @@ func TestComputeCommentAgentTriggers_DiscussionContainerNeverEnqueuesAgent(t *te
 	squadMention := "[@Squad](mention://squad/" + fx.SquadID + ") please handle this"
 
 	t.Run("explicit @agent mention", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, agentMention, nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, agentMention, nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers on a Discussion container, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("explicit @squad mention", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, squadMention, nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, squadMention, nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers on a Discussion container, got %d: %+v", len(got), got)
 		}
@@ -150,14 +150,14 @@ func TestComputeCommentAgentTriggers_DiscussionContainerNeverEnqueuesAgent(t *te
 
 	t.Run("reply to an agent-authored parent comment", func(t *testing.T) {
 		parent := &db.Comment{AuthorType: "agent"}
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, "thanks, following up", parent, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, "thanks, following up", parent, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers on a Discussion container, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("agent-authored comment on a squad-assigned Discussion container", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.SquadDiscussionIssue, "worker result posted", nil, "agent", fx.AgentID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.SquadDiscussionIssue, "worker result posted", nil, "agent", fx.AgentID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers on a squad-assigned Discussion container, got %d: %+v", len(got), got)
 		}
@@ -167,7 +167,7 @@ func TestComputeCommentAgentTriggers_DiscussionContainerNeverEnqueuesAgent(t *te
 	// still enqueue exactly as before — the red line must not leak past
 	// origin_type='project_discussion'.
 	t.Run("regression: ordinary issue still enqueues on @agent mention", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.OrdinaryIssue, agentMention, nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.OrdinaryIssue, agentMention, nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 1 {
 			t.Fatalf("expected exactly one trigger on an ordinary issue, got %d: %+v", len(got), got)
 		}
@@ -272,42 +272,42 @@ func TestComputeCommentAgentTriggers_DiscussionContainerTwoClassFilter(t *testin
 	}
 
 	t.Run("member @DC activates", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.CoordinatorID), nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.CoordinatorID), nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 1 || util.UUIDToString(got[0].Agent.ID) != fx.CoordinatorID {
 			t.Fatalf("expected exactly one DC activation trigger, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("member @third-party agent rejected", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.ThirdPartyID), nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.ThirdPartyID), nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers for a third-party agent on Discussion, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("plain-text DC name does not activate", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, "DiscussionCoordinator please summarize this thread", nil, "member", testUserID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, "DiscussionCoordinator please summarize this thread", nil, "member", testUserID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers for a plain-text coordinator name, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("DC-authored @TeamAgent routes", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.TeamAgentID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.TeamAgentID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
 		if len(got) != 1 || util.UUIDToString(got[0].Agent.ID) != fx.TeamAgentID {
 			t.Fatalf("expected exactly one Team Agent routing trigger, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("DC-authored @third-party agent rejected", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.ThirdPartyID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.ThirdPartyID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers for a DC-authored third-party mention, got %d: %+v", len(got), got)
 		}
 	})
 
 	t.Run("DC @DC self-trigger rejected", func(t *testing.T) {
-		got := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.CoordinatorID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
+		got, _ := testHandler.computeCommentAgentTriggers(ctx, fx.DiscussionIssue, mention(fx.CoordinatorID), nil, "agent", fx.CoordinatorID, commentTriggerComputeOptions{})
 		if len(got) != 0 {
 			t.Fatalf("expected no triggers for a DC self-mention, got %d: %+v", len(got), got)
 		}

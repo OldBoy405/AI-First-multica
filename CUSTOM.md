@@ -76,6 +76,19 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 
 | 日期 | 对齐 | 冲突要点 |
 |---|---|---|
+| 2026-08-07 | `upstream/main` @ `c7a8b1699`（608 个提交，fork 首次同步上游） | 52 个冲突文件。① `chat-input.tsx`：上游重写为受控值 + 协同上传 composer（新增 ProjectPicker/`uploadEnabled`/`allowSubmitWhileRunning`/`draftKeyOverride`）；按总则以上游为基底，把二开 `ChatInputCore` + `ChatInputDraftAdapter`（CR-2026-012 DD-9/FR-8）追加保留在文件尾部，上游组件补回二开 `mentionItemTypes`、`onUploadFile`、`onRestoreDraftConsumed` 兼容 prop；废弃二开旧全局 wrapper `useGlobalChatDraftAdapter`（被上游 composer 取代）。② `agent.sql`/`chat.sql`：上游 attribution 列组与二开 `cr_id`/`pipeline_node_run_id`/`project_id` 取并集；生成物按总则丢弃冲突块重跑 `sqlc generate`。③ `service/task.go`（9 块）：上游 attribution 体系为基底，二开项目队列门禁/抑制抢占/Private Ask 投递贴回；`taskEvent` 上游改为方法，二开 `task_failure_event_test.go` 适配并强化 `ChatRecipientID` 断言。④ `router.go`：保留上游新增 VCS webhook 路由，Stripe 摘除（#1 减法定制）在新基底重新摘除。⑤ `computeCommentAgentTriggers` 上游改双返回值，二开 4 个测试文件 16 处调用点适配。⑥ daemon 层快照上报/`crevents.go` 挂钩按上游新事件结构贴回。验证：TS 五包 typecheck 全绿；core 1375 项、views chat/projects 定向套件全过；Go build/vet 绿，handler/service/governance/events/vcs/channel 等合并相关包全过，剩余失败见《已知测试失败基线》 |
+
+## 已知测试失败基线
+
+合并后检查中观察到、**非本次合并引入**的失败（下次合并时对照此表排除，新增失败才是回归）：
+
+| 包 / 测试 | 性质 | 依据 |
+|---|---|---|
+| `internal/cli` 4 项（`TestCLIConfig_BackwardCompat_*`、`TestCLIConfig_OpenClawOverride_*`、`TestCLIConfig_ProfileCommandOverrides_*`） | 上游既有 | 已在 `upstream/main` 基线 worktree 复现同样失败（2026-08-07） |
+| `internal/service` builtin-skills frontmatter 组（`TestBuiltinSkills*` 等 10 项） | 环境性 | 本机 `core.autocrlf=true` 检出 CRLF，测试断言 `"---\n"`；Linux/CI 上不会失败 |
+| `internal/daemonws` 13 项、`internal/daemon`（`TestRefreshHealedVersion_*` 等）、`dingtalk`/`wecom`/`metrics`/`cmd/multica` 各 1–2 项 | 时序/网络敏感 | 全量并行跑失败，单独/整包复跑即过（daemonws 已复验）；daemon 包在本机会挂起，待上游基线单独复验归因 |
+| `views/rich-content/rich-content-boundary.test.ts` 1 项（fence-language 例外排除） | 环境性 | 测试用正斜杠常量排除 `editor/extensions/code-block-view.tsx`，Windows 扫描路径为反斜杠导致误报；Linux/CI 不会失败（上游既有，非合并引入） |
+| `views/autopilots/components/autopilot-dialog.validation.test.tsx` | 资源性 flake | 全量并行跑偶发失败，单独复跑稳定通过（2026-08-07 已复验） |
 
 ## 代码改动
 

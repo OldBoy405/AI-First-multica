@@ -94,10 +94,10 @@ export function ActorAvatar({
     />
   );
 
-  // Optional presence dot overlay. Only meaningful for agents — members have
-  // no presence backbone. Wrapping unconditionally with relative inline-flex
-  // would create extra DOM for every avatar; we only wrap when a dot is asked
-  // for.
+  // Optional presence overlay. Only meaningful for agents — members have no
+  // presence backbone. Wrapping unconditionally with relative inline-flex
+  // would create extra DOM for every avatar; we only wrap when the dot is
+  // asked for.
   const wrapDot = showStatusDot && actorType === "agent";
   const dotted = wrapDot ? (
     <span className="relative inline-flex">
@@ -151,7 +151,7 @@ function ActorAvatarProfileLink({
   href: string;
   children: React.ReactNode;
 }) {
-  const { push, openInNewTab } = useNavigation();
+  const { push, openInNewTab, getShareableUrl } = useNavigation();
 
   const navigate = (event: React.MouseEvent | React.KeyboardEvent) => {
     const controlAncestor = event.currentTarget.parentElement?.closest(
@@ -161,12 +161,15 @@ function ActorAvatarProfileLink({
 
     event.preventDefault();
     event.stopPropagation();
-    if (
-      "metaKey" in event &&
-      (event.metaKey || event.ctrlKey || event.shiftKey) &&
-      openInNewTab
-    ) {
-      openInNewTab(href);
+    if ("metaKey" in event && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+      if (openInNewTab) {
+        openInNewTab(href);
+        return;
+      }
+      // Web: the trigger is a `<span role="link">`, not an anchor, so there is
+      // no native modifier-click behaviour to fall back to — open the browser
+      // tab here rather than letting the click navigate in place.
+      window.open(getShareableUrl(href), "_blank", "noopener,noreferrer");
       return;
     }
     push(href);
@@ -208,7 +211,6 @@ export function AgentStatusDot({ agentId, size }: { agentId: string; size?: Avat
   return (
     <span
       aria-label={`Status: ${label}`}
-      title={label}
       className={`absolute bottom-0 right-0 rounded-full ring-1 ring-background ${dotClass} ${dotSize}`}
     />
   );
@@ -273,6 +275,18 @@ function SquadAvatarHoverCard({
 // Common chrome shared between agent and member hover cards. Keeps focus
 // behaviour and width consistent so the two surfaces feel structurally
 // parallel — content varies, frame doesn't.
+//
+// Do NOT defer-mount the HoverCard on pointerenter to save per-avatar mount
+// cost (MUL-4827). Base UI drives hover through native mouseenter/mouseleave
+// listeners on the trigger element, and installs its close path *inside* the
+// mouseleave handler — so a trigger that never received a real mouseenter can
+// neither cancel a pending open nor ever hover-close. Warming on pointerenter
+// swaps the node mid-gesture and loses exactly those events, which made
+// brushed-past avatars pop open ~600ms later and stick. This is the same
+// invariant DeferredPopup documents: deferral is only sound for events that
+// END a gesture (click/Enter), and hover starts one. Mounting the root eagerly
+// costs ~0.15ms of JS per avatar and adds zero DOM while closed (the popup
+// subtree, and its queries, stay unmounted until open).
 function ActorAvatarHoverCardShell({
   content,
   children,
@@ -290,16 +304,17 @@ function ActorAvatarHoverCardShell({
     setStandalone(!ancestor);
   }, []);
 
+  const tabIndex = standalone ? 0 : -1;
+  const className = standalone
+    ? "inline-flex cursor-pointer rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    : "inline-flex cursor-pointer";
+
   return (
     <HoverCard>
       <HoverCardTrigger
         render={<span ref={triggerRef} />}
-        tabIndex={standalone ? 0 : -1}
-        className={
-          standalone
-            ? "inline-flex cursor-pointer rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            : "inline-flex cursor-pointer"
-        }
+        tabIndex={tabIndex}
+        className={className}
       >
         {children}
       </HoverCardTrigger>

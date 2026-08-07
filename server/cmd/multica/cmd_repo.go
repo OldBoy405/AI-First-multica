@@ -355,13 +355,14 @@ func runRepoCheckout(cmd *cobra.Command, args []string) error {
 	}
 
 	reqBody := map[string]string{
-		"url":          repoURL,
-		"workspace_id": workspaceID,
-		"workdir":      workDir,
-		"ref":          repoCheckoutRef,
-		"agent_name":   agentName,
-		"task_id":      taskID,
-		"auth_token":   authToken,
+		"url":           repoURL,
+		"workspace_id":  workspaceID,
+		"workdir":       workDir,
+		"ref":           repoCheckoutRef,
+		"agent_name":    agentName,
+		"task_id":       taskID,
+		"auth_token":    authToken,
+		"checkout_mode": strings.TrimSpace(os.Getenv("MULTICA_REPO_CHECKOUT_MODE")),
 	}
 
 	data, err := json.Marshal(reqBody)

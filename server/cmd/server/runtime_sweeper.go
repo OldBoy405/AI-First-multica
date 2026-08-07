@@ -14,6 +14,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
+	"github.com/multica-ai/multica/server/pkg/redact"
 )
 
 const (
@@ -68,6 +69,14 @@ const (
 	// ticks and 500 rows/tick we drain 60k rows/hour worst case — plenty
 	// of headroom for the documented backlog without monopolising DB CPU.
 	queuedExpireBatchSize = 500
+	// chatFinalizeGraceSeconds is how long a cancelled chat task's deferred
+	// empty/non-empty judgment (#5219) waits for the daemon's cancel-ack
+	// before the sweeper settles it. Covers the daemon's 5s cancellation
+	// poll plus the bounded 10s+12s transcript drain wait (#5210) plus
+	// network slack; past this the daemon is presumed dead or partitioned.
+	chatFinalizeGraceSeconds = 60.0
+	// chatFinalizeBatchSize caps deferred finalizations per tick.
+	chatFinalizeBatchSize = 100
 )
 
 // runRuntimeSweeper periodically marks runtimes as offline if their
@@ -93,6 +102,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
+			sweepDeferredChatFinalizations(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
 		}
 	}
@@ -304,6 +314,29 @@ func sweepExpiredQueuedTasks(ctx context.Context, queries *db.Queries, taskSvc *
 	taskSvc.HandleFailedTasks(ctx, failedTasks)
 }
 
+// sweepDeferredChatFinalizations settles cancelled chat tasks whose deferred
+// empty/non-empty judgment (#5219) never received a daemon cancel-ack within
+// the grace period — the daemon died, was partitioned, or its ack was lost.
+// FinalizeDeferredCancelledChat claims the marker atomically, so racing a
+// late ack is harmless.
+func sweepDeferredChatFinalizations(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) {
+	rows, err := queries.ListChatFinalizeDeferredExpired(ctx, db.ListChatFinalizeDeferredExpiredParams{
+		GraceSecs:  chatFinalizeGraceSeconds,
+		MaxPerTick: chatFinalizeBatchSize,
+	})
+	if err != nil {
+		slog.Warn("chat finalize sweeper: list deferred failed", "error", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	for _, t := range rows {
+		taskSvc.FinalizeDeferredCancelledChat(ctx, t.ID)
+	}
+	slog.Info("chat finalize sweeper: settled deferred cancellations", "count", len(rows))
+}
+
 // broadcastFailedTasks is preserved as a thin shim for the integration tests
 // in this package. New call sites should use TaskService.HandleFailedTasks
 // directly so the side effects (event broadcast, agent reconcile, issue
@@ -335,26 +368,32 @@ func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *ser
 				}
 			}
 		}
-		evt := events.Event{
+		payload := map[string]any{
+			"task_id":        util.UUIDToString(t.ID),
+			"agent_id":       util.UUIDToString(t.AgentID),
+			"issue_id":       util.UUIDToString(t.IssueID),
+			"status":         "failed",
+			"failure_reason": failureReason,
+			"retry_pending":  false,
+		}
+		if t.Error.Valid && t.Error.String != "" {
+			payload["error"] = redact.Text(t.Error.String)
+		}
+		e := events.Event{
 			Type:        protocol.EventTaskFailed,
 			WorkspaceID: workspaceID,
 			ActorType:   "system",
 			TaskID:      util.UUIDToString(t.ID),
-			Payload: map[string]any{
-				"task_id":        util.UUIDToString(t.ID),
-				"agent_id":       util.UUIDToString(t.AgentID),
-				"issue_id":       util.UUIDToString(t.IssueID),
-				"status":         "failed",
-				"failure_reason": failureReason,
-			},
+			Payload:     payload,
 		}
 		if t.ChatSessionID.Valid {
-			evt.ChatSessionID = util.UUIDToString(t.ChatSessionID)
+			e.ChatSessionID = util.UUIDToString(t.ChatSessionID)
+			payload["chat_session_id"] = e.ChatSessionID
 			if cs, err := queries.GetChatSession(ctx, t.ChatSessionID); err == nil {
-				evt.ChatRecipientID = util.UUIDToString(cs.CreatorID)
+				e.ChatRecipientID = util.UUIDToString(cs.CreatorID)
 			}
 		}
-		bus.Publish(evt)
+		bus.Publish(e)
 		affectedAgents[util.UUIDToString(t.AgentID)] = t.AgentID
 	}
 	for _, agentID := range affectedAgents {
@@ -362,7 +401,8 @@ func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *ser
 	}
 }
 
-// reconcileAgentStatus refreshes agent status from the current active task set.
+// reconcileAgentStatus refreshes agent status from the current working task
+// set. A no-op returns no row, so the fallback emits no redundant status event.
 // Used only by the test-fallback path of broadcastFailedTasks above.
 func reconcileAgentStatus(ctx context.Context, queries *db.Queries, bus *events.Bus, agentID pgtype.UUID) {
 	agent, err := queries.RefreshAgentStatusFromTasks(ctx, agentID)

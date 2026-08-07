@@ -3,22 +3,23 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { motion } from "motion/react";
 import { cn } from "@multica/ui/lib/utils";
 import { useTabHistory } from "@/hooks/use-tab-history";
-import { useActiveTitleSync } from "@/hooks/use-tab-sync";
-import { useTabStore, resolveRouteIcon } from "@/stores/tab-store";
 import {
   SidebarProvider,
   SidebarTrigger,
   useSidebar,
 } from "@multica/ui/components/ui/sidebar";
 import { ModalRegistry } from "@multica/views/modals/registry";
-import { AppSidebar } from "@multica/views/layout";
+import { AppSidebar, GlobalShortcuts } from "@multica/views/layout";
 import { SearchCommand, SearchTrigger } from "@multica/views/search";
 import { FloatingChat } from "@multica/views/chat";
 import { WorkspaceSlugProvider, paths, useCurrentWorkspace } from "@multica/core/paths";
 import { useNavigation } from "@multica/views/navigation";
 import { getCurrentSlug, subscribeToCurrentSlug } from "@multica/core/platform";
 import { useDesktopUnreadBadge } from "@multica/views/platform";
-import { DesktopNavigationProvider } from "@/platform/navigation";
+import {
+  DesktopNavigationProvider,
+  routeContentLinkPath,
+} from "@/platform/navigation";
 import { TabBar } from "./tab-bar";
 import { TabContent } from "./tab-content";
 import { WindowOverlay } from "./window-overlay";
@@ -35,7 +36,7 @@ const toolbarMotion = {
 function WindowToolbar() {
   const { canGoBack, canGoForward, goBack, goForward } = useTabHistory();
   const navButtonClassName =
-    "flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-30";
+    "flex size-7 items-center justify-center rounded-md text-faint-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-30";
 
   return (
     <div
@@ -50,7 +51,7 @@ function WindowToolbar() {
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
         <SidebarTrigger
-          className="size-7 text-muted-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          className="size-7 text-faint-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         />
         <div className="flex items-center gap-1">
@@ -104,8 +105,8 @@ function useNativeNavigationGestures() {
 // is not occupying main-flow width, leave room for the fixed window toolbar
 // so tabs do not land beneath the traffic lights / navigation controls.
 function MainTopBar() {
-  const { state, isMobile } = useSidebar();
-  const sidebarHidden = state === "collapsed" || isMobile;
+  const { state, isCompact } = useSidebar();
+  const sidebarHidden = state === "collapsed" || isCompact;
 
   return (
     <motion.header
@@ -122,10 +123,29 @@ function MainTopBar() {
         transition={toolbarMotion}
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       />
-      <div className="relative z-10 flex h-full items-center">
+      <div className="relative z-10 flex h-full min-w-0 max-w-full items-center">
         <TabBar />
       </div>
     </motion.header>
+  );
+}
+
+// The canvas hugs the expanded sidebar with a hairline gap. When the sidebar
+// leaves the main flow, the left margin must grow to mirror the fixed mr-2 so
+// the floating canvas sits symmetrically inside the window frame.
+function MainCanvas({ children }: { children: React.ReactNode }) {
+  const { state, isCompact } = useSidebar();
+  const sidebarHidden = state === "collapsed" || isCompact;
+
+  return (
+    <motion.div
+      animate={{ marginLeft: sidebarHidden ? 8 : 2 }}
+      className="relative flex flex-1 min-h-0 flex-col overflow-hidden mr-2 mb-2 rounded-xl bg-page-canvas ring-1 ring-surface-border shadow-[var(--surface-shadow)]"
+      initial={false}
+      transition={toolbarMotion}
+    >
+      {children}
+    </motion.div>
   );
 }
 
@@ -134,10 +154,7 @@ function useInternalLinkHandler() {
     const handler = (e: Event) => {
       const path = (e as CustomEvent).detail?.path;
       if (!path) return;
-      const icon = resolveRouteIcon(path);
-      const store = useTabStore.getState();
-      const tabId = store.openTab(path, path, icon);
-      store.setActiveTab(tabId);
+      routeContentLinkPath(path);
     };
     window.addEventListener("multica:navigate", handler);
     return () => window.removeEventListener("multica:navigate", handler);
@@ -190,7 +207,6 @@ function DesktopInboxBridge() {
 
 export function DesktopShell() {
   useInternalLinkHandler();
-  useActiveTitleSync();
   useNativeNavigationGestures();
 
   // Reactive read of current workspace slug from the platform singleton.
@@ -211,18 +227,19 @@ export function DesktopShell() {
           triggered by IndexRedirect, not a route. */}
       <WorkspaceSlugProvider slug={slug}>
         <DesktopInboxBridge />
-        <div className="flex h-screen">
-          <SidebarProvider className="flex-1">
+        <div className="flex h-screen bg-app-shell">
+          <SidebarProvider className="flex-1 bg-app-shell">
+            {slug && <GlobalShortcuts />}
             {slug && <WindowToolbar />}
             {slug && <AppSidebar topSlot={<SidebarTopSpacer />} searchSlot={<SearchTrigger />} />}
             {/* Right side: header + content container */}
-            <motion.div layout transition={toolbarMotion} className="flex flex-1 min-w-0 flex-col">
+            <div className="flex flex-1 min-w-0 flex-col">
               <MainTopBar />
-              <div className="relative flex flex-1 min-h-0 flex-col overflow-hidden mr-2 mb-2 ml-0.5 rounded-xl shadow-sm bg-background">
+              <MainCanvas>
                 <TabContent />
                 {slug && <FloatingChat />}
-              </div>
-            </motion.div>
+              </MainCanvas>
+            </div>
           </SidebarProvider>
         </div>
         {slug && <ModalRegistry />}
