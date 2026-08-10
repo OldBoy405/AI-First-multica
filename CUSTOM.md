@@ -149,6 +149,7 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 
 ## 未做（防止误以为已做）
 
+- **Tools Root 契约接入现存跨仓消费点**——CR-2026-028 只收敛 tools 仓的 active executable surfaces，不改 multica。当前 `server/internal/governance/gen/generate-{transitions,gate-nodes}.mjs` 默认猜测 sibling `../tools`，`approval_crosscheck_test.go` 与 `pkg/gitguard/gitguard_test.go` 也会扫描 sibling tools 路径；后续首次修改这些文件时应删除路径猜测：生成器要求显式 tools root，跨工具测试要求显式 `CRCTL_PATH` / rules path。生产环境现有 `MULTICA_CONTROLLED_SHELL_RULES=<绝对路径>` 属于安装时物化，继续复用，不在 multica 内新增 resolver。
 - **Pipeline Runner**——`pipeline_run` / `pipeline_node_run` 两表已建（#12），但只有治理层的门禁节点投影器在写（#13，仅 4 个 human_approval 节点）；真正的 Runner（执行非 human 节点、驱动流水线）未做。
 - **crctl `--caller` 到 Multica 用户的身份桥接**——因此 `canApprove`（#15）只能按工作区 owner/admin 判定，无法按 `cr.owners` 的角色判定（`canApprove` 注释内有 `ponytail:` 标注）。
 - **controlled-shell L1 层（`--disallowedTools Bash`）**——agent 的 `permission.bash` 平台不持久化、无可信键，只落地了 L2 PATH shim + L3 IDE hooks（#8）。L2 用绝对路径可绕过，已在文档明示。
