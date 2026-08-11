@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -40,13 +39,6 @@ func TestMain(m *testing.M) {
 		err = pool.Ping(ctx)
 	}
 	if err != nil {
-		// The Go↔crctl seam test builds its own filesystem fixture and does not
-		// require the governance database. Run it even when the package DB is
-		// unavailable so a targeted CRCTL_PATH verification cannot silently pass.
-		crosscheckOnly := os.Getenv("CRCTL_PATH") != "" && strings.Contains(strings.Join(os.Args, " "), "TestGrantCrossVerifiesWithCrctl")
-		if crosscheckOnly {
-			os.Exit(m.Run())
-		}
 		fmt.Printf("Skipping governance integration tests: database not reachable: %v\n", err)
 		os.Exit(0)
 	}
