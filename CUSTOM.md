@@ -148,6 +148,7 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 | `TestEnsureDaemonID_Persists` / `TestListRuntimeLocalSkills_*` 等 26 项 | `server/internal/daemon` | 未改动 trunk 检出 A/B 失败名单逐条一致（2026-07-31，T10 全量时发现）；典型根因：测试改 `HOME` 但 Windows 代码走 `USERPROFILE`（daemon.id 写进真实家目录路径失败）、本机已装 IDE 的 skill 根目录被真实发现。上游 Windows 环境假设缺陷，非 fork 引入 | 2026-07-31 |
 | `builtin_skills` 相关 / `TestShortTaskIDMatchesDaemon` / `TestParseSkillArchive_RejectsUnsafeSkillMdPath` | `server/internal/service` 等 | CR-2026-010 TASK-01 期复核：CRLF 检出与 Windows 路径分隔符断言差异，与 claim/队列逻辑无关 | 2026-08-02 |
 | gofmt：本机对上游 794 个文件报格式差异 | 全仓 | **根因是 CRLF**：Windows autocrlf 检出的上游 .go 文件字节级 ≠ gofmt 输出（LF），并非格式真差异（T06 期核实，修正 T05 时"工具链版本差异"的初判）。**fork 新增 .go 文件以 LF 写入且必须过 gofmt**；上游文件不动 | 2026-07-31 |
+| `TestTransitionTableShape`（expanded count 50 ≠ want 45） | `server/internal/governance` | A/B 验证（2026-08-13，CR-2026-032 TASK-04 全包回归时发现）：在 merge 基线 `082a7536`（不含 CR-2026-032 任何改动）上同命令同失败。根因：CR-2026-031 把 `transitions_gen.go` 更新为 28 声明/50 展开，但该测试的硬编码断言仍为 45；纯测试断言同步问题，与投影逻辑无关。修复建议另开小 CR（或与既定的"PLAN/TASK schema ID 口径统一"治理 CR 合并），不在 CR-2026-032 白名单内 | 2026-08-13 |
 
 ## 未做（防止误以为已做）
 
