@@ -280,3 +280,84 @@ func TestRejectionPaths(t *testing.T) {
 		t.Fatalf("oversized batch must be 400, got %d", rec.Code)
 	}
 }
+
+// AIFIRST: TestArchiveEventCompletesWritebackRun is the CR-2026-032 TASK-04
+// test-only contract against the existing production consumer. The schema v1
+// `archive` event crctl emits on a normal writing-back -> archived archive
+// must project the terminal status, point projected_commit at the final
+// archive SHA, complete the feature-writeback pipeline run, and stay
+// idempotent under the (cr_id, commit_sha, event_kind) ledger key. No
+// production code, migration, or schema change is part of this test.
+func TestArchiveEventCompletesWritebackRun(t *testing.T) {
+	crID := "CR-9001-007"
+	ctx := context.Background()
+	// This test owns pipeline projection rows too; crsync fixtures only reset
+	// cr/cr_sync_event, so clean run rows first (same pattern as
+	// gate_projection_test.go's resetPipelineState).
+	_, _ = testPool.Exec(ctx, `DELETE FROM pipeline_node_run WHERE run_id IN (SELECT id FROM pipeline_run WHERE cr_id = $1)`, crID)
+	_, _ = testPool.Exec(ctx, `DELETE FROM pipeline_run WHERE cr_id = $1`, crID)
+	resetCR(t, crID)
+	ensureTestWorkspaceOwner(t)
+
+	// Seed the projection in writing-back with an active feature-writeback run.
+	_, _ = testPool.Exec(ctx, `
+		INSERT INTO cr (workspace_id, cr_id, status, projected_commit, needs_reconcile)
+		VALUES ($1::uuid, $2, 'writing-back', '', false)
+		ON CONFLICT (workspace_id, cr_id) DO UPDATE
+		  SET status = 'writing-back', projected_commit = '', needs_reconcile = false`,
+		testWorkspaceID, crID)
+	var ownerID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT user_id::text FROM member WHERE workspace_id = $1::uuid AND role = 'owner' LIMIT 1`,
+		testWorkspaceID).Scan(&ownerID); err != nil {
+		t.Fatalf("test owner member missing: %v", err)
+	}
+	_, _ = testPool.Exec(ctx, `
+		INSERT INTO pipeline_run (workspace_id, pipeline_id, cr_id, status, started_by)
+		VALUES ($1::uuid, $2, $3, 'running', $4::uuid)`,
+		testWorkspaceID, PipelineIDs.FeatureWriteback, crID, ownerID)
+
+	// Fixed real-looking SHA, matching the deterministic dedup file name
+	// archive-<CR>-<sha>.json that crctl writes.
+	const sha = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+	svc := NewSyncService(testPool, nil)
+	e := ev(crID, "archive", "writing-back", "archived", "cr-archive", sha, "archive.json")
+
+	// First ingest: known kind, legal transition, terminal projection.
+	resp1 := postEvents(t, svc, testWorkspaceID, []OutboxEvent{e})
+	if len(resp1.Accepted) != 1 || len(resp1.Rejected) != 0 {
+		t.Fatalf("archive event must be accepted, got %+v", resp1)
+	}
+	status, reconcile, projected := crRow(t, crID)
+	if status != "archived" || reconcile || projected != sha {
+		t.Fatalf("archive projection wrong: status=%s reconcile=%v projected=%s", status, reconcile, projected)
+	}
+	if runStatus(t, crID, PipelineIDs.FeatureWriteback) != "completed" {
+		t.Fatalf("feature-writeback run must complete on archive")
+	}
+	var n int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM cr_sync_event WHERE cr_id = $1 AND commit_sha = $2 AND event_kind = $3`,
+		crID, sha, "archive").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("want exactly 1 ledger row for archive key, got %d (err=%v)", n, err)
+	}
+
+	// Replay the same event (redelivery window after journal re-mark): the
+	// unique ledger key dedups it and neither projection nor run state moves.
+	resp2 := postEvents(t, svc, testWorkspaceID, []OutboxEvent{e})
+	if len(resp2.Accepted) != 1 || len(resp2.Rejected) != 0 {
+		t.Fatalf("replayed archive event must be accepted (dedup on key), got %+v", resp2)
+	}
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM cr_sync_event WHERE cr_id = $1 AND commit_sha = $2 AND event_kind = $3`,
+		crID, sha, "archive").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("replay must not add ledger rows, got %d (err=%v)", n, err)
+	}
+	status, reconcile, projected = crRow(t, crID)
+	if status != "archived" || reconcile || projected != sha {
+		t.Fatalf("replay changed projection: status=%s reconcile=%v projected=%s", status, reconcile, projected)
+	}
+	if runStatus(t, crID, PipelineIDs.FeatureWriteback) != "completed" {
+		t.Fatal("replay must not reopen the writeback run")
+	}
+}
