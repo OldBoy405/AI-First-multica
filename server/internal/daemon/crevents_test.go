@@ -237,7 +237,7 @@ func writeReviewAnnotation(t *testing.T, root, crID, stage, content string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, stage+".yml"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, stageAnnotationFile(stage)), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -266,10 +266,11 @@ review-loop:
 		t.Fatalf("got (%s,%s), want (review,CR-9003-001)", ev.EventKind, ev.CRID)
 	}
 	var payload struct {
-		Stage    string          `json:"stage"`
-		Verdict  string          `json:"verdict"`
-		Attempt  int             `json:"attempt"`
-		Blockers []reviewBlocker `json:"blockers"`
+		Stage        string   `json:"stage"`
+		Verdict      string   `json:"verdict"`
+		Attempt      int      `json:"attempt"`
+		Blockers     []string `json:"blockers"`
+		SubjectSha   string   `json:"subject_sha256"`
 	}
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 		t.Fatalf("bad payload JSON: %v", err)
@@ -277,8 +278,9 @@ review-loop:
 	if payload.Stage != "requirement" || payload.Verdict != "block" || payload.Attempt != 1 {
 		t.Fatalf("payload mismatch: %+v", payload)
 	}
-	if len(payload.Blockers) != 1 || payload.Blockers[0].ID != "REQ-BLOCK-001" {
-		t.Fatalf("expected 1 blocker with id REQ-BLOCK-001, got %+v", payload.Blockers)
+	// Historical structured blockers fold into their issue text.
+	if len(payload.Blockers) != 1 || payload.Blockers[0] != "not testable" {
+		t.Fatalf("expected 1 normalized blocker 'not testable', got %+v", payload.Blockers)
 	}
 }
 

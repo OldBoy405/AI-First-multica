@@ -484,23 +484,78 @@ func parseCRCommitMessage(root, sha, isoTime, subject string) (crOutboxEvent, bo
 }
 
 // reviewAnnotationDoc is the subset of review-annotations/{stage}.yml this
-// event needs (SKILL.md's full schema has more fields — repair-instructions,
-// review-notes — not relevant to gate-node projection).
+// event needs. Blockers are kept as a raw yaml.Node because the canonical
+// form is a scalar string list (SKILL.md) while historical annotations carry
+// structured {id,location,issue,suggestion} objects — normalizeBlockers folds
+// both into a []string (CR-2026-045 SDD B05).
 type reviewAnnotationDoc struct {
-	Verdict    string          `yaml:"verdict"`
-	Reviewer   string          `yaml:"reviewer"`
-	ReviewedAt string          `yaml:"reviewed-at"`
-	Blockers   []reviewBlocker `yaml:"blockers"`
+	Verdict    string    `yaml:"verdict"`
+	Reviewer   string    `yaml:"reviewer"`
+	ReviewedAt string    `yaml:"reviewed-at"`
+	Blockers   yaml.Node `yaml:"blockers"`
+	SubjectSha string    `yaml:"subject-sha256"`
 	ReviewLoop struct {
 		CurrentAttempt int `yaml:"current-attempt"`
 	} `yaml:"review-loop"`
 }
 
-type reviewBlocker struct {
-	ID         string `yaml:"id" json:"id"`
-	Location   string `yaml:"location" json:"location"`
-	Issue      string `yaml:"issue" json:"issue"`
-	Suggestion string `yaml:"suggestion" json:"suggestion"`
+// stageAnnotationFile maps a review stage key to its canonical annotation file
+// name. tech-design writes sdd.yml, not tech-design.yml (CR-2026-045 B05).
+func stageAnnotationFile(stage string) string {
+	switch stage {
+	case "requirement":
+		return "requirement.yml"
+	case "tech-design":
+		return "sdd.yml"
+	case "code":
+		return "code.yml"
+	default:
+		return stage + ".yml"
+	}
+}
+
+// normalizeBlockers folds a canonical scalar blocker list or historical
+// structured blocker objects into a single []string.
+func normalizeBlockers(n *yaml.Node) []string {
+	if n == nil || n.Kind == 0 {
+		return []string{}
+	}
+	var out []string
+	if n.Kind == yaml.ScalarNode {
+		if n.Value != "" {
+			out = append(out, n.Value)
+		}
+		return out
+	}
+	if n.Kind == yaml.SequenceNode {
+		for _, item := range n.Content {
+			out = append(out, blockerText(item))
+		}
+	}
+	return out
+}
+
+func blockerText(n *yaml.Node) string {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return n.Value
+	case yaml.MappingNode:
+		var id, issue string
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i].Value, n.Content[i+1].Value
+			switch k {
+			case "id":
+				id = v
+			case "issue":
+				issue = v
+			}
+		}
+		if issue != "" {
+			return issue
+		}
+		return id
+	}
+	return ""
 }
 
 // buildReviewPayload reads review-annotations/{stage}.yml directly off the
@@ -520,7 +575,8 @@ type reviewBlocker struct {
 // `git show {sha}:path` here instead (the git plumbing is otherwise
 // identical — see gitLine/crGuardCheck in this file).
 func buildReviewPayload(root, crID, stage, verdict string) (json.RawMessage, bool) {
-	path := filepath.Join(root, "change-requests", crID, "review-annotations", stage+".yml")
+	fileName := stageAnnotationFile(stage)
+	path := filepath.Join(root, "change-requests", crID, "review-annotations", fileName)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
@@ -532,13 +588,15 @@ func buildReviewPayload(root, crID, stage, verdict string) (json.RawMessage, boo
 	if doc.Verdict == "" {
 		doc.Verdict = verdict // fall back to the commit subject if the file is mid-write
 	}
+	blockers := normalizeBlockers(&doc.Blockers)
 	payload, err := json.Marshal(map[string]any{
-		"stage":       stage,
-		"verdict":     doc.Verdict,
-		"blockers":    doc.Blockers,
-		"attempt":     doc.ReviewLoop.CurrentAttempt,
-		"reviewer":    doc.Reviewer,
-		"reviewed_at": doc.ReviewedAt,
+		"stage":         stage,
+		"verdict":       doc.Verdict,
+		"blockers":      blockers,
+		"attempt":       doc.ReviewLoop.CurrentAttempt,
+		"reviewer":      doc.Reviewer,
+		"reviewed_at":   doc.ReviewedAt,
+		"subject_sha256": doc.SubjectSha,
 	})
 	if err != nil {
 		return nil, false

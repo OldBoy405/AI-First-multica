@@ -2281,6 +2281,119 @@ func (q *Queries) CreateDeferredChannelIssueTask(ctx context.Context, arg Create
 	return i, err
 }
 
+const createPipelineTask = `-- name: CreatePipelineTask :one
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, status, priority, context,
+    originator_user_id, accountable_user_id, originator_source,
+    delegated_from_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id,
+    cr_id, pipeline_node_run_id
+)
+SELECT
+    a.id, a.runtime_id, 'queued', $3, $4,
+    s.originator_user_id, s.accountable_user_id, s.originator_source,
+    s.delegated_from_task_id, s.rule_version_id, s.trigger_evidence_kind, s.trigger_evidence_ref_id,
+    $5, $6
+FROM agent_task_queue s
+JOIN agent a
+  ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
+JOIN cr c
+  ON c.workspace_id = $1 AND c.cr_id = $5
+WHERE s.id = $7 AND s.agent_id = $2
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, cr_id, pipeline_node_run_id, project_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for
+`
+
+type CreatePipelineTaskParams struct {
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	ID                pgtype.UUID `json:"id"`
+	Priority          int32       `json:"priority"`
+	Context           []byte      `json:"context"`
+	CrID              pgtype.Text `json:"cr_id"`
+	PipelineNodeRunID pgtype.UUID `json:"pipeline_node_run_id"`
+	ID_2              pgtype.UUID `json:"id_2"`
+}
+
+// AIFIRST: CR-2026-045 (SDD §3.5) — enqueue a Runner pipeline-node task by
+// copying the full attribution snapshot from a trusted source task in one
+// INSERT. The source task is the single attribution source (task-token
+// stamped); the executor agent is re-read from the same workspace's active,
+// runtime-bound agents, and the CR must exist in the same workspace's cr
+// projection. Any guard failure inserts 0 rows; the caller maps pgx.ErrNoRows
+// to RUNNER_ATTRIBUTION_INVALID.
+//
+// A pipeline successor node is a systemic continuation of the same user
+// intent, not a new attribution event (MUL-4302 §5): originator/accountable/
+// source/delegation/rule/evidence are copied verbatim, and the logical node
+// owner is never treated as the human.
+func (q *Queries) CreatePipelineTask(ctx context.Context, arg CreatePipelineTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, createPipelineTask,
+		arg.WorkspaceID,
+		arg.ID,
+		arg.Priority,
+		arg.Context,
+		arg.CrID,
+		arg.PipelineNodeRunID,
+		arg.ID_2,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.CrID,
+		&i.PipelineNodeRunID,
+		&i.ProjectID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+	)
+	return i, err
+}
+
 const createQuickCreateTask = `-- name: CreateQuickCreateTask :one
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context, originator_user_id,
