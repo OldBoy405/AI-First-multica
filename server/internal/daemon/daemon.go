@@ -4630,6 +4630,15 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	if task.Agent != nil {
 		agentName = task.Agent.Name
 	}
+	if err := d.preparePipelineTask(ctx, &task); err != nil {
+		taskLog.Error("pipeline task preparation failed", "error", err)
+		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+			kind: terminalTaskReportFail, taskID: task.ID, errorMessage: err.Error(), failureReason: taskRunFailureReason(err),
+		}); failErr != nil {
+			taskLog.Error("fail pipeline task callback failed", "error", failErr)
+		}
+		return
+	}
 	if task.ChatSessionID != "" {
 		taskLog.Info("picked chat task", "chat_session", shortID(task.ChatSessionID), "agent", agentName, "provider", provider, "ask_only", task.AskOnly)
 	} else {
@@ -4842,7 +4851,7 @@ func taskRunFailureReason(err error) string {
 //  4. The blocking wait is cancelled (daemon shutdown, server-side cancel)
 //     — fail the task with the ctx error.
 func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Task, taskLog *slog.Logger) (release func(), abort bool) {
-	if len(task.ProjectResources) == 0 || d.cfg.DaemonID == "" {
+	if task.PipelinePrompt == "" && (len(task.ProjectResources) == 0 || d.cfg.DaemonID == "") {
 		return nil, false
 	}
 	assignment, err := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
@@ -6059,7 +6068,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if env.GitShimDir != "" {
 		agentEnv["PATH"] = env.GitShimDir + string(os.PathListSeparator) + agentEnv["PATH"]
 	}
-	if len(d.cfg.CRWorkspaceRoots) > 0 {
+	if task.PipelineWorkspace != "" {
+		agentEnv["CRCTL_WORKSPACE"] = task.PipelineWorkspace
+	} else if len(d.cfg.CRWorkspaceRoots) > 0 {
 		agentEnv["CRCTL_WORKSPACE"] = d.cfg.CRWorkspaceRoots[0]
 	}
 	// Point Codex to the per-task CODEX_HOME so it discovers skills natively

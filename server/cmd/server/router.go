@@ -988,20 +988,27 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		os.Exit(1)
 	}
 
-	// AIFIRST: Runner Core (CR-2026-045). Fails closed if the embedded registry
-	// is inconsistent; otherwise wires the event wake sources and performs a
-	// startup scan of non-terminal architecture runs.
-	runner, runnerErr := governance.NewRunner(pool, bus, h.TaskService)
-	if runnerErr != nil {
-		slog.Error("runner registry rejected; refusing to start", "error", runnerErr)
-		os.Exit(1)
-	}
-	runner.WireEvents(bus)
-	go func() {
-		if err := runner.StartupScan(context.Background()); err != nil {
-			slog.Error("runner startup scan failed", "error", err)
+	// AIFIRST: Runner Core (CR-2026-045). Default-off keeps the existing manual
+	// Skill + crctl route untouched. When enabled, malformed compiled contracts
+	// fail startup; all wake sources converge on the same Runner.
+	var architectureRunner *governance.Runner
+	if governance.ArchitectureRunnerEnabled() {
+		var runnerErr error
+		architectureRunner, runnerErr = governance.NewRunner(pool, bus, h.TaskService)
+		if runnerErr != nil {
+			slog.Error("runner registry rejected; refusing to start", "error", runnerErr)
+			os.Exit(1)
 		}
-	}()
+		architectureRunner.WireEvents(bus)
+		if approvalSvc != nil {
+			approvalSvc.SetGrantAckHandler(architectureRunner.WakeGrant)
+		}
+		go func() {
+			if err := architectureRunner.StartupScan(context.Background()); err != nil {
+				slog.Error("runner startup scan failed", "error", err)
+			}
+		}()
+	}
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
@@ -1078,9 +1085,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		}
 
 		// AIFIRST: Runner Start endpoint (CR-2026-045). Auth middleware already
-		// resolved the task-token (mat_) binding; the handler rejects any actor
-		// source other than task_token.
-		r.Post("/api/workspaces/{workspaceID}/pipeline-runs", runner.HandleStartArchitecture)
+		// resolved the task-token (mat_) binding; feature-off mounts no route.
+		if architectureRunner != nil {
+			r.Post("/api/workspaces/{workspaceID}/pipeline-runs", architectureRunner.HandleStartArchitecture)
+		}
 
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)

@@ -1,14 +1,8 @@
 // AIFIRST: Runner Core (CR-2026-045, SDD §3.4/§5).
 //
-// Implements the fixed architecture-design five-node slice as a single
-// idempotent Reconcile(run): every wake source (start, cr:updated, task
-// terminal, grant ACK, startup scan) funnels into Reconcile, which reads the
-// generated registry, the existing run/node/task/CR/review/approval/checkpoint
-// projections and performs at most one deterministic next action.
-//
-// The Runner never parses agent final text, blocker text or crctl stderr to
-// decide routing, and never writes CR-controlled files or runs git — those
-// remain the Agent (via Skill) + crctl boundary.
+// This is intentionally not a generic workflow engine. It drives the fixed
+// architecture-design slice with one idempotent Reconcile entry point and
+// leaves CR state, approval validation, and Git effects to Skills + crctl.
 package governance
 
 import (
@@ -16,18 +10,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"regexp"
+	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
-// Runner error codes (SDD §6).
 const (
 	RunnerErrUnsupportedPipeline    = "RUNNER_UNSUPPORTED_PIPELINE"
 	RunnerErrRequiresAgentRoute     = "RUNNER_REQUIRES_AGENT_ROUTE"
@@ -41,19 +40,43 @@ const (
 	RunnerErrReviewEvidenceIncomp   = "RUNNER_REVIEW_EVIDENCE_INCOMPLETE"
 	RunnerErrPipelineCrctlUnavail   = "PIPELINE_CRCTL_UNAVAILABLE"
 	RunnerErrTaskFailed             = "RUNNER_TASK_FAILED"
+	RunnerErrApprovalRejected       = "RUNNER_APPROVAL_REJECTED"
 	RunnerErrLoopExhausted          = "RUNNER_LOOP_EXHAUSTED"
 )
 
-// coreRegistry is the compiled architecture-design Core registry embedded by
-// gen/generate-gate-nodes.mjs (ArchitectureCoreRegistryJSON).
+const (
+	runnerSchema        = "architecture-core/v1"
+	maxTechContextBytes = 16 * 1024
+)
+
+var crIDPattern = regexp.MustCompile(`^CR-[0-9]{4}-[0-9]{3,}$`)
+
+// ArchitectureRunnerEnabled is the deployment switch. Default-off preserves
+// the existing manual Skill + crctl route; enabling only mounts/wires Core.
+func ArchitectureRunnerEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AIFIRST_ARCHITECTURE_RUNNER"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 type coreRegistry struct {
 	Schema   string `json:"schema"`
 	Pipeline struct {
 		ID    string     `json:"id"`
 		Nodes []coreNode `json:"nodes"`
 	} `json:"pipeline"`
-	PipelineOwner string `json:"pipelineOwner"`
-	Digest        string `json:"digest"`
+	PipelineOwner   string               `json:"pipelineOwner"`
+	NodePermissions []coreNodePermission `json:"nodePermissions"`
+	Digest          string               `json:"digest"`
+}
+
+type coreNodePermission struct {
+	Ref                  string `json:"ref"`
+	Owner                string `json:"owner"`
+	PipelineOwnerCanCall bool   `json:"pipelineOwnerCanCall"`
 }
 
 type coreNode struct {
@@ -74,102 +97,167 @@ type coreNode struct {
 	} `json:"reviewLoop"`
 }
 
-// parseCoreRegistry decodes the embedded registry. It is parsed once at
-// construction; a malformed registry is a startup contract failure.
 func parseCoreRegistry() (*coreRegistry, error) {
 	var r coreRegistry
 	if err := json.Unmarshal([]byte(ArchitectureCoreRegistryJSON), &r); err != nil {
-		return nil, fmt.Errorf("%s: malformed embedded registry: %w", RunnerErrContractInvalid, err)
+		return nil, errCode(RunnerErrContractInvalid, "malformed embedded registry")
 	}
-	if r.Pipeline.ID != PipelineIDs.ArchitectureDesign {
-		return nil, fmt.Errorf("%s: registry pipeline %q != %q", RunnerErrContractInvalid, r.Pipeline.ID, PipelineIDs.ArchitectureDesign)
+	if r.Schema != "ai-first.pipeline-registry/architecture-core-v1" || r.Pipeline.ID != PipelineIDs.ArchitectureDesign || r.Digest != ArchitectureCoreRegistryDigest {
+		return nil, errCode(RunnerErrContractInvalid, "registry identity or digest mismatch")
 	}
-	if r.Digest != ArchitectureCoreRegistryDigest {
-		return nil, fmt.Errorf("%s: registry digest %q != embedded %q", RunnerErrContractInvalid, r.Digest, ArchitectureCoreRegistryDigest)
+	expected := []struct{ kind, ref string }{
+		{"skill", "write-tech-design"},
+		{"skill", "review-tech-design"},
+		{"human_approval", ""},
+		{"skill", "approve-tech-design"},
+		{"skill", "push-progress"},
+	}
+	if len(r.Pipeline.Nodes) != len(expected) {
+		return nil, errCode(RunnerErrContractInvalid, "architecture Core must have five nodes")
+	}
+	seenIDs := map[string]bool{}
+	for i, node := range r.Pipeline.Nodes {
+		if node.ID == "" || seenIDs[node.ID] || node.Kind != expected[i].kind || node.Ref != expected[i].ref || node.OnFail != "abort" {
+			return nil, errCode(RunnerErrContractInvalid, fmt.Sprintf("invalid node contract at seq %d", i+1))
+		}
+		if _, err := parseUUID(node.ID); err != nil {
+			return nil, errCode(RunnerErrContractInvalid, "node id is not UUID")
+		}
+		seenIDs[node.ID] = true
+	}
+	review := r.Pipeline.Nodes[1]
+	if review.ReviewLoop == nil || review.ReviewLoop.ReplayPolicy != "rerun-listed-nodes-in-order" || review.ReviewLoop.MaxAttempts != 3 || len(review.ReviewLoop.ReplayNodes) != 2 ||
+		review.ReviewLoop.ReplayNodes[0].NodeID != r.Pipeline.Nodes[0].ID || review.ReviewLoop.ReplayNodes[0].Ref != "write-tech-design" ||
+		review.ReviewLoop.ReplayNodes[1].NodeID != r.Pipeline.Nodes[1].ID || review.ReviewLoop.ReplayNodes[1].Ref != "review-tech-design" {
+		return nil, errCode(RunnerErrContractInvalid, "reviewLoop contract invalid")
+	}
+	permissions := map[string]coreNodePermission{}
+	for _, p := range r.NodePermissions {
+		if p.Ref == "" || p.Owner == "" || !p.PipelineOwnerCanCall {
+			return nil, errCode(RunnerErrContractInvalid, "node permission invalid")
+		}
+		if _, exists := permissions[p.Ref]; exists {
+			return nil, errCode(RunnerErrContractInvalid, "node permission owner not unique")
+		}
+		permissions[p.Ref] = p
+	}
+	for _, node := range r.Pipeline.Nodes {
+		if node.Kind == "skill" {
+			if _, ok := permissions[node.Ref]; !ok {
+				return nil, errCode(RunnerErrContractInvalid, "skill permission missing: "+node.Ref)
+			}
+		}
 	}
 	return &r, nil
 }
 
-// Runner drives the fixed architecture-design Core slice.
+type pipelineTaskEnqueuer interface {
+	EnqueuePipelineTask(context.Context, service.PipelineTaskSpec) (db.AgentTaskQueue, error)
+}
+
 type Runner struct {
 	pool     *pgxpool.Pool
-	bus      *events.Bus
-	tasks    *service.TaskService
+	tasks    pipelineTaskEnqueuer
 	registry *coreRegistry
 }
 
-// NewRunner builds a Runner and fails closed if the embedded registry is
-// inconsistent (digest / pipeline id / node contract).
-func NewRunner(pool *pgxpool.Pool, bus *events.Bus, tasks *service.TaskService) (*Runner, error) {
+func NewRunner(pool *pgxpool.Pool, _ *events.Bus, tasks pipelineTaskEnqueuer) (*Runner, error) {
 	registry, err := parseCoreRegistry()
 	if err != nil {
 		return nil, err
 	}
-	return &Runner{pool: pool, bus: bus, tasks: tasks, registry: registry}, nil
+	return &Runner{pool: pool, tasks: tasks, registry: registry}, nil
 }
 
-// StartArchitectureInput carries the task-token-bound fields the Start
-// endpoint resolved. Actor/user/agent are trusted only via the auth context,
-// never the request body.
 type StartArchitectureInput struct {
 	WorkspaceID pgtype.UUID
-	AgentID     pgtype.UUID // executor agent (task-token X-Agent-ID)
-	TaskID      pgtype.UUID // source task (task-token X-Task-ID)
-	UserID      pgtype.UUID // started_by (task-token X-User-ID)
+	AgentID     pgtype.UUID
+	TaskID      pgtype.UUID
+	UserID      pgtype.UUID
 	CrID        string
 	TechContext string
 }
 
-// StartArchitecture validates the start contract and creates (or re-reads) the
-// single non-terminal architecture run for the CR. It then reconciles once so
-// the first node is enqueued in the same request path.
-func (r *Runner) StartArchitecture(ctx context.Context, in StartArchitectureInput) (runID pgtype.UUID, changed bool, err error) {
+type activeRun struct {
+	ID               pgtype.UUID
+	WorkspaceID      pgtype.UUID
+	CRID             string
+	ExecutionContext json.RawMessage
+	Inputs           json.RawMessage
+}
+
+func (r *Runner) StartArchitecture(ctx context.Context, in StartArchitectureInput) (pgtype.UUID, bool, error) {
+	if !in.WorkspaceID.Valid || !in.AgentID.Valid || !in.TaskID.Valid || !in.UserID.Valid || !crIDPattern.MatchString(in.CrID) {
+		return pgtype.UUID{}, false, errCode(RunnerErrAuthorityMismatch, "invalid bound IDs or CR ID")
+	}
+	if len([]byte(in.TechContext)) > maxTechContextBytes {
+		return pgtype.UUID{}, false, errCode(RunnerErrContractInvalid, "tech_context exceeds 16 KiB")
+	}
 	var crStatus string
 	var needsReconcile bool
-	err = r.pool.QueryRow(ctx, `
-		SELECT status, needs_reconcile FROM cr
-		WHERE workspace_id = $1 AND cr_id = $2`, in.WorkspaceID, in.CrID).Scan(&crStatus, &needsReconcile)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return pgtype.UUID{}, false, errCode(RunnerErrCRNotReady, "CR projection missing")
+	err := r.pool.QueryRow(ctx, `SELECT status, needs_reconcile FROM cr WHERE workspace_id = $1 AND cr_id = $2`, in.WorkspaceID, in.CrID).Scan(&crStatus, &needsReconcile)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (crStatus != "requirement-approved" || needsReconcile)) {
+		return pgtype.UUID{}, false, errCode(RunnerErrCRNotReady, "CR projection not ready")
 	}
 	if err != nil {
 		return pgtype.UUID{}, false, err
 	}
-	if crStatus != "requirement-approved" || needsReconcile {
-		return pgtype.UUID{}, false, errCode(RunnerErrCRNotReady, "CR not requirement-approved or needs_reconcile")
-	}
-	if err := r.checkSourceTask(ctx, in.AgentID, in.TaskID); err != nil {
+	if err := r.checkSourceTask(ctx, in.WorkspaceID, in.AgentID, in.TaskID); err != nil {
 		return pgtype.UUID{}, false, err
 	}
 	if err := r.checkExecutorAgent(ctx, in.WorkspaceID, in.AgentID); err != nil {
 		return pgtype.UUID{}, false, err
 	}
-
-	execCtx, _ := json.Marshal(map[string]any{
-		"runner":            "architecture-core/v1",
-		"template_digest":   r.registry.Digest,
-		"pipeline_owner":    r.registry.PipelineOwner,
-		"executor_agent_id": in.AgentID.String(),
-		"source_task_id":    in.TaskID.String(),
+	if err := r.checkExecutorSkills(ctx, in.AgentID); err != nil {
+		return pgtype.UUID{}, false, err
+	}
+	execCtx, err := json.Marshal(map[string]any{
+		"runner": runnerSchema, "template_digest": r.registry.Digest,
+		"pipeline_owner": r.registry.PipelineOwner, "executor_agent_id": in.AgentID.String(), "source_task_id": in.TaskID.String(),
 	})
-	inputs, _ := json.Marshal(map[string]any{"cr_id": in.CrID, "tech_context": in.TechContext})
-	runID, err = r.upsertRun(ctx, in.WorkspaceID, in.CrID, in.UserID, inputs, execCtx)
+	if err != nil {
+		return pgtype.UUID{}, false, err
+	}
+	inputs, err := json.Marshal(map[string]any{"cr_id": in.CrID, "tech_context": in.TechContext})
+	if err != nil {
+		return pgtype.UUID{}, false, err
+	}
+	runID, changed, err := r.upsertRun(ctx, in.WorkspaceID, in.CrID, in.UserID, inputs, execCtx)
 	if err != nil {
 		return pgtype.UUID{}, false, err
 	}
 	if err := r.Reconcile(ctx, in.WorkspaceID, in.CrID); err != nil {
-		return runID, true, err
+		return runID, changed, err
 	}
-	return runID, true, nil
+	return runID, changed, nil
 }
 
-// Reconcile is the single idempotent scheduler. It reads run/node/task/CR
-// projections and performs at most one next action. Idempotent: re-delivery or
-// restart converges to the same state.
+// Reconcile serializes on a PostgreSQL advisory lock derived from the run ID.
+// Every wake source uses this method; partial unique indexes remain the
+// cross-process crash-window backstop for run and task creation.
 func (r *Runner) Reconcile(ctx context.Context, workspaceID pgtype.UUID, crID string) error {
 	run, err := r.findActiveRun(ctx, workspaceID, crID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // no active run for this CR
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lockConn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer lockConn.Release()
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, run.ID.String()); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, run.ID.String())
+	}()
+
+	run, err = r.findActiveRun(ctx, workspaceID, crID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
 	}
 	if err != nil {
 		return err
@@ -177,476 +265,518 @@ func (r *Runner) Reconcile(ctx context.Context, workspaceID pgtype.UUID, crID st
 	if err := r.checkDigest(ctx, run); err != nil {
 		return err
 	}
-	crStatus, err := r.crStatus(ctx, workspaceID, crID)
-	if err != nil {
-		return err
-	}
-	current, err := r.currentNode(ctx, run.ID, crStatus)
-	if err != nil {
-		return err
-	}
-	if current == nil {
-		return r.finishRun(ctx, run.ID)
-	}
-	// If the current node's row already has an active task, nothing to do.
-	if current.NodeRunID.Valid {
-		active, err := r.activeTaskForNode(ctx, current.NodeRunID)
+	return r.reconcileLocked(ctx, run)
+}
+
+func (r *Runner) reconcileLocked(ctx context.Context, run activeRun) error {
+	writeNode, reviewNode, humanNode, approveNode, pushNode := r.registry.Pipeline.Nodes[0], r.registry.Pipeline.Nodes[1], r.registry.Pipeline.Nodes[2], r.registry.Pipeline.Nodes[3], r.registry.Pipeline.Nodes[4]
+	maxAttempts := reviewNode.ReviewLoop.MaxAttempts
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		status, err := r.crStatus(ctx, run.WorkspaceID, run.CRID)
 		if err != nil {
 			return err
 		}
-		if active {
+		complete, stop, err := r.reconcileSkillTask(ctx, run, writeNode, 1, attempt)
+		if err != nil || stop {
+			return err
+		}
+		if !complete {
+			return r.waitAuthority(ctx, run.ID, writeNode, attempt)
+		}
+		writeReady := status == "tech-design-review-pending" || status == "tech-design-reviewed"
+		approvalRejected := false
+		if status == "tech-designing" {
+			decision, _, delivered, approvalErr := r.deliveredTechApproval(ctx, run.WorkspaceID, run.CRID)
+			if approvalErr != nil {
+				return approvalErr
+			}
+			approvalRejected = delivered && decision == "reject"
+		}
+		if !writeReady && status == "tech-designing" {
+			// After a canonical block the CR intentionally returns to designing;
+			// allow the completed prior round to replay so later attempts remain
+			// reachable on every wake, not only in the first reconcile call.
+			if prior, evidenceErr := r.reviewEvidence(ctx, run.ID, reviewNode.ID, attempt); evidenceErr == nil {
+				writeReady = prior.Verdict == "block" && prior.Attempt == attempt && len(prior.Blockers) > 0 && prior.SubjectSHA256 != "" && prior.ReviewedAt != ""
+			}
+			// approve-tech-design applies a signed reject by rolling the CR back
+			// to designing. Preserve reachability of node 4 so that business
+			// result can terminate this run explicitly.
+			writeReady = writeReady || approvalRejected
+		}
+		if !writeReady {
+			return r.waitAuthority(ctx, run.ID, writeNode, attempt)
+		}
+		if err := r.markNode(ctx, run.ID, writeNode, attempt, "passed"); err != nil {
+			return err
+		}
+
+		complete, stop, err = r.reconcileSkillTask(ctx, run, reviewNode, 2, attempt)
+		if err != nil || stop {
+			return err
+		}
+		if !complete {
 			return nil
 		}
-		if err := r.failIfTerminalFailed(ctx, run.ID, current); err != nil {
+		evidence, err := r.reviewEvidence(ctx, run.ID, reviewNode.ID, attempt)
+		if err != nil {
 			return err
 		}
-		if err := r.advancePassedNode(ctx, run.ID, current, crStatus); err != nil {
+		status, err = r.crStatus(ctx, run.WorkspaceID, run.CRID)
+		if err != nil {
 			return err
 		}
+		switch evidence.Verdict {
+		case "block":
+			if evidence.Attempt != attempt || len(evidence.Blockers) == 0 || evidence.SubjectSHA256 == "" || evidence.ReviewedAt == "" {
+				return r.waitEvidence(ctx, run.ID, reviewNode, attempt, RunnerErrReviewEvidenceIncomp)
+			}
+			if status != "tech-designing" {
+				replayStarted, replayErr := r.nodeAttemptExists(ctx, run.ID, writeNode.ID, attempt+1)
+				if replayErr != nil {
+					return replayErr
+				}
+				if !replayStarted {
+					return r.waitAuthority(ctx, run.ID, reviewNode, attempt)
+				}
+			}
+			if err := r.markNode(ctx, run.ID, reviewNode, attempt, "blocked"); err != nil {
+				return err
+			}
+			if attempt == maxAttempts {
+				return r.failRun(ctx, run.ID, RunnerErrLoopExhausted)
+			}
+			continue
+		case "pass":
+			if evidence.Attempt != attempt || len(evidence.Blockers) != 0 || evidence.SubjectSHA256 == "" || evidence.ReviewedAt == "" {
+				return r.waitEvidence(ctx, run.ID, reviewNode, attempt, RunnerErrReviewEvidenceIncomp)
+			}
+			if status != "tech-design-review-pending" && status != "tech-design-reviewed" && !approvalRejected {
+				return r.waitAuthority(ctx, run.ID, reviewNode, attempt)
+			}
+			if err := r.markNode(ctx, run.ID, reviewNode, attempt, "passed"); err != nil {
+				return err
+			}
+			return r.reconcileApprovalAndCheckpoint(ctx, run, humanNode, approveNode, pushNode)
+		default:
+			return r.waitEvidence(ctx, run.ID, reviewNode, attempt, RunnerErrReviewEvidenceIncomp)
+		}
 	}
-	// Loop exhaustion: canonical review block at maxAttempts stops the run.
-	if exhausted, err := r.loopExhausted(ctx, run.ID, current, crStatus); err != nil {
-		return err
-	} else if exhausted {
-		return errCode(RunnerErrLoopExhausted, "review loop exhausted")
-	}
-	return r.enqueueNode(ctx, run, current)
+	return r.failRun(ctx, run.ID, RunnerErrLoopExhausted)
 }
 
-// --- helpers ----------------------------------------------------------------
-
-func errCode(code, msg string) error { return fmt.Errorf("%s: %s", code, msg) }
-
-func (r *Runner) checkSourceTask(ctx context.Context, agentID, taskID pgtype.UUID) error {
-	var srcAgentID pgtype.UUID
-	err := r.pool.QueryRow(ctx, `SELECT agent_id FROM agent_task_queue WHERE id = $1`, taskID).Scan(&srcAgentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errCode(RunnerErrAttributionInvalid, "source task missing")
-	}
+func (r *Runner) reconcileApprovalAndCheckpoint(ctx context.Context, run activeRun, human, approve, push coreNode) error {
+	humanID, err := r.ensureNodeRow(ctx, run.ID, human, 3, 1)
 	if err != nil {
 		return err
 	}
-	if srcAgentID != agentID {
-		return errCode(RunnerErrAttributionInvalid, "source task agent != executor agent")
+	decision, approvalID, delivered, err := r.deliveredTechApproval(ctx, run.WorkspaceID, run.CRID)
+	if err != nil {
+		return err
 	}
-	return nil
+	if !delivered {
+		_, err = r.pool.Exec(ctx, `UPDATE pipeline_run SET status='waiting_approval' WHERE id=$1 AND status='running'`, run.ID)
+		return err
+	}
+	if _, err = r.pool.Exec(ctx, `UPDATE pipeline_node_run SET status='passed', completed_at=now(), approval_id=$2 WHERE id=$1 AND status IN ('pending','running','passed')`, humanID, approvalID); err != nil {
+		return err
+	}
+	_, _ = r.pool.Exec(ctx, `UPDATE pipeline_run SET status='running' WHERE id=$1 AND status='waiting_approval'`, run.ID)
+
+	complete, stop, err := r.reconcileSkillTask(ctx, run, approve, 4, 1)
+	if err != nil || stop {
+		if decision == "reject" {
+			status, serr := r.crStatus(ctx, run.WorkspaceID, run.CRID)
+			if serr == nil && status == "tech-designing" {
+				return r.failRun(ctx, run.ID, RunnerErrTaskFailed)
+			}
+		}
+		return err
+	}
+	if !complete {
+		return nil
+	}
+	status, err := r.crStatus(ctx, run.WorkspaceID, run.CRID)
+	if err != nil {
+		return err
+	}
+	if decision == "reject" {
+		if status != "tech-designing" {
+			return r.waitAuthority(ctx, run.ID, approve, 1)
+		}
+		return r.failRun(ctx, run.ID, RunnerErrApprovalRejected)
+	}
+	if decision != "approve" || status != "tech-design-reviewed" {
+		return r.waitAuthority(ctx, run.ID, approve, 1)
+	}
+	if err := r.markNode(ctx, run.ID, approve, 1, "passed"); err != nil {
+		return err
+	}
+
+	complete, stop, err = r.reconcileSkillTask(ctx, run, push, 5, 1)
+	if err != nil || stop {
+		return err
+	}
+	if !complete {
+		return nil
+	}
+	ok, err := r.checkpointProjected(ctx, run.ID, push.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return r.waitAuthority(ctx, run.ID, push, 1)
+	}
+	if err := r.markNode(ctx, run.ID, push, 1, "passed"); err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `UPDATE pipeline_run SET status='completed', completed_at=now() WHERE id=$1 AND status IN ('running','waiting_approval')`, run.ID)
+	return err
 }
 
-func (r *Runner) checkExecutorAgent(ctx context.Context, workspaceID, agentID pgtype.UUID) error {
-	var archivedAt *pgtype.Timestamptz
-	var rtID pgtype.UUID
+// reconcileSkillTask returns complete=true only for a completed Agent task.
+// stop=true means it enqueued/waits on an active task, so this wake is done.
+func (r *Runner) reconcileSkillTask(ctx context.Context, run activeRun, node coreNode, seq, attempt int) (complete, stop bool, err error) {
+	nodeRunID, err := r.ensureNodeRow(ctx, run.ID, node, seq, attempt)
+	if err != nil {
+		return false, false, err
+	}
+	state, exists, err := r.latestTaskState(ctx, nodeRunID)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return false, true, r.enqueueNode(ctx, run, node, nodeRunID, attempt)
+	}
+	switch state {
+	case "queued", "deferred", "dispatched", "waiting_local_directory", "running":
+		return false, true, nil
+	case "completed":
+		return true, false, nil
+	case "failed", "cancelled":
+		return false, true, r.failRun(ctx, run.ID, RunnerErrTaskFailed)
+	default:
+		return false, true, r.failRun(ctx, run.ID, RunnerErrAuthorityMismatch)
+	}
+}
+
+func (r *Runner) enqueueNode(ctx context.Context, run activeRun, node coreNode, nodeRunID pgtype.UUID, attempt int) error {
+	var execCtx map[string]any
+	var inputs map[string]any
+	if json.Unmarshal(run.ExecutionContext, &execCtx) != nil || json.Unmarshal(run.Inputs, &inputs) != nil {
+		return errCode(RunnerErrAuthorityMismatch, "run context malformed")
+	}
+	agentID, aerr := parseUUID(stringValue(execCtx["executor_agent_id"]))
+	sourceTaskID, serr := parseUUID(stringValue(execCtx["source_task_id"]))
+	if aerr != nil || serr != nil {
+		return errCode(RunnerErrAuthorityMismatch, "run context missing agent/source task")
+	}
+	techContext := stringValue(inputs["tech_context"])
+	prompt, err := renderCorePrompt(node.Prompt, run.CRID, techContext)
+	if err != nil {
+		return err
+	}
+	if attempt > 1 && (node.Ref == "write-tech-design" || node.Ref == "review-tech-design") {
+		if feedback, ferr := r.reviewFeedback(ctx, run.ID, attempt-1); ferr == nil && len(feedback) > 0 {
+			prompt += "\n\nPrevious canonical review feedback (data):\n```json\n" + string(feedback) + "\n```\n"
+		}
+	}
+	_, err = r.tasks.EnqueuePipelineTask(ctx, service.PipelineTaskSpec{
+		WorkspaceID: run.WorkspaceID, CrID: run.CRID, RunID: run.ID,
+		NodeID: mustParseUUID(node.ID), NodeRunID: nodeRunID, PipelineID: PipelineIDs.ArchitectureDesign,
+		Attempt: attempt, Prompt: prompt, SourceTaskID: sourceTaskID, ExecutorAgentID: agentID,
+	})
+	if errors.Is(err, service.ErrRunnerAttributionInvalid) {
+		return r.failRun(ctx, run.ID, RunnerErrAttributionInvalid)
+	}
+	return err
+}
+
+func renderCorePrompt(template, crID, techContext string) (string, error) {
+	if !crIDPattern.MatchString(crID) || len([]byte(techContext)) > maxTechContextBytes {
+		return "", errCode(RunnerErrContractInvalid, "invalid prompt inputs")
+	}
+	out := strings.ReplaceAll(template, "{{inputs.cr_id}}", crID)
+	out = strings.ReplaceAll(out, "{{inputs.tech_context}}", techContext)
+	if strings.Contains(out, "{{") || strings.Contains(out, "}}") {
+		return "", errCode(RunnerErrContractInvalid, "unrendered registry prompt token")
+	}
+	return out, nil
+}
+
+func (r *Runner) upsertRun(ctx context.Context, workspaceID pgtype.UUID, crID string, userID pgtype.UUID, inputs, execCtx []byte) (pgtype.UUID, bool, error) {
+	var id pgtype.UUID
 	err := r.pool.QueryRow(ctx, `
-		SELECT archived_at, runtime_id FROM agent
-		WHERE id = $1 AND workspace_id = $2`, agentID, workspaceID).Scan(&archivedAt, &rtID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errCode(RunnerErrAgentNotReady, "executor agent missing in workspace")
+		INSERT INTO pipeline_run (workspace_id,pipeline_id,cr_id,status,started_by,inputs,execution_context)
+		VALUES ($1,$2,$3,'running',$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id`,
+		workspaceID, PipelineIDs.ArchitectureDesign, crID, userID, inputs, execCtx).Scan(&id)
+	if err == nil {
+		return id, true, nil
 	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return pgtype.UUID{}, false, err
+	}
+	run, err := r.findActiveRun(ctx, workspaceID, crID)
 	if err != nil {
-		return err
+		return pgtype.UUID{}, false, err
 	}
-	if archivedAt != nil || !rtID.Valid {
-		return errCode(RunnerErrAgentNotReady, "executor agent archived or unbound runtime")
+	var changed bool
+	err = r.pool.QueryRow(ctx, `
+		UPDATE pipeline_run SET inputs=$2, execution_context=$3
+		WHERE id=$1 AND COALESCE(execution_context->>'runner','')=''
+		RETURNING true`, run.ID, inputs, execCtx).Scan(&changed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return run.ID, false, nil
 	}
-	return nil
-}
-
-type activeRun struct {
-	ID              pgtype.UUID
-	ExecutionContext json.RawMessage
-	Inputs          json.RawMessage
+	return run.ID, changed, err
 }
 
 func (r *Runner) findActiveRun(ctx context.Context, workspaceID pgtype.UUID, crID string) (activeRun, error) {
 	var run activeRun
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, execution_context, inputs FROM pipeline_run
-		WHERE workspace_id = $1 AND cr_id = $2 AND pipeline_id = $3
-		  AND status IN ('running', 'waiting_approval')
-		ORDER BY created_at DESC LIMIT 1`,
-		workspaceID, crID, PipelineIDs.ArchitectureDesign).Scan(&run.ID, &run.ExecutionContext, &run.Inputs)
+		SELECT id,workspace_id,cr_id,execution_context,inputs FROM pipeline_run
+		WHERE workspace_id=$1 AND cr_id=$2 AND pipeline_id=$3 AND status IN ('running','waiting_approval')
+		ORDER BY created_at DESC LIMIT 1`, workspaceID, crID, PipelineIDs.ArchitectureDesign).
+		Scan(&run.ID, &run.WorkspaceID, &run.CRID, &run.ExecutionContext, &run.Inputs)
 	return run, err
 }
 
 func (r *Runner) checkDigest(ctx context.Context, run activeRun) error {
 	var m map[string]any
-	if err := json.Unmarshal(run.ExecutionContext, &m); err != nil {
-		return err
-	}
-	if d, _ := m["template_digest"].(string); d != r.registry.Digest {
-		if err := r.failRun(ctx, run.ID, RunnerErrTemplateDigestMismatch); err != nil {
-			return err
-		}
-		return errCode(RunnerErrTemplateDigestMismatch, "template digest drift, run failed")
+	if json.Unmarshal(run.ExecutionContext, &m) != nil || stringValue(m["runner"]) != runnerSchema || stringValue(m["template_digest"]) != r.registry.Digest {
+		return r.failRun(ctx, run.ID, RunnerErrTemplateDigestMismatch)
 	}
 	return nil
 }
 
-func (r *Runner) upsertRun(ctx context.Context, workspaceID pgtype.UUID, crID string, userID pgtype.UUID, inputs, execCtx []byte) (pgtype.UUID, error) {
+func (r *Runner) checkSourceTask(ctx context.Context, workspaceID, agentID, taskID pgtype.UUID) error {
+	var found bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT true FROM agent_task_queue t JOIN agent a ON a.id=t.agent_id
+		WHERE t.id=$1 AND t.agent_id=$2 AND a.workspace_id=$3`, taskID, agentID, workspaceID).Scan(&found)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errCode(RunnerErrAttributionInvalid, "source task/agent/workspace mismatch")
+	}
+	return err
+}
+
+func (r *Runner) checkExecutorAgent(ctx context.Context, workspaceID, agentID pgtype.UUID) error {
+	var ready bool
+	err := r.pool.QueryRow(ctx, `SELECT archived_at IS NULL AND runtime_id IS NOT NULL FROM agent WHERE id=$1 AND workspace_id=$2`, agentID, workspaceID).Scan(&ready)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !ready) {
+		return errCode(RunnerErrAgentNotReady, "executor agent missing, archived, or runtime-unbound")
+	}
+	return err
+}
+
+func (r *Runner) checkExecutorSkills(ctx context.Context, agentID pgtype.UUID) error {
+	rows, err := r.pool.Query(ctx, `SELECT s.name FROM skill s JOIN agent_skill x ON x.skill_id=s.id WHERE x.agent_id=$1 AND x.enabled=true`, agentID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	enabled := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		enabled[name] = true
+	}
+	for _, node := range r.registry.Pipeline.Nodes {
+		if node.Kind == "skill" && !enabled[node.Ref] {
+			return errCode(RunnerErrSkillMissing, "executor agent missing skill: "+node.Ref)
+		}
+	}
+	return rows.Err()
+}
+
+func (r *Runner) ensureNodeRow(ctx context.Context, runID pgtype.UUID, node coreNode, seq, attempt int) (pgtype.UUID, error) {
 	var id pgtype.UUID
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO pipeline_run (workspace_id, pipeline_id, cr_id, status, started_by, inputs, execution_context)
-		VALUES ($1, $2, $3, 'running', $4, $5, $6)
-		ON CONFLICT DO NOTHING
-		RETURNING id`,
-		workspaceID, PipelineIDs.ArchitectureDesign, crID, userID, inputs, execCtx).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		run, rerr := r.findActiveRun(ctx, workspaceID, crID)
-		if rerr != nil {
-			return pgtype.UUID{}, rerr
-		}
-		return run.ID, nil
-	}
+		INSERT INTO pipeline_node_run (run_id,node_id,ref,kind,seq,status,attempt,started_at)
+		VALUES ($1,$2,$3,$4,$5,'running',$6,now())
+		ON CONFLICT (run_id,node_id,attempt) DO UPDATE SET started_at=COALESCE(pipeline_node_run.started_at,now())
+		RETURNING id`, runID, node.ID, nullIfEmpty(node.Ref), node.Kind, seq, attempt).Scan(&id)
 	return id, err
+}
+
+func (r *Runner) nodeAttemptExists(ctx context.Context, runID pgtype.UUID, nodeID string, attempt int) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipeline_node_run WHERE run_id=$1 AND node_id=$2::uuid AND attempt=$3)`, runID, nodeID, attempt).Scan(&exists)
+	return exists, err
+}
+
+func (r *Runner) latestTaskState(ctx context.Context, nodeRunID pgtype.UUID) (string, bool, error) {
+	var state string
+	err := r.pool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE pipeline_node_run_id=$1 ORDER BY created_at DESC LIMIT 1`, nodeRunID).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	return state, err == nil, err
+}
+
+type reviewEvidence struct {
+	Verdict       string   `json:"verdict"`
+	Blockers      []string `json:"blockers"`
+	Attempt       int      `json:"attempt"`
+	ReviewedAt    string   `json:"reviewed_at"`
+	SubjectSHA256 string   `json:"subject_sha256"`
+}
+
+func (r *Runner) reviewEvidence(ctx context.Context, runID pgtype.UUID, nodeID string, attempt int) (reviewEvidence, error) {
+	var raw json.RawMessage
+	err := r.pool.QueryRow(ctx, `SELECT detail FROM pipeline_node_run WHERE run_id=$1 AND node_id=$2 AND attempt=$3`, runID, nodeID, attempt).Scan(&raw)
+	if err != nil {
+		return reviewEvidence{}, err
+	}
+	var e reviewEvidence
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return reviewEvidence{}, err
+	}
+	return e, nil
+}
+
+func (r *Runner) reviewFeedback(ctx context.Context, runID pgtype.UUID, attempt int) (json.RawMessage, error) {
+	returnRaw := json.RawMessage{}
+	err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('attempt',attempt,'verdict',detail->'verdict','blockers',detail->'blockers') FROM pipeline_node_run WHERE run_id=$1 AND node_id=$2 AND attempt=$3`, runID, r.registry.Pipeline.Nodes[1].ID, attempt).Scan(&returnRaw)
+	return returnRaw, err
+}
+
+func (r *Runner) deliveredTechApproval(ctx context.Context, workspaceID pgtype.UUID, crID string) (string, pgtype.UUID, bool, error) {
+	var decision string
+	var id pgtype.UUID
+	err := r.pool.QueryRow(ctx, `
+		SELECT decision,id FROM approval_record WHERE workspace_id=$1 AND cr_id=$2 AND stage='tech-design' AND delivered_at IS NOT NULL
+		ORDER BY created_at DESC LIMIT 1`, workspaceID, crID).Scan(&decision, &id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", pgtype.UUID{}, false, nil
+	}
+	return decision, id, err == nil, err
+}
+
+func (r *Runner) checkpointProjected(ctx context.Context, runID pgtype.UUID, pushNodeID string) (bool, error) {
+	var ok bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM pipeline_node_run n JOIN pipeline_run r ON r.id=n.run_id
+		  JOIN cr_sync_event e ON e.cr_id=r.cr_id AND e.event_kind='checkpoint' AND e.commit_sha<>'' AND e.occurred_at>=n.started_at
+		  WHERE n.run_id=$1 AND n.node_id=$2 AND n.attempt=1
+		)`, runID, pushNodeID).Scan(&ok)
+	return ok, err
 }
 
 func (r *Runner) crStatus(ctx context.Context, workspaceID pgtype.UUID, crID string) (string, error) {
-	var s string
-	err := r.pool.QueryRow(ctx, `SELECT status FROM cr WHERE workspace_id = $1 AND cr_id = $2`, workspaceID, crID).Scan(&s)
-	return s, err
-}
-
-// nodeRun is a pipeline_node_run row (or a not-yet-materialized node).
-type nodeRun struct {
-	NodeRunID pgtype.UUID // pipeline_node_run.id (invalid if not yet materialized)
-	NodeID    string      // template node UUID
-	Ref       string      // skill id (empty for human_approval)
-	Kind      string
-	Status    string
-	Attempt   int
-	Seq       int
-}
-
-// currentNode returns the first not-yet-passed node in template order, or nil
-// when every node has passed (run complete).
-func (r *Runner) currentNode(ctx context.Context, runID pgtype.UUID, crStatus string) (*nodeRun, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, node_id, COALESCE(ref,''), kind, status, attempt, seq
-		FROM pipeline_node_run WHERE run_id = $1 ORDER BY seq ASC, attempt ASC`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	bySeq := map[int][]nodeRun{}
-	for rows.Next() {
-		var n nodeRun
-		if err := rows.Scan(&n.NodeRunID, &n.NodeID, &n.Ref, &n.Kind, &n.Status, &n.Attempt, &n.Seq); err != nil {
-			return nil, err
-		}
-		bySeq[n.Seq] = append(bySeq[n.Seq], n)
-	}
-	for i, node := range r.registry.Pipeline.Nodes {
-		seq := i + 1
-		lasts := bySeq[seq]
-		if node.Kind == "human_approval" {
-			if r.approvalPassed(node, crStatus) {
-				continue
-			}
-			// Waiting for approval: the human_approval node is current.
-			return &nodeRun{NodeID: node.ID, Kind: node.Kind, Seq: seq, Attempt: 1}, nil
-		}
-		if len(lasts) == 0 {
-			return &nodeRun{NodeID: node.ID, Ref: node.Ref, Kind: node.Kind, Seq: seq, Attempt: 1}, nil
-		}
-		cur := &lasts[len(lasts)-1]
-		if cur.Status == "passed" {
-			continue
-		}
-		if cur.Status == "blocked" {
-			// A blocked review returns here for the repair attempt.
-			return &nodeRun{NodeRunID: cur.NodeRunID, NodeID: cur.NodeID, Ref: cur.Ref, Kind: cur.Kind, Status: cur.Status, Attempt: cur.Attempt + 1, Seq: seq}, nil
-		}
-		return cur, nil
-	}
-	return nil, nil
-}
-
-func (r *Runner) approvalPassed(node coreNode, crStatus string) bool {
-	// The tech-design human_approval node is passed once the CR leaves
-	// tech-design-review-pending (approved → tech-design-reviewed).
-	return crStatus == "tech-design-reviewed" || crStatus == "task-breakdown" || crStatus == "developing" ||
-		crStatus == "code-reviewing" || crStatus == "code-approved" || crStatus == "merging" || crStatus == "writing-back" || crStatus == "archived"
-}
-
-func (r *Runner) activeTaskForNode(ctx context.Context, nodeRunID pgtype.UUID) (bool, error) {
-	var n int
-	err := r.pool.QueryRow(ctx, `
-		SELECT count(*) FROM agent_task_queue
-		WHERE pipeline_node_run_id = $1
-		  AND status IN ('queued','deferred','dispatched','waiting_local_directory','running')`,
-		nodeRunID).Scan(&n)
-	return n > 0, err
-}
-
-func (r *Runner) failIfTerminalFailed(ctx context.Context, runID pgtype.UUID, n *nodeRun) error {
 	var status string
-	err := r.pool.QueryRow(ctx, `SELECT status FROM pipeline_node_run WHERE id = $1`, n.NodeRunID).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if status == "failed" {
-		return r.failRun(ctx, runID, RunnerErrTaskFailed)
-	}
-	return nil
+	err := r.pool.QueryRow(ctx, `SELECT status FROM cr WHERE workspace_id=$1 AND cr_id=$2`, workspaceID, crID).Scan(&status)
+	return status, err
 }
 
-// advancePassedNode clears a stale "running" node whose task is terminal and
-// whose authority postcondition is now satisfied — the next reconcile will see
-// the successor node. A terminal task WITHOUT the authority postcondition is
-// left in place (wait_reason) and no successor is scheduled (double success
-// condition, SDD §5).
-func (r *Runner) advancePassedNode(ctx context.Context, runID pgtype.UUID, n *nodeRun, crStatus string) error {
-	var taskStatus string
-	err := r.pool.QueryRow(ctx, `
-		SELECT status FROM agent_task_queue WHERE pipeline_node_run_id = $1
-		ORDER BY created_at DESC LIMIT 1`, n.NodeRunID).Scan(&taskStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // no task yet: enqueue path handles it
-	}
-	if err != nil {
-		return err
-	}
-	terminal := taskStatus == "completed" || taskStatus == "failed" || taskStatus == "cancelled"
-	if !terminal {
-		return nil
-	}
-	authorityOk := r.authorityPostcondition(n, crStatus)
-	if !authorityOk {
-		// Task terminal but authority fact lagging: wait, no successor.
-		_, err = r.pool.Exec(ctx, `
-			UPDATE pipeline_node_run SET detail = jsonb_set(COALESCE(detail,'{}'), '{runner,wait_reason}',
-				'"authority_postcondition"', true) WHERE id = $1`, n.NodeRunID)
-		return err
-	}
-	// Authority satisfied: mark the node passed so the successor becomes current.
-	_, err = r.pool.Exec(ctx, `
-		UPDATE pipeline_node_run SET status = 'passed', completed_at = now()
-		WHERE id = $1 AND status IN ('running','pending')`, n.NodeRunID)
+func (r *Runner) markNode(ctx context.Context, runID pgtype.UUID, node coreNode, attempt int, status string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE pipeline_node_run SET status=$4,completed_at=now(),detail=jsonb_set(COALESCE(detail,'{}'),'{runner}',COALESCE(detail->'runner','{}') - 'wait_reason',true) WHERE run_id=$1 AND node_id=$2 AND attempt=$3 AND status NOT IN ('failed','skipped')`, runID, node.ID, attempt, status)
 	return err
 }
 
-// authorityPostcondition maps a skill node to its CR/review authority fact
-// (SDD §5). Only skill nodes have a task+authority double condition.
-func (r *Runner) authorityPostcondition(n *nodeRun, crStatus string) bool {
-	switch n.Ref {
-	case "write-tech-design":
-		return crStatus == "tech-design-review-pending" || crStatus == "tech-designing"
-	case "approve-tech-design":
-		return crStatus == "tech-design-reviewed" || crStatus == "task-breakdown" || crStatus == "developing"
-	case "push-progress":
-		// Completed only once the checkpoint projection exists (TASK-09 wiring).
-		// Until the checkpoint evidence is projected, wait.
-		return r.checkpointProjected(n)
-	case "review-tech-design":
-		// Review node authority is the review projection; block/pass both are
-		// "done" — the successor is the human_approval node only on pass, and a
-		// repair attempt on block (handled by currentNode + loopExhausted).
-		return true
-	default:
-		return true
-	}
+func (r *Runner) waitAuthority(ctx context.Context, runID pgtype.UUID, node coreNode, attempt int) error {
+	return r.setRunnerDetail(ctx, runID, node.ID, attempt, map[string]any{"wait_reason": "authority_postcondition"})
 }
 
-func (r *Runner) checkpointProjected(n *nodeRun) bool {
-	// Placeholder: checkpoint correlation is wired in TASK-09. Until then a
-	// terminal push task is not advanced (authority pending) — safe by default.
-	return false
+func (r *Runner) waitEvidence(ctx context.Context, runID pgtype.UUID, node coreNode, attempt int, code string) error {
+	return r.setRunnerDetail(ctx, runID, node.ID, attempt, map[string]any{"wait_reason": "review_evidence", "error": map[string]any{"code": code}})
 }
 
-// loopExhausted reports whether the canonical review projection is blocked at
-// maxAttempts, in which case the Runner stops without creating attempt+1.
-func (r *Runner) loopExhausted(ctx context.Context, runID pgtype.UUID, n *nodeRun, crStatus string) (bool, error) {
-	if n.Ref != "review-tech-design" {
-		return false, nil
-	}
-	var detail json.RawMessage
-	var attempt int
-	err := r.pool.QueryRow(ctx, `
-		SELECT COALESCE(detail,'{}'), attempt FROM pipeline_node_run
-		WHERE id = $1`, n.NodeRunID).Scan(&detail, &attempt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	var m map[string]any
-	_ = json.Unmarshal(detail, &m)
-	maxA := 3
-	if node := r.reviewNode(); node != nil && node.ReviewLoop != nil && node.ReviewLoop.MaxAttempts > 0 {
-		maxA = node.ReviewLoop.MaxAttempts
-	}
-	return m["verdict"] == "block" && attempt >= maxA, nil
-}
-
-func (r *Runner) reviewNode() *coreNode {
-	for i := range r.registry.Pipeline.Nodes {
-		if r.registry.Pipeline.Nodes[i].Ref == "review-tech-design" {
-			return &r.registry.Pipeline.Nodes[i]
-		}
-	}
-	return nil
-}
-
-func (r *Runner) enqueueNode(ctx context.Context, run activeRun, n *nodeRun) error {
-	var execCtx map[string]any
-	if err := json.Unmarshal(run.ExecutionContext, &execCtx); err != nil {
-		return err
-	}
-	agentID, _ := execCtx["executor_agent_id"].(string)
-	sourceTaskID, _ := execCtx["source_task_id"].(string)
-	if agentID == "" || sourceTaskID == "" {
-		return errCode(RunnerErrAuthorityMismatch, "execution_context missing agent/source task")
-	}
-	var inputs map[string]any
-	_ = json.Unmarshal(run.Inputs, &inputs)
-	crID, _ := inputs["cr_id"].(string)
-	if crID == "" {
-		return errCode(RunnerErrAuthorityMismatch, "run inputs missing cr_id")
-	}
-	var wsID pgtype.UUID
-	_ = r.pool.QueryRow(ctx, `SELECT workspace_id FROM pipeline_run WHERE id = $1`, run.ID).Scan(&wsID)
-	nodeRunID, err := r.ensureNodeRow(ctx, run.ID, n)
+func (r *Runner) setRunnerDetail(ctx context.Context, runID pgtype.UUID, nodeID string, attempt int, detail map[string]any) error {
+	raw, err := json.Marshal(detail)
 	if err != nil {
 		return err
 	}
-	prompt := r.promptFor(n)
-	spec := service.PipelineTaskSpec{
-		WorkspaceID:     wsID,
-		CrID:            crID,
-		RunID:           run.ID,
-		NodeID:          mustUUID(n.NodeID),
-		NodeRunID:       nodeRunID,
-		PipelineID:      PipelineIDs.ArchitectureDesign,
-		Attempt:         n.Attempt,
-		Prompt:          prompt,
-		SourceTaskID:    mustUUID(sourceTaskID),
-		ExecutorAgentID: mustUUID(agentID),
-		Priority:        0,
-	}
-	_, err = r.tasks.EnqueuePipelineTask(ctx, spec)
-	if errors.Is(err, service.ErrRunnerAttributionInvalid) {
-		return errCode(RunnerErrAttributionInvalid, "pipeline task enqueue guard failed")
-	}
+	_, err = r.pool.Exec(ctx, `UPDATE pipeline_node_run SET detail=jsonb_set(COALESCE(detail,'{}'),'{runner}',$4::jsonb,true) WHERE run_id=$1 AND node_id=$2 AND attempt=$3`, runID, nodeID, attempt, raw)
 	return err
-}
-
-func (r *Runner) ensureNodeRow(ctx context.Context, runID pgtype.UUID, n *nodeRun) (pgtype.UUID, error) {
-	var id pgtype.UUID
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO pipeline_node_run (run_id, node_id, ref, kind, seq, status, attempt, started_at)
-		VALUES ($1, $2, $3, $4, $5, 'running', $6, now())
-		ON CONFLICT (run_id, node_id, attempt) DO UPDATE
-		  SET status = 'running', started_at = COALESCE(pipeline_node_run.started_at, now())
-		RETURNING id`,
-		runID, n.NodeID, nullIfEmpty(n.Ref), n.Kind, n.Seq, n.Attempt).Scan(&id)
-	return id, err
-}
-
-func (r *Runner) promptFor(n *nodeRun) string {
-	for _, node := range r.registry.Pipeline.Nodes {
-		if node.ID == n.NodeID {
-			return node.Prompt
-		}
-	}
-	return ""
 }
 
 func (r *Runner) failRun(ctx context.Context, runID pgtype.UUID, code string) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE pipeline_run SET status = 'failed', completed_at = now()
-		WHERE id = $1 AND status IN ('running','waiting_approval')`, runID)
+	_, err := r.pool.Exec(ctx, `UPDATE pipeline_run SET status='failed',completed_at=now() WHERE id=$1 AND status IN ('running','waiting_approval')`, runID)
 	if err != nil {
 		return err
 	}
-	_, _ = r.pool.Exec(ctx, `
-		UPDATE pipeline_node_run SET detail = jsonb_set(COALESCE(detail,'{}'), '{runner,error}',
-			jsonb_build_object('code', $2), true)
-		WHERE run_id = $1 AND status = 'running'`, runID, code)
+	_, _ = r.pool.Exec(ctx, `UPDATE pipeline_node_run SET status=CASE WHEN status='running' THEN 'failed' ELSE status END,completed_at=CASE WHEN status='running' THEN now() ELSE completed_at END,detail=jsonb_set(COALESCE(detail,'{}'),'{runner,error}',jsonb_build_object('code',$2),true) WHERE run_id=$1 AND status IN ('running','blocked')`, runID, code)
 	return errCode(code, "run failed")
 }
 
-func (r *Runner) finishRun(ctx context.Context, runID pgtype.UUID) error {
-	_, err := r.pool.Exec(ctx, `
-		UPDATE pipeline_run SET status = 'completed', completed_at = now()
-		WHERE id = $1 AND status IN ('running','waiting_approval')`, runID)
-	return err
-}
-
-func mustUUID(s string) pgtype.UUID {
-	var u pgtype.UUID
-	_ = u.Scan(s)
-	return u
-}
-
-// WireEvents subscribes the Runner to its wake sources (cr:updated and task
-// terminal). Events are only wake signals, never authority; a lost wake is
-// healed by a later event or StartupScan.
 func (r *Runner) WireEvents(bus *events.Bus) {
 	bus.Subscribe(EventCRUpdated, func(e events.Event) {
-		if e.WorkspaceID == "" {
+		payload, ok := e.Payload.(map[string]any)
+		if !ok || e.WorkspaceID == "" {
 			return
 		}
-		p, ok := e.Payload.(map[string]any)
-		if !ok {
-			return
-		}
-		crID, _ := p["cr_id"].(string)
-		if crID == "" {
-			return
-		}
-		_ = r.Reconcile(context.Background(), mustUUID(e.WorkspaceID), crID)
-	})
-	for _, evType := range []string{protocol.EventTaskCompleted, protocol.EventTaskFailed} {
-		bus.Subscribe(evType, func(e events.Event) {
-			if e.TaskID == "" {
-				return
+		ws, err := parseUUID(e.WorkspaceID)
+		crID := stringValue(payload["cr_id"])
+		if err == nil && crID != "" {
+			if err := r.Reconcile(context.Background(), ws, crID); err != nil {
+				slog.Warn("runner CR wake failed", "cr_id", crID, "error", err)
 			}
-			_ = r.reconcileFromTaskEvent(context.Background(), e.TaskID)
+		}
+	})
+	for _, eventType := range []string{protocol.EventTaskCompleted, protocol.EventTaskFailed} {
+		bus.Subscribe(eventType, func(e events.Event) {
+			if e.TaskID != "" {
+				if err := r.reconcileFromTaskEvent(context.Background(), e.TaskID); err != nil {
+					slog.Warn("runner task wake failed", "task_id", e.TaskID, "error", err)
+				}
+			}
 		})
 	}
 }
 
-// StartupScan reconciles every non-terminal Core run once at server start.
+// WakeGrant is installed into ApprovalService. The ACK handler already scoped
+// the IDs to this workspace; the callback only wakes, then Reconcile re-reads
+// approval_record as authority.
+func (r *Runner) WakeGrant(ctx context.Context, workspaceID, crID string) {
+	ws, err := parseUUID(workspaceID)
+	if err == nil {
+		if err := r.Reconcile(ctx, ws, crID); err != nil {
+			slog.Warn("runner grant wake failed", "cr_id", crID, "error", err)
+		}
+	}
+}
+
 func (r *Runner) StartupScan(ctx context.Context) error {
 	rows, err := r.pool.Query(ctx, `
-		SELECT workspace_id, cr_id FROM pipeline_run
-		WHERE pipeline_id = $1 AND status IN ('running','waiting_approval')`,
-		PipelineIDs.ArchitectureDesign)
+		SELECT workspace_id,cr_id FROM pipeline_run
+		WHERE pipeline_id=$1 AND status IN ('running','waiting_approval') AND execution_context->>'runner'=$2`, PipelineIDs.ArchitectureDesign, runnerSchema)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var ws pgtype.UUID
-		var cr string
-		if err := rows.Scan(&ws, &cr); err != nil {
+		var crID string
+		if err := rows.Scan(&ws, &crID); err != nil {
 			return err
 		}
-		if err := r.Reconcile(ctx, ws, cr); err != nil {
-			slog.Error("runner startup scan reconcile failed", "cr_id", cr, "error", err)
+		if err := r.Reconcile(ctx, ws, crID); err != nil {
+			slog.Warn("runner startup reconcile failed", "cr_id", crID, "error", err)
 		}
 	}
 	return rows.Err()
 }
 
-// HandleStartArchitecture is POST /api/workspaces/{workspaceID}/pipeline-runs.
-// It only accepts the server-set task-token actor (X-Actor-Source=task_token);
-// workspace/agent/task/user IDs come from the auth middleware headers, never
-// the request body.
 func (r *Runner) HandleStartArchitecture(w http.ResponseWriter, req *http.Request) {
 	if req.Header.Get("X-Actor-Source") != "task_token" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": RunnerErrRequiresAgentRoute})
 		return
 	}
-	workspaceID := req.Header.Get("X-Workspace-ID")
-	agentID := req.Header.Get("X-Agent-ID")
-	taskID := req.Header.Get("X-Task-ID")
-	userID := req.Header.Get("X-User-ID")
-	if workspaceID == "" || agentID == "" || taskID == "" || userID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing task-token headers"})
+	workspaceID, werr := parseUUID(req.Header.Get("X-Workspace-ID"))
+	if pathWorkspace := chi.URLParam(req, "workspaceID"); pathWorkspace == "" || pathWorkspace != workspaceID.String() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": RunnerErrAuthorityMismatch})
+		return
+	}
+	agentID, aerr := parseUUID(req.Header.Get("X-Agent-ID"))
+	taskID, terr := parseUUID(req.Header.Get("X-Task-ID"))
+	userID, uerr := parseUUID(req.Header.Get("X-User-ID"))
+	if werr != nil || aerr != nil || terr != nil || uerr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task-token binding"})
 		return
 	}
 	var body struct {
@@ -656,7 +786,13 @@ func (r *Runner) HandleStartArchitecture(w http.ResponseWriter, req *http.Reques
 			TechContext string `json:"tech_context"`
 		} `json:"inputs"`
 	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	dec := json.NewDecoder(http.MaxBytesReader(w, req.Body, maxTechContextBytes+4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
@@ -664,49 +800,58 @@ func (r *Runner) HandleStartArchitecture(w http.ResponseWriter, req *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": RunnerErrUnsupportedPipeline})
 		return
 	}
-	runID, changed, err := r.StartArchitecture(req.Context(), StartArchitectureInput{
-		WorkspaceID: mustUUID(workspaceID),
-		AgentID:     mustUUID(agentID),
-		TaskID:      mustUUID(taskID),
-		UserID:      mustUUID(userID),
-		CrID:        body.CrID,
-		TechContext: body.Inputs.TechContext,
-	})
+	runID, changed, err := r.StartArchitecture(req.Context(), StartArchitectureInput{WorkspaceID: workspaceID, AgentID: agentID, TaskID: taskID, UserID: userID, CrID: body.CrID, TechContext: body.Inputs.TechContext})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "changed": changed})
+	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID.String(), "changed": changed})
 }
 
 func (r *Runner) reconcileFromTaskEvent(ctx context.Context, taskID string) error {
-	var nodeRunID pgtype.UUID
-	err := r.pool.QueryRow(ctx, `
-		SELECT pipeline_node_run_id FROM agent_task_queue WHERE id = $1`, mustUUID(taskID)).Scan(&nodeRunID)
-	if errors.Is(err, pgx.ErrNoRows) || !nodeRunID.Valid {
+	id, err := parseUUID(taskID)
+	if err != nil {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
 	var ws pgtype.UUID
-	var cr string
+	var crID string
 	err = r.pool.QueryRow(ctx, `
-		SELECT pr.workspace_id, pr.cr_id FROM pipeline_run pr
-		JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
-		WHERE pnr.id = $1`, nodeRunID).Scan(&ws, &cr)
+		SELECT r.workspace_id,r.cr_id FROM agent_task_queue t
+		JOIN pipeline_node_run n ON n.id=t.pipeline_node_run_id JOIN pipeline_run r ON r.id=n.run_id
+		WHERE t.id=$1 AND r.execution_context->>'runner'=$2`, id, runnerSchema).Scan(&ws, &crID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return r.Reconcile(ctx, ws, cr)
+	return r.Reconcile(ctx, ws, crID)
 }
 
+func errCode(code, message string) error { return fmt.Errorf("%s: %s", code, message) }
+func stringValue(v any) string           { s, _ := v.(string); return s }
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil
 	}
 	return s
+}
+
+func parseUUID(s string) (pgtype.UUID, error) {
+	var id pgtype.UUID
+	if strings.TrimSpace(s) == "" {
+		return id, errors.New("UUID is empty")
+	}
+	if err := id.Scan(s); err != nil || !id.Valid {
+		return pgtype.UUID{}, fmt.Errorf("invalid UUID %q", s)
+	}
+	return id, nil
+}
+
+func mustParseUUID(s string) pgtype.UUID {
+	id, err := parseUUID(s)
+	if err != nil {
+		panic(err) // registry UUIDs were validated at startup
+	}
+	return id
 }

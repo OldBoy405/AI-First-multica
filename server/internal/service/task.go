@@ -328,6 +328,16 @@ func (s *TaskService) EnqueuePipelineTask(ctx context.Context, spec PipelineTask
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// The partial unique index also returns no row for an idempotent
+			// concurrent enqueue loser. Re-read that active task before treating
+			// the no-row result as an attribution guard failure.
+			existing, readErr := s.Queries.GetActivePipelineTask(ctx, spec.NodeRunID)
+			if readErr == nil {
+				return existing, nil
+			}
+			if !errors.Is(readErr, pgx.ErrNoRows) {
+				return db.AgentTaskQueue{}, fmt.Errorf("read active pipeline task: %w", readErr)
+			}
 			return db.AgentTaskQueue{}, ErrRunnerAttributionInvalid
 		}
 		return db.AgentTaskQueue{}, fmt.Errorf("create pipeline task: %w", err)
@@ -5099,7 +5109,9 @@ func (s *TaskService) notifyRuntimeMayHaveWork(runtimeID pgtype.UUID, taskID str
 	// just-queued task until the TTL expires. The cache itself bounds
 	// every Redis call with a short timeout so a wedged Redis cannot
 	// block enqueue.
-	s.EmptyClaim.Bump(context.Background(), runtimeKey)
+	if s.EmptyClaim != nil {
+		s.EmptyClaim.Bump(context.Background(), runtimeKey)
+	}
 	if s.Wakeup == nil {
 		return
 	}
@@ -5293,6 +5305,16 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 	// broadcasts, which is why quick-create tasks appeared stuck queued.
 	if qc, ok := s.parseQuickCreateContext(task); ok {
 		return qc.WorkspaceID
+	}
+	// AIFIRST: Runner pipeline tasks also have no product-domain parent. Their
+	// trusted context is written atomically with the task by CreatePipelineTask.
+	var pipeline struct {
+		Type        string `json:"type"`
+		Schema      string `json:"schema"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if json.Unmarshal(task.Context, &pipeline) == nil && pipeline.Type == "pipeline_node" && pipeline.Schema == "ai-first.pipeline-task/v1" {
+		return pipeline.WorkspaceID
 	}
 	return ""
 }

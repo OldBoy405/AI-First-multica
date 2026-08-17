@@ -14,6 +14,7 @@
 package governance
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
@@ -79,9 +80,18 @@ func CanonicalDigestFromEvidence(evidence map[string]string) string {
 
 // ApprovalService issues signed grants and serves the daemon delivery queue.
 type ApprovalService struct {
-	pool  *pgxpool.Pool
-	key   ed25519.PrivateKey
-	keyID string
+	pool       *pgxpool.Pool
+	key        ed25519.PrivateKey
+	keyID      string
+	onGrantAck func(context.Context, string, string)
+}
+
+// SetGrantAckHandler wires the optional Runner wake callback. ApprovalService
+// remains the sole writer of delivered_at; the callback is only a wake signal.
+func (a *ApprovalService) SetGrantAckHandler(fn func(context.Context, string, string)) {
+	if a != nil {
+		a.onGrantAck = fn
+	}
 }
 
 func NewApprovalService(pool *pgxpool.Pool, key ed25519.PrivateKey, keyID string) *ApprovalService {
@@ -380,13 +390,34 @@ func (a *ApprovalService) HandleGrantsAck(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids required"})
 		return
 	}
-	_, err := a.pool.Exec(r.Context(), `
+	rows, err := a.pool.Query(r.Context(), `
 		UPDATE approval_record SET delivered_at = now()
-		WHERE workspace_id = $1::uuid AND id::text = ANY($2) AND delivered_at IS NULL`,
-		workspaceID, req.IDs)
+		WHERE workspace_id = $1::uuid AND id::text = ANY($2) AND delivered_at IS NULL
+		RETURNING cr_id`, workspaceID, req.IDs)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack failed"})
 		return
+	}
+	crIDs := map[string]struct{}{}
+	for rows.Next() {
+		var crID string
+		if err := rows.Scan(&crID); err != nil {
+			rows.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack scan failed"})
+			return
+		}
+		crIDs[crID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack scan failed"})
+		return
+	}
+	rows.Close()
+	if a.onGrantAck != nil {
+		for crID := range crIDs {
+			a.onGrantAck(r.Context(), workspaceID, crID)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

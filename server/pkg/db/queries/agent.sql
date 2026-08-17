@@ -581,7 +581,21 @@ JOIN agent a
 JOIN cr c
   ON c.workspace_id = $1 AND c.cr_id = $5
 WHERE s.id = $7 AND s.agent_id = $2
+  AND s.originator_source IS NOT NULL AND btrim(s.originator_source) <> ''
+  AND s.originator_user_id IS NOT NULL
+  AND s.accountable_user_id = s.originator_user_id
+ON CONFLICT (pipeline_node_run_id)
+    WHERE pipeline_node_run_id IS NOT NULL
+      AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
+DO NOTHING
 RETURNING *;
+
+-- name: GetActivePipelineTask :one
+SELECT * FROM agent_task_queue
+WHERE pipeline_node_run_id = $1
+  AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
+ORDER BY created_at DESC
+LIMIT 1;
 
 -- name: CancelAgentTasksByIssue :many
 -- Cancels every active task on the issue and returns the affected rows so the

@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -470,7 +471,7 @@ func parseCRCommitMessage(root, sha, isoTime, subject string) (crOutboxEvent, bo
 	}
 	if m := crCommitReviewRe.FindStringSubmatch(subject); m != nil {
 		stage, crID, verdict := m[1], m[2], m[3]
-		payload, ok := buildReviewPayload(root, crID, stage, verdict)
+		payload, ok := buildReviewPayload(root, sha, crID, stage, verdict)
 		if !ok {
 			// Annotation file unreadable/unparsable: skip this event rather
 			// than report a payload we can't stand behind. Best-effort,
@@ -558,26 +559,18 @@ func blockerText(n *yaml.Node) string {
 	return ""
 }
 
-// buildReviewPayload reads review-annotations/{stage}.yml directly off the
-// worktree's working tree rather than `git show {sha}:path` at the exact
-// historical commit.
-//
-// ponytail: this is a deliberate simplification with a real ceiling — `show`
-// is not in controlled-shell's git allowlist (rules.json, tools repo), and
-// adding it is a cross-repo change outside this CR's scope. A working-tree
-// read is exact for the common case (daemon scans promptly; the file at HEAD
-// still holds this commit's content) but can report the WRONG attempt's
-// content if the daemon's scan cursor falls behind across an entire
-// reviewLoop cycle (multiple review rounds land before the next scan) — the
-// batched-catchup events would all resolve to the same (latest) file state
-// instead of each round's own. Upgrade path: get `show` added to
-// controlled-shell/rules.json's git allowlist, then read the file with
-// `git show {sha}:path` here instead (the git plumbing is otherwise
-// identical — see gitLine/crGuardCheck in this file).
-func buildReviewPayload(root, crID, stage, verdict string) (json.RawMessage, bool) {
+// buildReviewPayload reads the annotation from the exact reviewed commit.
+// A working-tree read is incorrect when the commit-scan cursor catches up
+// across multiple review attempts because every event would otherwise inherit
+// the latest attempt's file. The controlled-shell rule admits only this fixed
+// CR annotation object shape.
+func buildReviewPayload(root, sha, crID, stage, verdict string) (json.RawMessage, bool) {
 	fileName := stageAnnotationFile(stage)
-	path := filepath.Join(root, "change-requests", crID, "review-annotations", fileName)
-	raw, err := os.ReadFile(path)
+	object := sha + ":" + path.Join("change-requests", crID, "review-annotations", fileName)
+	if err := crGuardCheck("show", object); err != nil {
+		return nil, false
+	}
+	raw, err := exec.Command("git", "-C", root, "show", object).Output()
 	if err != nil {
 		return nil, false
 	}
@@ -590,12 +583,12 @@ func buildReviewPayload(root, crID, stage, verdict string) (json.RawMessage, boo
 	}
 	blockers := normalizeBlockers(&doc.Blockers)
 	payload, err := json.Marshal(map[string]any{
-		"stage":         stage,
-		"verdict":       doc.Verdict,
-		"blockers":      blockers,
-		"attempt":       doc.ReviewLoop.CurrentAttempt,
-		"reviewer":      doc.Reviewer,
-		"reviewed_at":   doc.ReviewedAt,
+		"stage":          stage,
+		"verdict":        doc.Verdict,
+		"blockers":       blockers,
+		"attempt":        doc.ReviewLoop.CurrentAttempt,
+		"reviewer":       doc.Reviewer,
+		"reviewed_at":    doc.ReviewedAt,
 		"subject_sha256": doc.SubjectSha,
 	})
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pipelineForStatus returns the pipeline template a CR status belongs to, or
@@ -150,6 +151,21 @@ func (s *SyncService) findOrCreateRun(ctx context.Context, workspaceID, crID, pi
 		VALUES ($1::uuid, $2, $3, 'running', $4::uuid)
 		RETURNING id::text`,
 		workspaceID, pipelineID, crID, startedBy).Scan(&runID)
+	if err == nil {
+		return runID, nil
+	}
+	// CR-2026-045: Runner Start and projector may race to open the same
+	// architecture run. The partial unique index chooses one winner; the
+	// projector loser must re-read it instead of dropping the projection.
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		return "", err
+	}
+	err = s.pool.QueryRow(ctx, `
+		SELECT id::text FROM pipeline_run
+		WHERE workspace_id=$1::uuid AND cr_id=$2 AND pipeline_id=$3
+		  AND status IN ('running','waiting_approval')
+		ORDER BY created_at DESC LIMIT 1`, workspaceID, crID, pipelineID).Scan(&runID)
 	return runID, err
 }
 
@@ -161,7 +177,8 @@ func (s *SyncService) upsertNodeRunning(ctx context.Context, runID string, node 
 		INSERT INTO pipeline_node_run (run_id, node_id, ref, kind, seq, status, started_at)
 		VALUES ($1::uuid, $2::uuid, NULL, $3, $4, 'running', now())
 		ON CONFLICT (run_id, node_id, attempt) DO UPDATE
-		  SET status = 'running', started_at = COALESCE(pipeline_node_run.started_at, now())`,
+		  SET started_at = COALESCE(pipeline_node_run.started_at, now())
+		  WHERE pipeline_node_run.status IN ('pending','running')`,
 		runID, node.NodeID, node.Kind, node.Seq)
 	if err != nil {
 		return err
@@ -284,11 +301,19 @@ func (s *SyncService) applyReview(ctx context.Context, workspaceID string, ev Ou
 	if len(detail) == 0 {
 		detail = json.RawMessage(`{}`)
 	}
+	var payloadKeys map[string]any
+	if err := json.Unmarshal(detail, &payloadKeys); err != nil {
+		return err
+	}
+	if _, reserved := payloadKeys["runner"]; reserved {
+		return errors.New("review payload contains reserved runner key")
+	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO pipeline_node_run (run_id, node_id, ref, kind, seq, status, attempt, started_at, completed_at, detail)
 		VALUES ($1::uuid, $2::uuid, NULL, $3, $4, $5, $6, now(), now(), $7)
 		ON CONFLICT (run_id, node_id, attempt) DO UPDATE
-		  SET status = $5, completed_at = now(), detail = $7`,
+		  SET status = $5, completed_at = now(),
+		      detail = COALESCE(pipeline_node_run.detail,'{}') || $7::jsonb`,
 		runID, node.NodeID, node.Kind, node.Seq, status, attempt, detail); err != nil {
 		return err
 	}

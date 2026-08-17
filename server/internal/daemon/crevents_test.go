@@ -98,6 +98,21 @@ func gitInitWithCRCommit(t *testing.T, root, message string) string {
 	return sha
 }
 
+func gitCommitAll(t *testing.T, root, message string) string {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", message}} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	sha, err := gitLine(root, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha
+}
+
 func TestDualChannelMergedWithoutDuplicates(t *testing.T) {
 	root := t.TempDir()
 	// A [cr] status commit — the fallback channel will see it …
@@ -257,8 +272,9 @@ review-loop:
   current-attempt: 1
 `)
 
-	ev, ok := parseCRCommitMessage(root, "sha1", "2026-08-02T10:00:00+08:00",
-		"[cr] review-requirement CR-9003-001: verdict=block, 1 blocker")
+	message := "[cr] review-requirement CR-9003-001: verdict=block, 1 blocker"
+	sha := gitInitWithCRCommit(t, root, message)
+	ev, ok := parseCRCommitMessage(root, sha, "2026-08-02T10:00:00+08:00", message)
 	if !ok {
 		t.Fatal("expected review commit to parse")
 	}
@@ -266,11 +282,11 @@ review-loop:
 		t.Fatalf("got (%s,%s), want (review,CR-9003-001)", ev.EventKind, ev.CRID)
 	}
 	var payload struct {
-		Stage        string   `json:"stage"`
-		Verdict      string   `json:"verdict"`
-		Attempt      int      `json:"attempt"`
-		Blockers     []string `json:"blockers"`
-		SubjectSha   string   `json:"subject_sha256"`
+		Stage      string   `json:"stage"`
+		Verdict    string   `json:"verdict"`
+		Attempt    int      `json:"attempt"`
+		Blockers   []string `json:"blockers"`
+		SubjectSha string   `json:"subject_sha256"`
 	}
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
 		t.Fatalf("bad payload JSON: %v", err)
@@ -281,6 +297,78 @@ review-loop:
 	// Historical structured blockers fold into their issue text.
 	if len(payload.Blockers) != 1 || payload.Blockers[0] != "not testable" {
 		t.Fatalf("expected 1 normalized blocker 'not testable', got %+v", payload.Blockers)
+	}
+}
+
+func TestBuildReviewPayloadTechDesignAttemptTwoParity(t *testing.T) {
+	root := t.TempDir()
+	writeReviewAnnotation(t, root, "CR-9003-004", "tech-design", `
+verdict: pass
+reviewer: ai-reviewer
+reviewed-at: "2026-08-02T11:00:00+08:00"
+blockers: []
+subject-sha256: abc123
+review-loop:
+  current-attempt: 2
+`)
+	sha := gitInitWithCRCommit(t, root, "[cr] review-tech-design CR-9003-004: verdict=pass, 0 blockers")
+	payload, ok := buildReviewPayload(root, sha, "CR-9003-004", "tech-design", "pass")
+	if !ok {
+		t.Fatal("expected tech-design payload")
+	}
+	var got struct {
+		Stage         string   `json:"stage"`
+		Verdict       string   `json:"verdict"`
+		Attempt       int      `json:"attempt"`
+		Blockers      []string `json:"blockers"`
+		ReviewedAt    string   `json:"reviewed_at"`
+		SubjectSHA256 string   `json:"subject_sha256"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Stage != "tech-design" || got.Verdict != "pass" || got.Attempt != 2 || len(got.Blockers) != 0 || got.ReviewedAt == "" || got.SubjectSHA256 != "abc123" {
+		t.Fatalf("commit-scan payload does not match canonical fields: %+v", got)
+	}
+}
+
+func TestBuildReviewPayloadUsesHistoricalCommitAttempt(t *testing.T) {
+	root := t.TempDir()
+	const crID = "CR-9003-005"
+	writeReviewAnnotation(t, root, crID, "tech-design", `
+verdict: block
+reviewer: ai-reviewer
+reviewed-at: "2026-08-02T10:00:00Z"
+blockers: ["first blocker"]
+subject-sha256: first
+review-loop:
+  current-attempt: 1
+`)
+	firstSHA := gitInitWithCRCommit(t, root, "[cr] review-tech-design CR-9003-005: verdict=block, 1 blocker")
+	writeReviewAnnotation(t, root, crID, "tech-design", `
+verdict: pass
+reviewer: ai-reviewer
+reviewed-at: "2026-08-02T11:00:00Z"
+blockers: []
+subject-sha256: second
+review-loop:
+  current-attempt: 2
+`)
+	_ = gitCommitAll(t, root, "[cr] review-tech-design CR-9003-005: verdict=pass, 0 blockers")
+	payload, ok := buildReviewPayload(root, firstSHA, crID, "tech-design", "block")
+	if !ok {
+		t.Fatal("expected historical review payload")
+	}
+	var got struct {
+		Attempt  int      `json:"attempt"`
+		Verdict  string   `json:"verdict"`
+		Blockers []string `json:"blockers"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Attempt != 1 || got.Verdict != "block" || len(got.Blockers) != 1 || got.Blockers[0] != "first blocker" {
+		t.Fatalf("historical payload drifted to working tree: %+v", got)
 	}
 }
 
