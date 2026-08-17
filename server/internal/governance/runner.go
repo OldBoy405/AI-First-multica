@@ -16,12 +16,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // Runner error codes (SDD §6).
@@ -576,6 +579,129 @@ func mustUUID(s string) pgtype.UUID {
 	var u pgtype.UUID
 	_ = u.Scan(s)
 	return u
+}
+
+// WireEvents subscribes the Runner to its wake sources (cr:updated and task
+// terminal). Events are only wake signals, never authority; a lost wake is
+// healed by a later event or StartupScan.
+func (r *Runner) WireEvents(bus *events.Bus) {
+	bus.Subscribe(EventCRUpdated, func(e events.Event) {
+		if e.WorkspaceID == "" {
+			return
+		}
+		p, ok := e.Payload.(map[string]any)
+		if !ok {
+			return
+		}
+		crID, _ := p["cr_id"].(string)
+		if crID == "" {
+			return
+		}
+		_ = r.Reconcile(context.Background(), mustUUID(e.WorkspaceID), crID)
+	})
+	for _, evType := range []string{protocol.EventTaskCompleted, protocol.EventTaskFailed} {
+		bus.Subscribe(evType, func(e events.Event) {
+			if e.TaskID == "" {
+				return
+			}
+			_ = r.reconcileFromTaskEvent(context.Background(), e.TaskID)
+		})
+	}
+}
+
+// StartupScan reconciles every non-terminal Core run once at server start.
+func (r *Runner) StartupScan(ctx context.Context) error {
+	rows, err := r.pool.Query(ctx, `
+		SELECT workspace_id, cr_id FROM pipeline_run
+		WHERE pipeline_id = $1 AND status IN ('running','waiting_approval')`,
+		PipelineIDs.ArchitectureDesign)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ws pgtype.UUID
+		var cr string
+		if err := rows.Scan(&ws, &cr); err != nil {
+			return err
+		}
+		if err := r.Reconcile(ctx, ws, cr); err != nil {
+			slog.Error("runner startup scan reconcile failed", "cr_id", cr, "error", err)
+		}
+	}
+	return rows.Err()
+}
+
+// HandleStartArchitecture is POST /api/workspaces/{workspaceID}/pipeline-runs.
+// It only accepts the server-set task-token actor (X-Actor-Source=task_token);
+// workspace/agent/task/user IDs come from the auth middleware headers, never
+// the request body.
+func (r *Runner) HandleStartArchitecture(w http.ResponseWriter, req *http.Request) {
+	if req.Header.Get("X-Actor-Source") != "task_token" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": RunnerErrRequiresAgentRoute})
+		return
+	}
+	workspaceID := req.Header.Get("X-Workspace-ID")
+	agentID := req.Header.Get("X-Agent-ID")
+	taskID := req.Header.Get("X-Task-ID")
+	userID := req.Header.Get("X-User-ID")
+	if workspaceID == "" || agentID == "" || taskID == "" || userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing task-token headers"})
+		return
+	}
+	var body struct {
+		PipelineID string `json:"pipeline_id"`
+		CrID       string `json:"cr_id"`
+		Inputs     struct {
+			TechContext string `json:"tech_context"`
+		} `json:"inputs"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	if body.PipelineID != PipelineIDs.ArchitectureDesign {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": RunnerErrUnsupportedPipeline})
+		return
+	}
+	runID, changed, err := r.StartArchitecture(req.Context(), StartArchitectureInput{
+		WorkspaceID: mustUUID(workspaceID),
+		AgentID:     mustUUID(agentID),
+		TaskID:      mustUUID(taskID),
+		UserID:      mustUUID(userID),
+		CrID:        body.CrID,
+		TechContext: body.Inputs.TechContext,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "changed": changed})
+}
+
+func (r *Runner) reconcileFromTaskEvent(ctx context.Context, taskID string) error {
+	var nodeRunID pgtype.UUID
+	err := r.pool.QueryRow(ctx, `
+		SELECT pipeline_node_run_id FROM agent_task_queue WHERE id = $1`, mustUUID(taskID)).Scan(&nodeRunID)
+	if errors.Is(err, pgx.ErrNoRows) || !nodeRunID.Valid {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var ws pgtype.UUID
+	var cr string
+	err = r.pool.QueryRow(ctx, `
+		SELECT pr.workspace_id, pr.cr_id FROM pipeline_run pr
+		JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
+		WHERE pnr.id = $1`, nodeRunID).Scan(&ws, &cr)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return r.Reconcile(ctx, ws, cr)
 }
 
 func nullIfEmpty(s string) any {

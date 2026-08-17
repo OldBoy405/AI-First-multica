@@ -377,6 +377,16 @@ type AgentTaskResponse struct {
 	QuickCreateDueDate       string                 `json:"quick_create_due_date,omitempty"`       // explicit calendar due date selected in quick-create
 	QuickCreateAttachmentIDs []string               `json:"quick_create_attachment_ids,omitempty"` // attachment ids uploaded in the quick-create prompt and bound on issue create
 	HandoffNote              string                 `json:"handoff_note,omitempty"`                // assignment handoff instruction; rendered into the run's opening prompt + issue_context.md (omitempty so old daemons ignore it)
+	// AIFIRST: pipeline-node task carrier (CR-2026-045). Hydrated on claim from
+	// the task context JSONB when context.type=pipeline_node; the daemon runs
+	// PipelinePrompt directly and resolves the CR root / local work dir.
+	PipelinePrompt       string `json:"pipeline_prompt,omitempty"`
+	PipelineCrID         string `json:"pipeline_cr_id,omitempty"`
+	PipelineNodeID       string `json:"pipeline_node_id,omitempty"`
+	PipelineRunID        string `json:"pipeline_run_id,omitempty"`
+	PipelineAttempt      int    `json:"pipeline_attempt,omitempty"`
+	PipelineWorkspace    string `json:"pipeline_workspace,omitempty"`
+	PipelineLocalWorkDir string `json:"pipeline_local_work_dir,omitempty"`
 	SquadID                  string                 `json:"squad_id,omitempty"`                    // for quick-create tasks where the picker was a squad; Agent is still the resolved leader
 	SquadName                string                 `json:"squad_name,omitempty"`                  // display name for the picker squad
 	ParentIssueID            string                 `json:"parent_issue_id,omitempty"`             // for quick-create tasks opened from "Add sub issue" — UUID of the parent issue the new issue should be filed under

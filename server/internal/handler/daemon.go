@@ -1635,9 +1635,37 @@ type claimBuildFailure struct {
 // feed the same delivery receipt into FinalizeTaskClaim. A non-nil failure
 // means the task must not be dispatched; the builder has already cancelled it
 // where the failure semantics require it.
+// hydratePipelineContext fills the pipeline-node wire fields from the task
+// context JSONB (schema ai-first.pipeline-task/v1, CR-2026-045). Any parse
+// error or non-pipeline context leaves the response untouched.
+func hydratePipelineContext(raw []byte, resp *AgentTaskResponse) {
+	var ctx struct {
+		Type    string `json:"type"`
+		CrID    string `json:"cr_id"`
+		NodeID  string `json:"node_id"`
+		RunID   string `json:"run_id"`
+		Attempt int    `json:"attempt"`
+		Prompt  string `json:"prompt"`
+	}
+	if err := json.Unmarshal(raw, &ctx); err != nil || ctx.Type != "pipeline_node" {
+		return
+	}
+	resp.PipelinePrompt = ctx.Prompt
+	resp.PipelineCrID = ctx.CrID
+	resp.PipelineNodeID = ctx.NodeID
+	resp.PipelineRunID = ctx.RunID
+	resp.PipelineAttempt = ctx.Attempt
+}
+
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	// AIFIRST: hydrate the pipeline-node carrier from the task context JSONB
+	// (CR-2026-045). Non-pipeline tasks carry a nil/other context and are left
+	// untouched.
+	if len(task.Context) > 0 {
+		hydratePipelineContext(task.Context, &resp)
+	}
 	// Claim-only capability: this server resolves the squad-leader role on the
 	// wire (is_leader_task / squad_id), so the daemon must not re-derive it
 	// from the briefing text. Set unconditionally — on every claim, leader or

@@ -988,6 +988,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		os.Exit(1)
 	}
 
+	// AIFIRST: Runner Core (CR-2026-045). Fails closed if the embedded registry
+	// is inconsistent; otherwise wires the event wake sources and performs a
+	// startup scan of non-terminal architecture runs.
+	runner, runnerErr := governance.NewRunner(pool, bus, h.TaskService)
+	if runnerErr != nil {
+		slog.Error("runner registry rejected; refusing to start", "error", runnerErr)
+		os.Exit(1)
+	}
+	runner.WireEvents(bus)
+	go func() {
+		if err := runner.StartupScan(context.Background()); err != nil {
+			slog.Error("runner startup scan failed", "error", err)
+		}
+	}()
+
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(queries, patCache, daemonTokenCache, cloudPATVerifier))
@@ -1061,6 +1076,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/{crID}/approve", approvalSvc.HandleApprove)
 			})
 		}
+
+		// AIFIRST: Runner Start endpoint (CR-2026-045). Auth middleware already
+		// resolved the task-token (mat_) binding; the handler rejects any actor
+		// source other than task_token.
+		r.Post("/api/workspaces/{workspaceID}/pipeline-runs", runner.HandleStartArchitecture)
 
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)

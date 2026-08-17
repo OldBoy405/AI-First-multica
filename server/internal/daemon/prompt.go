@@ -100,6 +100,9 @@ func BuildPrompt(task Task, provider string) string {
 }
 
 func buildPromptBody(task Task, provider string) string {
+	if task.PipelinePrompt != "" {
+		return buildPipelinePrompt(task)
+	}
 	if task.ChatSessionID != "" {
 		return buildChatPrompt(task)
 	}
@@ -125,6 +128,25 @@ func buildPromptBody(task Task, provider string) string {
 	}
 	fmt.Fprintf(&b, "Start by running `multica issue get %s --output json` to understand your task, then complete it.\n", task.IssueID)
 	fmt.Fprintf(&b, "For comment history, follow the rule in your runtime workflow file (assignment-triggered tasks treat the read as mandatory). Scan the threads first with `multica issue comment list %s --roots-only --summary --compact --output json`, then expand only what matters with `--thread <thread-id> --tail 30`. For `--since` incremental polling, pagination, and folding, see `multica issue comment list --help`.\n", task.IssueID)
+	return b.String()
+}
+
+// buildPipelinePrompt renders the fixed registry prompt for a pipeline-node
+// task (CR-2026-045). The Runner already rendered the registry template with
+// the declared inputs; the daemon only appends the workspace context and
+// runtime brief — it does not enter any issue/chat/quick-create workflow.
+func buildPipelinePrompt(task Task) string {
+	var b strings.Builder
+	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
+	b.WriteString("This is a pipeline task. Complete the instruction below using your bound skills and the controlled shell. Do not read issues, comments, or chat history — there is no issue or conversation attached to this task.\n\n")
+	if task.PipelineCrID != "" {
+		fmt.Fprintf(&b, "CR: %s\n\n", task.PipelineCrID)
+	}
+	b.WriteString("Instruction:\n\n")
+	b.WriteString(task.PipelinePrompt)
+	if !strings.HasSuffix(task.PipelinePrompt, "\n") {
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 
