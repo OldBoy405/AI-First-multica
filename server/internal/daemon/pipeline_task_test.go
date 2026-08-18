@@ -3,9 +3,13 @@ package daemon
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/pkg/gitguard"
 )
 
 func seedPipelineCRRoot(t *testing.T, crID string) string {
@@ -65,6 +69,75 @@ func TestPreparePipelineTaskHydratesMachineLocalPaths(t *testing.T) {
 	assignment, err := localDirectoryAssignmentForTask(task, "daemon-test")
 	if err != nil || assignment == nil || assignment.AbsPath != operational {
 		t.Fatalf("pipeline LocalWorkDir not routed through local-directory seam: %+v err=%v", assignment, err)
+	}
+}
+
+func TestConfigurePipelineGitEnvironment(t *testing.T) {
+	root := t.TempDir()
+	operational := filepath.Join(root, ".rayai-worktrees", "knowledge-base", "requirement", "CR-2026-045")
+	if err := os.MkdirAll(operational, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"GIT_CONFIG_COUNT": "99", "GIT_CONFIG_KEY_0": "unsafe.override"}
+	auditDir, err := configurePipelineGitEnvironment(env, root, operational)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["GIT_CONFIG_GLOBAL"] != filepath.Join(root, ".crctl", "task-gitconfig") {
+		t.Fatalf("pipeline Git config is not scoped to task state: %#v", env)
+	}
+	if env["CRCTL_OPERATIONAL_WORKSPACE"] != operational {
+		t.Fatalf("operational workspace not exported: %#v", env)
+	}
+	config, err := os.ReadFile(env["GIT_CONFIG_GLOBAL"])
+	if err != nil || !strings.Contains(string(config), filepath.ToSlash(root)) || !strings.Contains(string(config), filepath.ToSlash(operational)) {
+		t.Fatalf("safe directory config is not scoped to validated paths: config=%q err=%v", config, err)
+	}
+	if info, err := os.Stat(auditDir); err != nil || !info.IsDir() {
+		t.Fatalf("audit directory not created: path=%q err=%v", auditDir, err)
+	}
+	wantConfig := "sandbox_workspace_write.writable_roots=[\"" + filepath.ToSlash(auditDir) + "\"]"
+	if got := pipelineCodexWritableRootConfig(auditDir); got != wantConfig {
+		t.Fatalf("Codex writable root config=%q, want %q", got, wantConfig)
+	}
+}
+
+func TestInstallPipelineCrctlLauncher(t *testing.T) {
+	tools := t.TempDir()
+	rulesPath := filepath.Join(tools, "skills", "shared", "controlled-shell", "rules.json")
+	crctlPath := filepath.Join(tools, "skills", "shared", "crctl", "scripts", "crctl.mjs")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(crctlPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crctlPath, []byte("console.log(process.argv.slice(2).join('|'));\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(gitguard.EnvRulesPath, rulesPath)
+
+	binDir := t.TempDir()
+	if err := installPipelineCrctlLauncher(binDir); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(binDir, "crctl")
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		launcher += ".cmd"
+		cmd = exec.Command("cmd", "/c", launcher, "alpha", "beta")
+	} else {
+		cmd = exec.Command(launcher, "alpha", "beta")
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("launcher failed: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "alpha|beta" {
+		t.Fatalf("launcher output=%q, want alpha|beta", got)
 	}
 }
 

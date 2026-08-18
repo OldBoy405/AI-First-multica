@@ -111,6 +111,41 @@ func setCRStatus(t *testing.T, crID, status string) {
 	}
 }
 
+func TestRunnerDigestMismatchIsRecoverableOnSameRun(t *testing.T) {
+	const crID = "CR-9045-008"
+	runner, fake, runID := setupRunnerIntegration(t, crID)
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx, `UPDATE pipeline_run SET execution_context=jsonb_set(execution_context,'{template_digest}',to_jsonb('sha256:drift'::text)) WHERE id=$1::uuid`, runID); err != nil {
+		t.Fatal(err)
+	}
+	err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID)
+	if err == nil || !strings.Contains(err.Error(), RunnerErrTemplateDigestMismatch) {
+		t.Fatalf("digest drift must fail closed, got %v", err)
+	}
+	var status string
+	var completedAt *time.Time
+	var tasks int
+	if err := testPool.QueryRow(ctx, `SELECT status,completed_at FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&status, &completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue t JOIN pipeline_node_run n ON n.id=t.pipeline_node_run_id WHERE n.run_id=$1::uuid`, runID).Scan(&tasks); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || completedAt != nil || tasks != 0 || fake.count != 0 {
+		t.Fatalf("digest drift mutated run: status=%s completed=%v tasks=%d fake=%d", status, completedAt, tasks, fake.count)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE pipeline_run SET execution_context=jsonb_set(execution_context,'{template_digest}',to_jsonb($2::text)) WHERE id=$1::uuid`, runID, runner.registry.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil || fake.count != 1 {
+		t.Fatalf("restored digest did not resume same run: tasks=%d err=%v", fake.count, err)
+	}
+	var resumedRunID string
+	if err := testPool.QueryRow(ctx, `SELECT id::text FROM pipeline_run WHERE workspace_id=$1::uuid AND cr_id=$2 AND status='running'`, testWorkspaceID, crID).Scan(&resumedRunID); err != nil || resumedRunID != runID {
+		t.Fatalf("digest restore changed run: got=%q want=%q err=%v", resumedRunID, runID, err)
+	}
+}
+
 func TestRunnerArchitectureHappyPathWaitsForAuthority(t *testing.T) {
 	const crID = "CR-9045-001"
 	runner, fake, runID := setupRunnerIntegration(t, crID)
@@ -169,6 +204,79 @@ func TestRunnerArchitectureHappyPathWaitsForAuthority(t *testing.T) {
 	}
 	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil || runStatus != "completed" {
 		t.Fatalf("expected completed after canonical checkpoint: %q err=%v", runStatus, err)
+	}
+}
+
+func TestRunnerCheckpointFailureRetriesOnlyCheckpoint(t *testing.T) {
+	const crID = "CR-9045-009"
+	runner, fake, runID := setupRunnerIntegration(t, crID)
+	ctx := context.Background()
+
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	completeLatestRunnerTask(t, runID)
+	setCRStatus(t, crID, "tech-design-review-pending")
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	completeLatestRunnerTask(t, runID)
+	review := runner.registry.Pipeline.Nodes[1]
+	if _, err := testPool.Exec(ctx, `UPDATE pipeline_node_run SET status='passed',detail=$3::jsonb WHERE run_id=$1::uuid AND node_id=$2::uuid AND attempt=1`, runID, review.ID, `{"verdict":"pass","attempt":1,"blockers":[],"reviewed_at":"2026-08-02T10:00:00Z","subject_sha256":"abc"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(ctx, `INSERT INTO approval_record(workspace_id,cr_id,stage,decision,approver_user_id,evidence_digest,key_id,signature,delivered_at) VALUES($1::uuid,$2,'tech-design','approve',$3::uuid,'digest','test','sig',now())`, testWorkspaceID, crID, testUserID(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	completeLatestRunnerTask(t, runID)
+	setCRStatus(t, crID, "tech-design-reviewed")
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil || fake.count != 4 {
+		t.Fatalf("checkpoint dispatch failed: tasks=%d err=%v", fake.count, err)
+	}
+	if _, err := testPool.Exec(ctx, `UPDATE agent_task_queue SET status='failed',completed_at=now() WHERE id=(SELECT t.id FROM agent_task_queue t JOIN pipeline_node_run n ON n.id=t.pipeline_node_run_id WHERE n.run_id=$1::uuid AND n.seq=5 ORDER BY t.created_at DESC LIMIT 1)`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil || fake.count != 5 {
+		t.Fatalf("checkpoint failure did not create one retry: tasks=%d err=%v", fake.count, err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil || fake.count != 5 {
+		t.Fatalf("duplicate wake duplicated checkpoint retry: tasks=%d err=%v", fake.count, err)
+	}
+	var runStatus, crStatus string
+	var priorTasks, checkpointTasks, activeCheckpoint int
+	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT status FROM cr WHERE workspace_id=$1::uuid AND cr_id=$2`, testWorkspaceID, crID).Scan(&crStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE n.seq<5),count(*) FILTER (WHERE n.seq=5),count(*) FILTER (WHERE n.seq=5 AND t.status IN ('queued','deferred','dispatched','waiting_local_directory','running')) FROM agent_task_queue t JOIN pipeline_node_run n ON n.id=t.pipeline_node_run_id WHERE n.run_id=$1::uuid`, runID).Scan(&priorTasks, &checkpointTasks, &activeCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "running" || crStatus != "tech-design-reviewed" || priorTasks != 3 || checkpointTasks != 2 || activeCheckpoint != 1 {
+		t.Fatalf("checkpoint retry changed prior state: run=%s cr=%s prior=%d checkpoint=%d active=%d", runStatus, crStatus, priorTasks, checkpointTasks, activeCheckpoint)
+	}
+	completeLatestRunnerTask(t, runID)
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil || runStatus != "running" {
+		t.Fatalf("retry task success bypassed checkpoint authority: status=%s err=%v", runStatus, err)
+	}
+	if _, err := testPool.Exec(ctx, `INSERT INTO cr_sync_event(cr_id,commit_sha,event_kind,payload,occurred_at) VALUES($1,'checkpoint-retry-sha','checkpoint','{}',now()+interval '1 second')`, crID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil || runStatus != "completed" {
+		t.Fatalf("checkpoint retry did not complete after authority event: status=%s err=%v", runStatus, err)
 	}
 }
 

@@ -414,7 +414,7 @@ func (r *Runner) reconcileApprovalAndCheckpoint(ctx context.Context, run activeR
 		return err
 	}
 
-	complete, stop, err = r.reconcileSkillTask(ctx, run, push, 5, 1)
+	complete, stop, err = r.reconcileCheckpointTask(ctx, run, push)
 	if err != nil || stop {
 		return err
 	}
@@ -456,6 +456,36 @@ func (r *Runner) reconcileSkillTask(ctx context.Context, run activeRun, node cor
 		return true, false, nil
 	case "failed", "cancelled":
 		return false, true, r.failRun(ctx, run.ID, RunnerErrTaskFailed)
+	default:
+		return false, true, r.failRun(ctx, run.ID, RunnerErrAuthorityMismatch)
+	}
+}
+
+// Checkpoint is the one recoverable skill failure in Core. The CR is already
+// approved, so a terminal task creates one successor for the same node run;
+// the active-task partial unique index makes duplicate wakes idempotent.
+func (r *Runner) reconcileCheckpointTask(ctx context.Context, run activeRun, node coreNode) (complete, stop bool, err error) {
+	nodeRunID, err := r.ensureNodeRow(ctx, run.ID, node, 5, 1)
+	if err != nil {
+		return false, false, err
+	}
+	state, exists, err := r.latestTaskState(ctx, nodeRunID)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return false, true, r.enqueueNode(ctx, run, node, nodeRunID, 1)
+	}
+	switch state {
+	case "queued", "deferred", "dispatched", "waiting_local_directory", "running":
+		return false, true, nil
+	case "completed":
+		return true, false, nil
+	case "failed", "cancelled":
+		if err := r.setRunnerDetail(ctx, run.ID, node.ID, 1, map[string]any{"wait_reason": "checkpoint_retry", "previous_task_status": state}); err != nil {
+			return false, false, err
+		}
+		return false, true, r.enqueueNode(ctx, run, node, nodeRunID, 1)
 	default:
 		return false, true, r.failRun(ctx, run.ID, RunnerErrAuthorityMismatch)
 	}
@@ -542,10 +572,12 @@ func (r *Runner) findActiveRun(ctx context.Context, workspaceID pgtype.UUID, crI
 	return run, err
 }
 
-func (r *Runner) checkDigest(ctx context.Context, run activeRun) error {
+func (r *Runner) checkDigest(_ context.Context, run activeRun) error {
 	var m map[string]any
 	if json.Unmarshal(run.ExecutionContext, &m) != nil || stringValue(m["runner"]) != runnerSchema || stringValue(m["template_digest"]) != r.registry.Digest {
-		return r.failRun(ctx, run.ID, RunnerErrTemplateDigestMismatch)
+		// Registry drift is a deployment mismatch, not a terminal business
+		// result. Keep the run active so rolling back to its digest resumes it.
+		return errCode(RunnerErrTemplateDigestMismatch, "active run registry digest does not match this deployment")
 	}
 	return nil
 }

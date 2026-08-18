@@ -5962,6 +5962,32 @@ func TestPrepareLocalWorkDir(t *testing.T) {
 	}
 }
 
+func TestPrepareLocalPipelineSkipsWorkspaceSidecars(t *testing.T) {
+	t.Parallel()
+	userDir := t.TempDir()
+	env, err := Prepare(PrepareParams{
+		WorkspacesRoot: t.TempDir(),
+		WorkspaceID:    "ws-pipeline",
+		TaskID:         "c1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		AgentName:      "Pipeline Agent",
+		Provider:       "codex",
+		LocalWorkDir:   userDir,
+		Task: TaskContextForEnv{
+			SkipWorkspaceSidecars: true,
+			AgentSkills:           []SkillContextForEnv{{Name: "pipeline", Content: "run"}},
+		},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	defer env.Cleanup(true)
+	for _, name := range []string{".agent_context", ".multica", "AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(userDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("pipeline sidecar %s exists: %v", name, err)
+		}
+	}
+}
+
 func TestEnvironmentCleanupPreservesLocalDirectory(t *testing.T) {
 	t.Parallel()
 	workspacesRoot := t.TempDir()

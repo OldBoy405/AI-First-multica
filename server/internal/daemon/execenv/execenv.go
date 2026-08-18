@@ -148,6 +148,9 @@ type TaskContextForEnv struct {
 	// non-empty so every agent in the workspace sees the same shared context,
 	// regardless of issue / chat / autopilot / quick-create.
 	WorkspaceContext string
+	// SkipWorkspaceSidecars is used by pipeline tasks whose workspace itself is
+	// the authority preflight target; generic task context must not make it dirty.
+	SkipWorkspaceSidecars bool
 	// ConnectedApps lists per-run external app capabilities mounted through
 	// MCP overlays. Rendered briefly so the agent can map app names such as
 	// Notion to the actual MCP server name (`composio`).
