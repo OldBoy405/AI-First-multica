@@ -172,6 +172,31 @@ func TestDualChannelSameEventLandsOnce(t *testing.T) {
 	}
 }
 
+func TestReviewEventPersistsEvidence(t *testing.T) {
+	const crID = "CR-9001-008"
+	seedCR(t, crID, "tech-design-review-pending", false)
+	svc := NewSyncService(testPool, nil)
+	review := ev(crID, "review", "", "", "", "review-sha-008", "review.json")
+	review.Evidence = map[string]string{
+		"change-requests/CR-9001-008/review-annotations/sdd.yml": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	review.Payload = json.RawMessage(`{"stage":"tech-design","verdict":"pass","attempt":1,"blockers":[],"reviewed_at":"2026-08-18T10:00:00Z","subject_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+	resp := postEvents(t, svc, testWorkspaceID, []OutboxEvent{review})
+	if len(resp.Accepted) != 1 || len(resp.Rejected) != 0 {
+		t.Fatalf("review event rejected: %+v", resp)
+	}
+	var evidence map[string]string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT evidence FROM cr_sync_event
+		WHERE cr_id = $1 AND commit_sha = $2 AND event_kind = 'review'`,
+		crID, review.CommitSHA).Scan(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if got := evidence["change-requests/CR-9001-008/review-annotations/sdd.yml"]; got != review.Evidence["change-requests/CR-9001-008/review-annotations/sdd.yml"] {
+		t.Fatalf("review evidence not persisted: %q", got)
+	}
+}
+
 func TestOutOfOrderFlagsReconcileWithoutCorruptingProjection(t *testing.T) {
 	crID := "CR-9001-003"
 	resetCR(t, crID)
