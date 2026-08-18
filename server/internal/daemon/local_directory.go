@@ -48,6 +48,20 @@ func localDirectoryAssignmentForTask(task Task, daemonID string) (*localDirector
 	if task.IsLeaderTask {
 		return nil, nil
 	}
+	if task.PipelinePrompt != "" {
+		absPath, err := normalizeLocalPath(task.PipelineLocalWorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("pipeline local workdir: %w", err)
+		}
+		realPath, err := resolveRealPath(absPath)
+		if err != nil {
+			return nil, err
+		}
+		return &localDirectoryAssignment{
+			Ref:     localDirectoryRef{LocalPath: absPath, DaemonID: daemonID, Label: "pipeline operational workspace"},
+			AbsPath: absPath, RealPath: realPath,
+		}, nil
+	}
 	return findLocalDirectoryAssignment(task.ProjectResources, daemonID)
 }
 

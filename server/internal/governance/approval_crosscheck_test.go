@@ -26,6 +26,10 @@ import (
 
 const crosscheckCR = "CR-2026-001"
 
+const crosscheckKBRepo = "ai-first-platform-docs"
+
+const crosscheckDevPlanSubject = "830f1b4341935bd5c9e5c40908cce2a5e92b5b476c7cb8d50ae58511b4fc45ff"
+
 var crosscheckPassReview = "verdict: pass\nblockers: []\n"
 
 type crosscheckStage struct {
@@ -51,16 +55,11 @@ var crosscheckStages = []crosscheckStage{
 	{
 		name: "dev-start", initial: "task-breakdown", approved: "developing",
 		rolledBack: "tech-design-reviewed", trigger: "approve-dev-start:reject -> write-dev-plan",
-		evidence: map[string]string{"plan.md": "# plan\n", "review-annotations/dev-plan.yml": crosscheckPassReview},
+		evidence: map[string]string{"plan.md": "# plan\n", "review-annotations/dev-plan.yml": crosscheckPassReview + "subject-sha256: " + crosscheckDevPlanSubject + "\n"},
 	},
-	{
-		name: "code", initial: "code-reviewing", approved: "code-approved",
-		rolledBack: "developing", trigger: "approve-code:reject -> implement-code",
-		evidence: map[string]string{
-			"review-annotations/code.yml": crosscheckPassReview,
-			"test-report.md":              "---\nstatus: pass\n---\n",
-		},
-	},
+	// The code stage additionally re-verifies machine-injected release-subjects
+	// (a multi-repo worktree seam), so it lives in a dedicated test below rather
+	// than in this single-repo fixture loop.
 }
 
 func writeCrosscheckFile(t *testing.T, root, rel, content string) {
@@ -98,7 +97,7 @@ func newCrosscheckWorkspace(t *testing.T, crctl string, stage crosscheckStage) (
 	t.Helper()
 	ws = t.TempDir()
 	crDir = filepath.Join(ws, "change-requests", crosscheckCR)
-	writeCrosscheckFile(t, ws, "change-requests/_backlog.yml", "change-requests:\n  - id: "+crosscheckCR+"\n")
+	writeCrosscheckFile(t, ws, "change-requests/_backlog.yml", "schema: cr-backlog/v2\nchange-requests:\n  - id: "+crosscheckCR+"\n")
 	writeCrosscheckFile(t, crDir, "cr.md", "---\nid: "+crosscheckCR+"\nstatus: "+stage.initial+"\n---\n")
 	for rel, content := range stage.evidence {
 		writeCrosscheckFile(t, crDir, rel, content)
@@ -117,7 +116,7 @@ func newCrosscheckWorkspace(t *testing.T, crctl string, stage crosscheckStage) (
 		writeCrosscheckFile(t, crDir, "tasks/TASK-01.md", "# TASK-01\n")
 		writeCrosscheckApproval(t, crDir, "tech-design", crosscheckDigest(techEvidence), "tech-design-reviewed")
 	case "code":
-		devEvidence := map[string]string{"plan.md": "# plan\n", "review-annotations/dev-plan.yml": crosscheckPassReview}
+		devEvidence := map[string]string{"plan.md": "# plan\n", "review-annotations/dev-plan.yml": crosscheckPassReview + "subject-sha256: " + crosscheckDevPlanSubject + "\n"}
 		writeCrosscheckFile(t, crDir, "plan.md", "# plan\n")
 		writeCrosscheckFile(t, crDir, "review-annotations/dev-plan.yml", crosscheckPassReview)
 		writeCrosscheckFile(t, crDir, "tasks/_index.yml", "tasks:\n  - id: CR-2026-001-TASK-01\n")
@@ -169,15 +168,20 @@ func writeSignedGrant(t *testing.T, ws string, grant Grant) string {
 
 func signCrosscheckGrant(t *testing.T, ws string, stage crosscheckStage, decision string) string {
 	t.Helper()
+	return signCrosscheckGrantWithDigest(t, ws, stage.name, decision, crosscheckDigest(stage.evidence))
+}
+
+func signCrosscheckGrantWithDigest(t *testing.T, ws, stage, decision, digest string) string {
+	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	publishCrosscheckKey(t, ws, pub)
 	grant := Grant{
-		V: 1, CRID: crosscheckCR, Stage: stage.name, Decision: decision,
+		V: 1, CRID: crosscheckCR, Stage: stage, Decision: decision,
 		Approver: "alice@corp", ApprovedAt: time.Now().Format(time.RFC3339),
-		EvidenceDigest: crosscheckDigest(stage.evidence), KeyID: "approval-crosscheck",
+		EvidenceDigest: digest, KeyID: "approval-crosscheck",
 	}
 	NewApprovalService(nil, priv, "approval-crosscheck").signGrant(&grant)
 	return writeSignedGrant(t, ws, grant)
@@ -259,4 +263,179 @@ func TestGrantCrossVerifiesWithCrctl(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ─── code stage：machine-injected release-subjects seam (CR-2026-030 TASK-07) ──
+//
+// The code approval gate re-verifies review-annotations/code.yml#release-subjects
+// against the local knowledge-base worktree: active repositories must match the
+// snapshot, every controlled artifact (PRD/SDD/plan/tasks) must hash to the
+// declared value (CRLF→LF), and the KB reviewed-source-sha must be an ancestor
+// of the current HEAD with only whitelisted post-review paths in between.
+// This dedicated test builds a real KB repo + linked worktree so the same
+// crctl process exercises that seam end-to-end (approve + reject).
+
+func runGitCrosscheck(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func sha256HexCrosscheck(s string) string {
+	sum := sha256.Sum256([]byte(strings.ReplaceAll(s, "\r\n", "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// writeCrosscheckUpstreamApprovals seeds the three approvals that must already
+// exist before a code approve can pass its target gate: requirement,
+// tech-design, and development-start (each with its review evidence + canonical
+// digest). Without these the code-approved gate fails on the upstream chain.
+func writeCrosscheckUpstreamApprovals(t *testing.T, crDir string) {
+	t.Helper()
+	reqEvidence := map[string]string{"review-annotations/requirement.yml": crosscheckPassReview}
+	writeCrosscheckFile(t, crDir, "review-annotations/requirement.yml", crosscheckPassReview)
+	techEvidence := map[string]string{"review-annotations/sdd.yml": crosscheckPassReview}
+	writeCrosscheckFile(t, crDir, "review-annotations/sdd.yml", crosscheckPassReview)
+	devPlan := crosscheckPassReview + "subject-sha256: " + crosscheckDevPlanSubject + "\n"
+	devEvidence := map[string]string{"plan.md": "# plan\n", "review-annotations/dev-plan.yml": devPlan}
+	writeCrosscheckFile(t, crDir, "review-annotations/dev-plan.yml", devPlan)
+
+	sec := func(section, digest, target string) string {
+		return fmt.Sprintf("%s:\n  approver: \"alice@corp\"\n  approved-at: \"2026-08-11T10:00:00+08:00\"\n  via: crctl-approve\n  evidence-digest: \"%s\"\n  target-status: \"%s\"\n", section, digest, target)
+	}
+	var b strings.Builder
+	b.WriteString(sec("requirement", crosscheckDigest(reqEvidence), "requirement-approved"))
+	b.WriteString(sec("tech-design", crosscheckDigest(techEvidence), "tech-design-reviewed"))
+	b.WriteString(sec("development-start", crosscheckDigest(devEvidence), "developing"))
+	writeCrosscheckFile(t, crDir, "approval.yml", b.String())
+}
+
+// newCrosscheckCodeWorkspace builds the code-stage authority: a knowledge-base
+// repo whose dir-graph.yaml declares a single active repo, a linked worktree on
+// requirement/CR-2026-001 holding the controlled artifacts, and a code.yml whose
+// machine-injected release-subjects block matches the committed worktree HEAD.
+// Returns (installRoot, worktree, codeYmlContent, testReportContent).
+func newCrosscheckCodeWorkspace(t *testing.T, crctl string) (ws, worktree, codeYml, testReport string) {
+	t.Helper()
+	ws = t.TempDir()
+	toolsRoot := crctl
+	for range 5 {
+		toolsRoot = filepath.Dir(toolsRoot)
+	}
+	graph := fmt.Sprintf("workspace:\n  tools_package_path: %q\nrepositories:\n  - id: %s\n    path: \".\"\n    trunk: master\n    role: knowledge-base\n",
+		filepath.ToSlash(toolsRoot), crosscheckKBRepo)
+	writeCrosscheckFile(t, ws, "dir-graph.yaml", graph)
+	// Keep runtime artifacts (grant.json, .crctl/keys, ledger tmp) out of the
+	// tracked worktree so classifyRepoWorkspace sees a clean tree.
+	writeCrosscheckFile(t, ws, ".gitignore", ".crctl/\ngrant.json\n")
+
+	runGitCrosscheck(t, ws, "init", "-b", "master")
+	runGitCrosscheck(t, ws, "config", "user.email", "t@t")
+	runGitCrosscheck(t, ws, "config", "user.name", "t")
+	runGitCrosscheck(t, ws, "add", "-A")
+	runGitCrosscheck(t, ws, "commit", "-m", "[cr] seed")
+
+	branch := "requirement/" + crosscheckCR
+	runGitCrosscheck(t, ws, "branch", branch, "master")
+	worktree = filepath.Join(ws, ".rayai-worktrees", "knowledge-base", "requirement", crosscheckCR)
+	runGitCrosscheck(t, ws, "worktree", "add", worktree, branch)
+
+	crRel := filepath.Join("change-requests", crosscheckCR)
+	testReport = "---\nstatus: pass\n---\n"
+	writeCrosscheckFile(t, worktree, "change-requests/_backlog.yml", "schema: cr-backlog/v2\nchange-requests:\n  - id: "+crosscheckCR+"\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "cr.md"), "---\nid: "+crosscheckCR+"\nstatus: code-reviewing\n---\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "test-report.md"), testReport)
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "prd.md"), "# prd\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "sdd.md"), "# sdd\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "plan.md"), "# plan\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "tasks", "_index.yml"), "tasks:\n  - id: "+crosscheckCR+"-TASK-01\n")
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "tasks", "TASK-01.md"), "# TASK-01\n")
+	writeCrosscheckUpstreamApprovals(t, filepath.Join(worktree, crRel))
+	// Reviewed-source commit: everything the code review was performed against
+	// except the review annotation itself (test-report is part of that reviewed
+	// surface, not a post-review change).
+	runGitCrosscheck(t, worktree, "add", "-A")
+	runGitCrosscheck(t, worktree, "commit", "-m", "[cr] code under review")
+	reviewedSha := runGitCrosscheck(t, worktree, "rev-parse", "HEAD")
+
+	// Controlled artifacts in POSIX path order, matching collectControlledArtifacts.
+	type artifact struct{ path, content string }
+	base := "change-requests/" + crosscheckCR + "/"
+	artifacts := []artifact{
+		{base + "plan.md", "# plan\n"},
+		{base + "prd.md", "# prd\n"},
+		{base + "sdd.md", "# sdd\n"},
+		{base + "tasks/TASK-01.md", "# TASK-01\n"},
+		{base + "tasks/_index.yml", "tasks:\n  - id: " + crosscheckCR + "-TASK-01\n"},
+	}
+	var digestLines []string
+	rs := "release-subjects:\n  version: 1\n  repositories:\n"
+	rs += fmt.Sprintf("    - repo: %s\n      remote-ref: refs/heads/%s\n      reviewed-source-sha: %s\n", crosscheckKBRepo, branch, reviewedSha)
+	rs += "  artifacts:\n    algorithm: sha256\n    canonicalization: crlf-to-lf+path-sort\n    files:\n"
+	for _, a := range artifacts {
+		h := sha256HexCrosscheck(a.content)
+		digestLines = append(digestLines, a.path+":"+h)
+		rs += fmt.Sprintf("      - { path: %s, sha256: %s }\n", a.path, h)
+	}
+	rs += "    digest: " + sha256HexCrosscheck(strings.Join(digestLines, "\n")) + "\n"
+
+	codeYml = crosscheckPassReview + rs
+	writeCrosscheckFile(t, worktree, filepath.Join(crRel, "review-annotations", "code.yml"), codeYml)
+	runGitCrosscheck(t, worktree, "add", "-A")
+	runGitCrosscheck(t, worktree, "commit", "-m", "[cr] review code")
+	return ws, worktree, codeYml, testReport
+}
+
+func TestGrantCrossVerifiesWithCrctlCodeStage(t *testing.T) {
+	nodeBin, crctl := resolveCrosscheckCrctl(t)
+
+	codeEvidence := func(codeYml, testReport string) map[string]string {
+		return map[string]string{"review-annotations/code.yml": codeYml, "test-report.md": testReport}
+	}
+
+	t.Run("code approve with release-subjects and adjacent replay", func(t *testing.T) {
+		_, worktree, codeYml, testReport := newCrosscheckCodeWorkspace(t, crctl)
+		digest := crosscheckDigest(codeEvidence(codeYml, testReport))
+		grantPath := signCrosscheckGrantWithDigest(t, worktree, "code", "approve", digest)
+
+		out, err := runCrctlApprove(nodeBin, crctl, worktree, "code", grantPath)
+		if err != nil {
+			t.Fatalf("code approve failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, `"advanced": true`) || !strings.Contains(out, `"to": "code-approved"`) {
+			t.Fatalf("code approve did not reach code-approved:\n%s", out)
+		}
+		approval, err := os.ReadFile(filepath.Join(worktree, "change-requests", crosscheckCR, "approval.yml"))
+		if err != nil || !strings.Contains(string(approval), "server-approve") || !strings.Contains(string(approval), "release-subjects") {
+			t.Fatalf("approval.yml must record server-approve + release-subjects: %v\n%s", err, approval)
+		}
+
+		out, err = runCrctlApprove(nodeBin, crctl, worktree, "code", grantPath)
+		if err != nil || !strings.Contains(out, `"changed": false`) {
+			t.Fatalf("adjacent code approve replay must be idempotent: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("code reject rollback and adjacent replay", func(t *testing.T) {
+		_, worktree, codeYml, testReport := newCrosscheckCodeWorkspace(t, crctl)
+		digest := crosscheckDigest(codeEvidence(codeYml, testReport))
+		grantPath := signCrosscheckGrantWithDigest(t, worktree, "code", "reject", digest)
+
+		out, err := runCrctlApprove(nodeBin, crctl, worktree, "code", grantPath)
+		if err == nil || !strings.Contains(out, "APPROVAL_DECLINED_ROLLED_BACK") || !strings.Contains(out, `"changed": true`) || !strings.Contains(out, `"rolledBackTo": "developing"`) {
+			t.Fatalf("code reject must roll back to developing: %v\n%s", err, out)
+		}
+		crMd, readErr := os.ReadFile(filepath.Join(worktree, "change-requests", crosscheckCR, "cr.md"))
+		if readErr != nil || !strings.Contains(string(crMd), "status: developing") {
+			t.Fatalf("cr.md must be rolled back to developing: %v\n%s", readErr, crMd)
+		}
+
+		out, err = runCrctlApprove(nodeBin, crctl, worktree, "code", grantPath)
+		if err == nil || !strings.Contains(out, "APPROVAL_DECLINED_ROLLED_BACK") || !strings.Contains(out, `"changed": false`) {
+			t.Fatalf("adjacent code reject replay must be idempotent: %v\n%s", err, out)
+		}
+	})
 }

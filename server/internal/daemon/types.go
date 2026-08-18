@@ -105,6 +105,16 @@ type Task struct {
 	AutopilotSource               string                 `json:"autopilot_source,omitempty"`                 // manual, schedule, webhook, or api
 	AutopilotTriggerPayload       json.RawMessage        `json:"autopilot_trigger_payload,omitempty"`        // optional trigger payload for webhook/api runs
 	QuickCreatePrompt             string                 `json:"quick_create_prompt,omitempty"`              // user's natural-language input for quick-create tasks
+	// AIFIRST: pipeline-node task carrier (CR-2026-045). PipelinePrompt is the
+	// fixed registry prompt (already rendered by the Runner); the daemon runs
+	// it directly instead of building an issue/chat/quick-create prompt.
+	PipelinePrompt       string `json:"pipeline_prompt,omitempty"`        // fixed registry prompt text
+	PipelineCrID         string `json:"pipeline_cr_id,omitempty"`         // CR-YYYY-NNN
+	PipelineNodeID       string `json:"pipeline_node_id,omitempty"`       // template node UUID
+	PipelineRunID        string `json:"pipeline_run_id,omitempty"`        // pipeline_run.id
+	PipelineAttempt      int    `json:"pipeline_attempt,omitempty"`       // reviewLoop attempt
+	PipelineWorkspace    string `json:"pipeline_workspace,omitempty"`     // CR root (CRCTL_WORKSPACE)
+	PipelineLocalWorkDir string `json:"pipeline_local_work_dir,omitempty"` // operational workspace (LocalWorkDir)
 	QuickCreatePriority           string                 `json:"quick_create_priority,omitempty"`            // explicit priority selected in quick-create
 	QuickCreateDueDate            string                 `json:"quick_create_due_date,omitempty"`            // explicit calendar due date selected in quick-create
 	QuickCreateAttachmentIDs      []string               `json:"quick_create_attachment_ids,omitempty"`      // attachments uploaded in the quick-create prompt and bound by issue create

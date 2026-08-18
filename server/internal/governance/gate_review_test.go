@@ -53,6 +53,22 @@ func TestApplyReviewBlockedThenPassedKeepsBothAttempts(t *testing.T) {
 	if len(detail) == 0 || string(detail) == "{}" {
 		t.Fatalf("expected blocker detail persisted, got %s", detail)
 	}
+	// Runner owns detail.runner. A projector replay must merge review fields
+	// at the top level rather than replace that namespace.
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE pipeline_node_run SET detail=jsonb_set(detail,'{runner}','{"wait_reason":"authority_postcondition"}'::jsonb,true)
+		WHERE run_id IN (SELECT id FROM pipeline_run WHERE cr_id=$1) AND node_id=$2::uuid AND attempt=1`, crID, node.NodeID); err != nil {
+		t.Fatalf("seed runner detail: %v", err)
+	}
+	postEvents(t, svc, testWorkspaceID, []OutboxEvent{
+		reviewEvent(crID, "requirement", "block", 1, `["still blocked"]`, "r1b", "review1b.json"),
+	})
+	var waitReason string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT detail->'runner'->>'wait_reason' FROM pipeline_node_run n JOIN pipeline_run r ON r.id=n.run_id
+		WHERE r.cr_id=$1 AND n.node_id=$2::uuid AND n.attempt=1`, crID, node.NodeID).Scan(&waitReason); err != nil || waitReason != "authority_postcondition" {
+		t.Fatalf("review replay lost detail.runner: reason=%q err=%v", waitReason, err)
+	}
 
 	postEvents(t, svc, testWorkspaceID, []OutboxEvent{
 		reviewEvent(crID, "requirement", "pass", 2, `[]`, "r2", "review2.json"),

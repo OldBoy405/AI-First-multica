@@ -4630,6 +4630,15 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	if task.Agent != nil {
 		agentName = task.Agent.Name
 	}
+	if err := d.preparePipelineTask(ctx, &task); err != nil {
+		taskLog.Error("pipeline task preparation failed", "error", err)
+		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+			kind: terminalTaskReportFail, taskID: task.ID, errorMessage: err.Error(), failureReason: taskRunFailureReason(err),
+		}); failErr != nil {
+			taskLog.Error("fail pipeline task callback failed", "error", failErr)
+		}
+		return
+	}
 	if task.ChatSessionID != "" {
 		taskLog.Info("picked chat task", "chat_session", shortID(task.ChatSessionID), "agent", agentName, "provider", provider, "ask_only", task.AskOnly)
 	} else {
@@ -4842,7 +4851,7 @@ func taskRunFailureReason(err error) string {
 //  4. The blocking wait is cancelled (daemon shutdown, server-side cancel)
 //     — fail the task with the ctx error.
 func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Task, taskLog *slog.Logger) (release func(), abort bool) {
-	if len(task.ProjectResources) == 0 || d.cfg.DaemonID == "" {
+	if task.PipelinePrompt == "" && (len(task.ProjectResources) == 0 || d.cfg.DaemonID == "") {
 		return nil, false
 	}
 	assignment, err := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
@@ -5731,6 +5740,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		InitiatorName:                    task.InitiatorName,
 		InitiatorEmail:                   task.InitiatorEmail,
 		WorkspaceContext:                 task.WorkspaceContext,
+		SkipWorkspaceSidecars:            task.PipelinePrompt != "",
 		ConnectedApps:                    task.ConnectedApps,
 	}
 
@@ -5918,6 +5928,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		d.markActiveEnvRoot(env.RootDir)
 		defer d.unmarkActiveEnvRoot(env.RootDir)
 	}
+	if task.PipelinePrompt != "" {
+		if err := installPipelineCrctlLauncher(env.GitShimDir); err != nil {
+			return TaskResult{}, err
+		}
+	}
 	taskTempDir, err := ensureTaskTempDir(env.RootDir, task.WorkspaceID, task.ID)
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("prepare task temp dir: %w", err)
@@ -5959,9 +5974,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
-	runtimeBrief, err := execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
-	if err != nil {
-		d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+	var runtimeBrief string
+	if task.PipelinePrompt == "" {
+		runtimeBrief, err = execenv.InjectRuntimeConfig(env.WorkDir, provider, taskCtx)
+		if err != nil {
+			d.logger.Warn("execenv: inject runtime config failed (non-fatal)", "error", err)
+		}
 	}
 	// Workdir is preserved for reuse by future tasks on the same (agent,
 	// issue) pair in cloud mode; the work_dir path is stored in DB on task
@@ -6059,7 +6077,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if env.GitShimDir != "" {
 		agentEnv["PATH"] = env.GitShimDir + string(os.PathListSeparator) + agentEnv["PATH"]
 	}
-	if len(d.cfg.CRWorkspaceRoots) > 0 {
+	if task.PipelineWorkspace != "" {
+		agentEnv["CRCTL_WORKSPACE"] = task.PipelineWorkspace
+	} else if len(d.cfg.CRWorkspaceRoots) > 0 {
 		agentEnv["CRCTL_WORKSPACE"] = d.cfg.CRWorkspaceRoots[0]
 	}
 	// Point Codex to the per-task CODEX_HOME so it discovers skills natively
@@ -6097,6 +6117,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if rootsValue, ok := composeOpenclawIncludeRoots(env.OpenclawIncludeRoot, os.Getenv("OPENCLAW_INCLUDE_ROOTS")); ok {
 		agentEnv["OPENCLAW_INCLUDE_ROOTS"] = rootsValue
 	}
+	var pipelineAuditDir string
 	// Inject user-configured custom environment variables (e.g. ANTHROPIC_API_KEY,
 	// ANTHROPIC_BASE_URL for router/proxy mode, or CLAUDE_CODE_USE_BEDROCK for
 	// Bedrock). These are set per-agent via the agent settings UI.
@@ -6107,6 +6128,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		agentCustomEnv = task.Agent.CustomEnv
 	}
 	layerCustomEnvAndHermesHome(agentEnv, agentCustomEnv, env.HermesHome, d.logger)
+	if task.PipelinePrompt != "" {
+		// Pipeline Git trust is daemon-owned and must win over custom_env.
+		pipelineAuditDir, err = configurePipelineGitEnvironment(agentEnv, task.PipelineWorkspace, task.PipelineLocalWorkDir)
+		if err != nil {
+			return TaskResult{}, err
+		}
+	}
 	if provider == "reasonix" {
 		reasonixStateHome, err := prepareReasonixTaskStateHome(d.cfg.Profile, task.RuntimeID, task.AgentID)
 		if err != nil {
@@ -6153,6 +6181,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil {
 		customArgs = task.Agent.CustomArgs
 		mcpConfig = effectiveMcpConfig
+	}
+	if provider == "codex" && pipelineAuditDir != "" {
+		customArgs = append(append([]string{}, customArgs...), "-c", pipelineCodexWritableRootConfig(pipelineAuditDir))
 	}
 	if provider == "hermes" {
 		customArgs = hermesLaunchArgs(customArgs, env != nil && env.HermesHome != "")

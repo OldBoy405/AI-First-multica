@@ -205,3 +205,33 @@ func TestEnsureProjectChatAndDiscussionIssue_ShareTheSamePlumbing(t *testing.T) 
 		t.Fatalf("EnsureProjectDiscussionIssue is not idempotent: got a different issue id on the second call")
 	}
 }
+
+// TestProjectContainerOriginConstraintRejectsUnknownOrigin keeps the repaired
+// issue_origin_type_check honest: both project container values must be
+// accepted by the service path while an unrelated value remains rejected.
+func TestProjectContainerOriginConstraintRejectsUnknownOrigin(t *testing.T) {
+	ctx := context.Background()
+	pool := newProjectChatTestPool(t)
+	queries := db.New(pool)
+	svc := NewIssueService(queries, pool, events.New(), nil, nil)
+
+	workspaceID, userID, projectID := createProjectChatFixture(t, ctx, pool)
+	wsUUID := util.MustParseUUID(workspaceID)
+	projectUUID := util.MustParseUUID(projectID)
+	callerUUID := util.MustParseUUID(userID)
+	if _, err := svc.EnsureProjectChatIssue(ctx, wsUUID, projectUUID, callerUUID); err != nil {
+		t.Fatalf("project_chat container: %v", err)
+	}
+	if _, err := svc.EnsureProjectDiscussionIssue(ctx, wsUUID, projectUUID, callerUUID); err != nil {
+		t.Fatalf("project_discussion container: %v", err)
+	}
+
+	var issueID string
+	err := pool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, project_id, title, status, priority, creator_id, creator_type, number, position, origin_type)
+		VALUES ($1, $2, 'invalid origin regression', 'todo', 'medium', $3, 'member', $4, 0, 'not_a_real_origin')
+		RETURNING id`, workspaceID, projectID, userID, time.Now().UnixNano()%1000000000).Scan(&issueID)
+	if err == nil {
+		t.Fatalf("invalid origin_type insert unexpectedly succeeded with issue %s", issueID)
+	}
+}

@@ -274,6 +274,79 @@ func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.
 	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus, Wakeup: wakeup}
 }
 
+// ErrRunnerAttributionInvalid is returned when a pipeline task enqueue guard
+// fails (source task / executor agent / CR workspace mismatch, or strict
+// attribution invariant). The Runner maps it to RUNNER_ATTRIBUTION_INVALID.
+var ErrRunnerAttributionInvalid = errors.New("RUNNER_ATTRIBUTION_INVALID")
+
+// PipelineTaskSpec is the narrow carrier for a Runner pipeline-node task
+// (CR-2026-045 SDD §3.5). The Runner resolves every field: the trusted source
+// task (single attribution source), the executor agent, and the fixed
+// pipeline-node context.
+type PipelineTaskSpec struct {
+	WorkspaceID     pgtype.UUID
+	CrID            string
+	RunID           pgtype.UUID
+	NodeID          pgtype.UUID // template node UUID (context.node_id)
+	NodeRunID       pgtype.UUID // pipeline_node_run.id (agent_task_queue.pipeline_node_run_id)
+	PipelineID      string
+	Attempt         int
+	Prompt          string
+	SourceTaskID    pgtype.UUID
+	ExecutorAgentID pgtype.UUID
+	Priority        int32
+}
+
+// EnqueuePipelineTask enqueues a Runner pipeline-node task by copying the full
+// attribution snapshot from the trusted source task in one INSERT. It does not
+// re-classify attribution and never treats a logical node owner as the human.
+// Any guard failure (source task / executor agent / CR workspace mismatch)
+// inserts 0 rows and returns ErrRunnerAttributionInvalid.
+func (s *TaskService) EnqueuePipelineTask(ctx context.Context, spec PipelineTaskSpec) (db.AgentTaskQueue, error) {
+	contextJSON, err := json.Marshal(map[string]any{
+		"type":         "pipeline_node",
+		"schema":       "ai-first.pipeline-task/v1",
+		"workspace_id": spec.WorkspaceID,
+		"cr_id":        spec.CrID,
+		"run_id":       spec.RunID,
+		"node_id":      spec.NodeID,
+		"pipeline_id":  spec.PipelineID,
+		"attempt":      spec.Attempt,
+		"prompt":       spec.Prompt,
+	})
+	if err != nil {
+		return db.AgentTaskQueue{}, fmt.Errorf("marshal pipeline context: %w", err)
+	}
+	task, err := s.Queries.CreatePipelineTask(ctx, db.CreatePipelineTaskParams{
+		WorkspaceID:       spec.WorkspaceID,
+		ID:                spec.ExecutorAgentID,
+		Priority:          spec.Priority,
+		Context:           contextJSON,
+		CrID:              pgtype.Text{String: spec.CrID, Valid: true},
+		PipelineNodeRunID: spec.NodeRunID,
+		ID_2:              spec.SourceTaskID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The partial unique index also returns no row for an idempotent
+			// concurrent enqueue loser. Re-read that active task before treating
+			// the no-row result as an attribution guard failure.
+			existing, readErr := s.Queries.GetActivePipelineTask(ctx, spec.NodeRunID)
+			if readErr == nil {
+				return existing, nil
+			}
+			if !errors.Is(readErr, pgx.ErrNoRows) {
+				return db.AgentTaskQueue{}, fmt.Errorf("read active pipeline task: %w", readErr)
+			}
+			return db.AgentTaskQueue{}, ErrRunnerAttributionInvalid
+		}
+		return db.AgentTaskQueue{}, fmt.Errorf("create pipeline task: %w", err)
+	}
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.NotifyTaskEnqueued(ctx, task)
+	return task, nil
+}
+
 var trivialDoneMarkers = []string{
 	"done",
 	"готово",
@@ -5036,7 +5109,9 @@ func (s *TaskService) notifyRuntimeMayHaveWork(runtimeID pgtype.UUID, taskID str
 	// just-queued task until the TTL expires. The cache itself bounds
 	// every Redis call with a short timeout so a wedged Redis cannot
 	// block enqueue.
-	s.EmptyClaim.Bump(context.Background(), runtimeKey)
+	if s.EmptyClaim != nil {
+		s.EmptyClaim.Bump(context.Background(), runtimeKey)
+	}
 	if s.Wakeup == nil {
 		return
 	}
@@ -5230,6 +5305,16 @@ func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentT
 	// broadcasts, which is why quick-create tasks appeared stuck queued.
 	if qc, ok := s.parseQuickCreateContext(task); ok {
 		return qc.WorkspaceID
+	}
+	// AIFIRST: Runner pipeline tasks also have no product-domain parent. Their
+	// trusted context is written atomically with the task by CreatePipelineTask.
+	var pipeline struct {
+		Type        string `json:"type"`
+		Schema      string `json:"schema"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if json.Unmarshal(task.Context, &pipeline) == nil && pipeline.Type == "pipeline_node" && pipeline.Schema == "ai-first.pipeline-task/v1" {
+		return pipeline.WorkspaceID
 	}
 	return ""
 }

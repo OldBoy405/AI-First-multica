@@ -79,6 +79,21 @@ for (const { stage, pipeline, reviewRef } of STAGES) {
   }
 }
 
+// CR-2026-045: compile the architecture-design Core registry from tools. The
+// emitted registry carries the full node/prompt/permissions/replayLoop contract
+// plus a canonical digest; both are embedded as generated Go constants so the
+// Runner never reads a tools checkout at runtime.
+const emitRegistry = path.join(toolsDir, 'pipeline-templates', 'emit-registry.mjs');
+const regR = spawnSync(process.execPath, [emitRegistry, '--pipeline', 'architecture-design'], { encoding: 'utf8', shell: false });
+if (regR.status !== 0) {
+  console.error(`emit-registry failed:\n${regR.stderr}`);
+  process.exit(2);
+}
+const registryRaw = regR.stdout.trim();
+let registry;
+try { registry = JSON.parse(registryRaw); } catch (e) { console.error(`emit-registry output not JSON: ${e.message}`); process.exit(2); }
+if (!registry.digest || !/^sha256:[0-9a-f]{64}$/.test(registry.digest)) { console.error('emit-registry missing canonical digest'); process.exit(2); }
+
 // feature-writeback carries no gate nodes we project (§4.1: entering it only
 // opens/closes a pipeline_run row), but the projector needs its pipeline id
 // as a plain string constant alongside the other three template ids.
@@ -141,6 +156,17 @@ for (const { stage, reviewRef } of STAGES) {
   lines.push(`\t${JSON.stringify(stage)}: {PipelineID: ${JSON.stringify(n.pipelineId)}, NodeID: ${JSON.stringify(n.nodeId)}, Seq: ${n.seq}, Kind: ${JSON.stringify(n.kind)}},`);
 }
 lines.push('}');
+lines.push('');
+lines.push('// ArchitectureCoreRegistryJSON is the compiled architecture-design Core registry');
+lines.push('// emitted by tools/pipeline-templates/emit-registry.mjs (CR-2026-045). It carries');
+lines.push('// the full node/prompt/permissions/replayLoop contract; the Runner consumes this');
+lines.push('// snapshot at runtime instead of reading a tools checkout.');
+lines.push('var ArchitectureCoreRegistryJSON = ' + JSON.stringify(registryRaw));
+lines.push('');
+lines.push('// ArchitectureCoreRegistryDigest is the canonical SHA-256 of the registry body');
+lines.push('// (pipeline + pipelineOwner + nodePermissions). Runner recovery compares it');
+lines.push('// against pipeline_run.execution_context.template_digest and fails closed on drift.');
+lines.push('const ArchitectureCoreRegistryDigest = ' + JSON.stringify(registry.digest));
 lines.push('');
 
 function gofmt(source) {

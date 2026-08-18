@@ -7,8 +7,8 @@ import "testing"
 // --check mode; these tests lock the SEMANTICS.
 
 func TestTransitionTableShape(t *testing.T) {
-	if got := len(Transitions); got != 45 {
-		t.Fatalf("expanded transition count = %d, want 45 (21 direct + 2 wildcards x 12 active states)", got)
+	if got := len(Transitions); got != 50 {
+		t.Fatalf("expanded transition count = %d, want 50 from the canonical 28 declarations after wildcard expansion", got)
 	}
 	// 15 named states; the colloquial "16 states" includes pre-registration (new),
 	// which is represented as the empty string and excluded from the enum.

@@ -334,6 +334,10 @@ func TestGrantDeliveryQueue(t *testing.T) {
 			ids = append(ids, g.ID)
 		}
 	}
+	var wokeWorkspace, wokeCR string
+	svc.SetGrantAckHandler(func(_ context.Context, workspaceID, gotCR string) {
+		wokeWorkspace, wokeCR = workspaceID, gotCR
+	})
 	body, _ := json.Marshal(map[string]any{"ids": ids})
 	ackReq := httptest.NewRequest(http.MethodPost, "/api/daemon/approvals/ack", bytes.NewReader(body))
 	ackReq = ackReq.WithContext(middleware.WithDaemonContext(ackReq.Context(), testWorkspaceID, "daemon-test"))
@@ -341,6 +345,9 @@ func TestGrantDeliveryQueue(t *testing.T) {
 	svc.HandleGrantsAck(ackRec, ackReq)
 	if ackRec.Code != http.StatusOK {
 		t.Fatalf("ack: %d", ackRec.Code)
+	}
+	if wokeWorkspace != testWorkspaceID || wokeCR != crID {
+		t.Fatalf("grant ACK wake mismatch: workspace=%q cr=%q", wokeWorkspace, wokeCR)
 	}
 	r2 := pendingReq()
 	var after struct {

@@ -551,6 +551,52 @@ FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING *;
 
+-- name: CreatePipelineTask :one
+-- AIFIRST: CR-2026-045 (SDD §3.5) — enqueue a Runner pipeline-node task by
+-- copying the full attribution snapshot from a trusted source task in one
+-- INSERT. The source task is the single attribution source (task-token
+-- stamped); the executor agent is re-read from the same workspace's active,
+-- runtime-bound agents, and the CR must exist in the same workspace's cr
+-- projection. Any guard failure inserts 0 rows; the caller maps pgx.ErrNoRows
+-- to RUNNER_ATTRIBUTION_INVALID.
+--
+-- A pipeline successor node is a systemic continuation of the same user
+-- intent, not a new attribution event (MUL-4302 §5): originator/accountable/
+-- source/delegation/rule/evidence are copied verbatim, and the logical node
+-- owner is never treated as the human.
+INSERT INTO agent_task_queue (
+    agent_id, runtime_id, status, priority, context,
+    originator_user_id, accountable_user_id, originator_source,
+    delegated_from_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id,
+    cr_id, pipeline_node_run_id
+)
+SELECT
+    a.id, a.runtime_id, 'queued', $3, $4,
+    s.originator_user_id, s.accountable_user_id, s.originator_source,
+    s.delegated_from_task_id, s.rule_version_id, s.trigger_evidence_kind, s.trigger_evidence_ref_id,
+    $5, $6
+FROM agent_task_queue s
+JOIN agent a
+  ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
+JOIN cr c
+  ON c.workspace_id = $1 AND c.cr_id = $5
+WHERE s.id = $7 AND s.agent_id = $2
+  AND s.originator_source IS NOT NULL AND btrim(s.originator_source) <> ''
+  AND s.originator_user_id IS NOT NULL
+  AND s.accountable_user_id = s.originator_user_id
+ON CONFLICT (pipeline_node_run_id)
+    WHERE pipeline_node_run_id IS NOT NULL
+      AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
+DO NOTHING
+RETURNING *;
+
+-- name: GetActivePipelineTask :one
+SELECT * FROM agent_task_queue
+WHERE pipeline_node_run_id = $1
+  AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
+ORDER BY created_at DESC
+LIMIT 1;
+
 -- name: CancelAgentTasksByIssue :many
 -- Cancels every active task on the issue and returns the affected rows so the
 -- caller can reconcile each agent's status and broadcast task:cancelled events

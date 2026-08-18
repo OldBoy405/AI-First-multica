@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1635,9 +1636,55 @@ type claimBuildFailure struct {
 // feed the same delivery receipt into FinalizeTaskClaim. A non-nil failure
 // means the task must not be dispatched; the builder has already cancelled it
 // where the failure semantics require it.
+// hydratePipelineContext fills the pipeline-node wire fields from the task
+// context JSONB (schema ai-first.pipeline-task/v1, CR-2026-045). Non-pipeline
+// contexts are ignored; a declared pipeline context is validated fail-closed.
+var pipelineContextCRIDPattern = regexp.MustCompile(`^CR-[0-9]{4}-[0-9]{3,}$`)
+
+func hydratePipelineContext(raw []byte, resp *AgentTaskResponse) error {
+	var ctx struct {
+		Type       string `json:"type"`
+		Schema     string `json:"schema"`
+		CrID       string `json:"cr_id"`
+		NodeID     string `json:"node_id"`
+		RunID      string `json:"run_id"`
+		PipelineID string `json:"pipeline_id"`
+		Attempt    int    `json:"attempt"`
+		Prompt     string `json:"prompt"`
+	}
+	if err := json.Unmarshal(raw, &ctx); err != nil {
+		return nil // arbitrary non-pipeline task context remains backward compatible
+	}
+	if ctx.Type != "pipeline_node" {
+		return nil
+	}
+	_, nodeErr := util.ParseUUID(ctx.NodeID)
+	_, runErr := util.ParseUUID(ctx.RunID)
+	if ctx.Schema != "ai-first.pipeline-task/v1" || ctx.PipelineID != "architecture-design" || !pipelineContextCRIDPattern.MatchString(ctx.CrID) || nodeErr != nil || runErr != nil || ctx.Attempt < 1 || ctx.Attempt > 3 || ctx.Prompt == "" {
+		return errors.New("invalid pipeline-node task context")
+	}
+	resp.PipelinePrompt = ctx.Prompt
+	resp.PipelineCrID = ctx.CrID
+	resp.PipelineNodeID = ctx.NodeID
+	resp.PipelineRunID = ctx.RunID
+	resp.PipelineAttempt = ctx.Attempt
+	return nil
+}
+
 func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQueue, runtime db.AgentRuntime, runtimeID, runtimeWorkspaceID string) (resp AgentTaskResponse, deliveredCommentIDs []pgtype.UUID, agentSkillCount, builtinSkillCount int, failure *claimBuildFailure) {
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp = taskToResponse(*task, runtimeWorkspaceID)
+	// AIFIRST: hydrate the pipeline-node carrier from the task context JSONB
+	// (CR-2026-045). Non-pipeline tasks carry a nil/other context and are left
+	// untouched.
+	if len(task.Context) > 0 {
+		if err := hydratePipelineContext(task.Context, &resp); err != nil {
+			if _, cancelErr := h.TaskService.CancelTask(r.Context(), task.ID); cancelErr != nil {
+				slog.Error("daemon claim: cancel invalid pipeline context failed", "task_id", uuidToString(task.ID), "error", cancelErr)
+			}
+			return AgentTaskResponse{}, nil, 0, 0, &claimBuildFailure{outcome: "invalid_pipeline_context", status: http.StatusUnprocessableEntity, message: err.Error()}
+		}
+	}
 	// Claim-only capability: this server resolves the squad-leader role on the
 	// wire (is_leader_task / squad_id), so the daemon must not re-derive it
 	// from the briefing text. Set unconditionally — on every claim, leader or

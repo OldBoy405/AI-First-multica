@@ -144,6 +144,9 @@ func writeWorkspacesRootMarkerAtomic(path string, data []byte) error {
 // cloud-mode tasks whose envRoot is wiped wholesale by the GC loop — may
 // pass nil to skip the bookkeeping entirely.
 func writeContextFiles(workDir, provider string, ctx TaskContextForEnv, manifest *sidecarManifest) error {
+	if ctx.SkipWorkspaceSidecars {
+		return nil
+	}
 	if err := writeTaskContextMarker(workDir, ctx, manifest); err != nil {
 		return err
 	}
