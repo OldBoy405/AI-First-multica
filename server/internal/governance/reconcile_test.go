@@ -94,6 +94,49 @@ func TestApplySnapshotHeals(t *testing.T) {
 	}
 }
 
+func TestApplySnapshotSkipsActiveArchitecturePipeline(t *testing.T) {
+	const crID = "CR-9201-006"
+	seedCR(t, crID, "tech-design-reviewed", false)
+	userID := testUserID(t)
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO pipeline_run (workspace_id, pipeline_id, cr_id, status, started_by)
+		VALUES ($1::uuid, $2, $3, 'running', $4::uuid)`,
+		testWorkspaceID, PipelineIDs.ArchitectureDesign, crID, userID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM pipeline_run WHERE cr_id = $1`, crID)
+	})
+
+	svc := NewSyncService(testPool, nil)
+	stale := AuthoritySnapshot{HeadSHA: "root-stale", Statuses: map[string]string{crID: "requirement-approved"}}
+	healed, err := svc.ApplySnapshot(context.Background(), testWorkspaceID, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed != 0 {
+		t.Fatalf("active pipeline snapshot must not heal live CR, healed=%d", healed)
+	}
+	if status, _, _ := crRow(t, crID); status != "tech-design-reviewed" {
+		t.Fatalf("stale snapshot overwrote live projection: %s", status)
+	}
+
+	if _, err := testPool.Exec(context.Background(), `
+		UPDATE pipeline_run SET status = 'completed', completed_at = now() WHERE cr_id = $1`, crID); err != nil {
+		t.Fatal(err)
+	}
+	healed, err = svc.ApplySnapshot(context.Background(), testWorkspaceID, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed != 1 {
+		t.Fatalf("completed pipeline should allow snapshot healing, healed=%d", healed)
+	}
+	if status, _, _ := crRow(t, crID); status != "requirement-approved" {
+		t.Fatalf("completed pipeline snapshot did not heal: %s", status)
+	}
+}
+
 // Rows absent from the snapshot (archived CRs moved to _history) stay as-is.
 func TestApplySnapshotLeavesAbsentRows(t *testing.T) {
 	svc := NewSyncService(testPool, nil)

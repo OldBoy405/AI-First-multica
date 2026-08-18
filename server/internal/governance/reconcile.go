@@ -164,12 +164,39 @@ func (s *SyncService) ApplySnapshot(ctx context.Context, workspaceID string, sna
 		return 0, err
 	}
 
+	activeRuns := map[string]struct{}{}
+	activeRows, err := s.pool.Query(ctx, `
+		SELECT cr_id FROM pipeline_run
+		WHERE workspace_id = $1::uuid AND pipeline_id = $2
+		  AND cr_id IS NOT NULL AND status IN ('running', 'waiting_approval')`,
+		workspaceID, PipelineIDs.ArchitectureDesign)
+	if err != nil {
+		return 0, err
+	}
+	for activeRows.Next() {
+		var crID string
+		if err := activeRows.Scan(&crID); err != nil {
+			activeRows.Close()
+			return 0, err
+		}
+		activeRuns[crID] = struct{}{}
+	}
+	activeRows.Close()
+	if err := activeRows.Err(); err != nil {
+		return 0, err
+	}
+
 	healed := 0
 	for crID, authStatus := range snap.Statuses {
 		if !KnownStatuses[authStatus] {
 			continue // never project a status outside the state machine enum
 		}
 		cur, found := existing[crID]
+		if _, active := activeRuns[crID]; active {
+			// Live Runner/status events are the authority while an architecture
+			// run is active; the installation-root snapshot may still be stale.
+			continue
+		}
 		switch {
 		case !found:
 			// Projection missed the registration entirely — insert from authority.
