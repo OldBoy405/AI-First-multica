@@ -11,6 +11,166 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const maturityActiveProjectKeys14d = `-- name: MaturityActiveProjectKeys14d :many
+SELECT DISTINCT COALESCE(q.project_id, issue.project_id) AS project_id
+FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id AND a.workspace_id = $1::uuid
+LEFT JOIN issue ON issue.id = q.issue_id
+WHERE q.created_at >= $2::timestamptz
+  AND q.created_at <  $3::timestamptz
+  AND COALESCE(q.project_id, issue.project_id) IS NOT NULL
+UNION
+SELECT DISTINCT issue.project_id
+FROM cr
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    AND e.event_kind = 'status'
+    AND e.occurred_at >= $2::timestamptz
+    AND e.occurred_at <  $3::timestamptz
+LEFT JOIN issue ON issue.id = cr.shell_issue_id AND issue.workspace_id = cr.workspace_id
+WHERE cr.workspace_id = $1::uuid
+  AND issue.project_id IS NOT NULL
+`
+
+type MaturityActiveProjectKeys14dParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+}
+
+// Distinct business projects with task activity or CR status events in
+// [from_utc, to_utc). Org Admin system projects are excluded by the
+// business-projects filter in the caller (this query returns raw keys).
+func (q *Queries) MaturityActiveProjectKeys14d(ctx context.Context, arg MaturityActiveProjectKeys14dParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, maturityActiveProjectKeys14d, arg.WorkspaceID, arg.FromUtc, arg.ToUtc)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var project_id pgtype.UUID
+		if err := rows.Scan(&project_id); err != nil {
+			return nil, err
+		}
+		items = append(items, project_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityApprovalLatencies = `-- name: MaturityApprovalLatencies :many
+SELECT DISTINCT ON (ar.id)
+    ar.stage,
+    (extract(epoch FROM (ar.created_at - pnr.completed_at)) * 1000)::bigint AS latency_ms
+FROM approval_record ar
+JOIN pipeline_run pr ON pr.workspace_id = ar.workspace_id AND pr.cr_id = ar.cr_id
+JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
+    AND pnr.node_id = ANY($1::uuid[])
+    AND pnr.completed_at IS NOT NULL
+    AND pnr.completed_at < ar.created_at
+WHERE ar.workspace_id = $2::uuid
+  AND ar.decision = 'approve'
+  AND ar.created_at >= $3::timestamptz
+  AND ar.created_at <  $4::timestamptz
+ORDER BY ar.id, pnr.completed_at DESC
+`
+
+type MaturityApprovalLatenciesParams struct {
+	ReviewNodeIds []pgtype.UUID      `json:"review_node_ids"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	FromUtc       pgtype.Timestamptz `json:"from_utc"`
+	ToUtc         pgtype.Timestamptz `json:"to_utc"`
+}
+
+type MaturityApprovalLatenciesRow struct {
+	Stage     string `json:"stage"`
+	LatencyMs int64  `json:"latency_ms"`
+}
+
+// One positive latency sample per approval decision: the latest completed
+// review node of that stage before approval_record.created_at. Only approve
+// decisions count (SDD §4.3).
+func (q *Queries) MaturityApprovalLatencies(ctx context.Context, arg MaturityApprovalLatenciesParams) ([]MaturityApprovalLatenciesRow, error) {
+	rows, err := q.db.Query(ctx, maturityApprovalLatencies,
+		arg.ReviewNodeIds,
+		arg.WorkspaceID,
+		arg.FromUtc,
+		arg.ToUtc,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityApprovalLatenciesRow{}
+	for rows.Next() {
+		var i MaturityApprovalLatenciesRow
+		if err := rows.Scan(&i.Stage, &i.LatencyMs); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityArchivedCRs = `-- name: MaturityArchivedCRs :many
+
+SELECT DISTINCT ON (cr.cr_id)
+    cr.cr_id,
+    e.occurred_at AS archived_at,
+    issue.project_id
+FROM cr
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    AND e.event_kind = 'status'
+    AND e.payload->>'to_status' = 'archived'
+    AND e.occurred_at >= $1::timestamptz
+    AND e.occurred_at <  $2::timestamptz
+LEFT JOIN issue ON issue.id = cr.shell_issue_id AND issue.workspace_id = cr.workspace_id
+WHERE cr.workspace_id = $3::uuid
+ORDER BY cr.cr_id, e.occurred_at ASC
+`
+
+type MaturityArchivedCRsParams struct {
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+}
+
+type MaturityArchivedCRsRow struct {
+	CrID       string             `json:"cr_id"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+	ProjectID  pgtype.UUID        `json:"project_id"`
+}
+
+// Section 2: CR/pipeline metrics and governance guardrails (TASK-05)
+// CRs that first entered "archived" inside [from_utc, to_utc), with their
+// canonical project mapping (shell issue -> issue.project_id, workspace
+// checked). A CR whose shell issue is missing/cross-workspace stays org-only
+// (project_id NULL). Same-day duplicate events collapse to the earliest.
+func (q *Queries) MaturityArchivedCRs(ctx context.Context, arg MaturityArchivedCRsParams) ([]MaturityArchivedCRsRow, error) {
+	rows, err := q.db.Query(ctx, maturityArchivedCRs, arg.FromUtc, arg.ToUtc, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityArchivedCRsRow{}
+	for rows.Next() {
+		var i MaturityArchivedCRsRow
+		if err := rows.Scan(&i.CrID, &i.ArchivedAt, &i.ProjectID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const maturityAttributionCounts = `-- name: MaturityAttributionCounts :one
 SELECT
     count(*) FILTER (WHERE q.initiator_user_id IS NOT NULL)::bigint AS attributed,
@@ -39,6 +199,73 @@ func (q *Queries) MaturityAttributionCounts(ctx context.Context, arg MaturityAtt
 	return i, err
 }
 
+const maturityBaselinePercentiles = `-- name: MaturityBaselinePercentiles :many
+WITH first28 AS (
+    SELECT bucket_date, metrics
+    FROM maturity_snapshot
+    WHERE workspace_id = $1 AND scope = 'org' AND scope_id = '·'
+    ORDER BY bucket_date ASC
+    LIMIT 28
+),
+checked AS (
+    SELECT
+        count(DISTINCT bucket_date) AS n_days,
+        max(bucket_date) - min(bucket_date) AS span_days
+    FROM first28
+),
+kv AS (
+    SELECT j.key::text AS metric_key, (j.value->>'value')::float8 AS value
+    FROM first28, LATERAL jsonb_each(metrics->'metric_values') AS j(key, value)
+    WHERE j.value->>'data_status' = 'ready'
+      AND j.value->>'value' IS NOT NULL
+)
+SELECT
+    metric_key,
+    count(*)::bigint AS sample_count,
+    percentile_cont(0.10) WITHIN GROUP (ORDER BY value) AS p10,
+    percentile_cont(0.75) WITHIN GROUP (ORDER BY value) AS p75
+FROM kv, checked
+WHERE checked.n_days = 28 AND checked.span_days = 27
+GROUP BY metric_key
+HAVING count(*) >= 21
+`
+
+type MaturityBaselinePercentilesRow struct {
+	MetricKey   string  `json:"metric_key"`
+	SampleCount int64   `json:"sample_count"`
+	P10         float64 `json:"p10"`
+	P75         float64 `json:"p75"`
+}
+
+// Week-4 baseline suggestions (SDD §4.4): over the FIRST consecutive 28 org
+// buckets (must be exactly 28 distinct days spanning 27), per metric keep only
+// ready non-null raw values; a metric needs >= 21 samples. Percentiles are
+// PostgreSQL percentile_cont — the caller never recomputes them in Go.
+func (q *Queries) MaturityBaselinePercentiles(ctx context.Context, workspaceID pgtype.UUID) ([]MaturityBaselinePercentilesRow, error) {
+	rows, err := q.db.Query(ctx, maturityBaselinePercentiles, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityBaselinePercentilesRow{}
+	for rows.Next() {
+		var i MaturityBaselinePercentilesRow
+		if err := rows.Scan(
+			&i.MetricKey,
+			&i.SampleCount,
+			&i.P10,
+			&i.P75,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const maturityBusinessProjects = `-- name: MaturityBusinessProjects :many
 SELECT id FROM project
 WHERE workspace_id = $1
@@ -65,6 +292,213 @@ func (q *Queries) MaturityBusinessProjects(ctx context.Context, workspaceID pgty
 		return nil, err
 	}
 	return items, nil
+}
+
+const maturityCROwnerResolution = `-- name: MaturityCROwnerResolution :many
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id, cr.shell_issue_id, cr.owners
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= $1::timestamptz
+        AND e.occurred_at <  $2::timestamptz
+    WHERE cr.workspace_id = $3::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT
+    a.cr_id,
+    issue.project_id,
+    count(*) FILTER (WHERE btrim(o.value->>'id') <> '')::bigint AS unresolved_owner_count
+FROM archived a
+LEFT JOIN issue ON issue.id = a.shell_issue_id AND issue.workspace_id = a.workspace_id
+CROSS JOIN LATERAL jsonb_each(COALESCE(a.owners, '{}'::jsonb)) o
+GROUP BY a.cr_id, issue.project_id
+`
+
+type MaturityCROwnerResolutionParams struct {
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+}
+
+type MaturityCROwnerResolutionRow struct {
+	CrID                 string      `json:"cr_id"`
+	ProjectID            pgtype.UUID `json:"project_id"`
+	UnresolvedOwnerCount int64       `json:"unresolved_owner_count"`
+}
+
+// One row per archived CR: how many owner entries carry a non-empty free-text
+// id. Never matches names, never casts to uuid — the values come from crctl
+// --caller and are not verifiable user identities. TASK-06 propagates a
+// non-zero count as project_collab_scale unavailable (reason
+// cr_owner_identity_unresolved) for the affected org/project scope.
+func (q *Queries) MaturityCROwnerResolution(ctx context.Context, arg MaturityCROwnerResolutionParams) ([]MaturityCROwnerResolutionRow, error) {
+	rows, err := q.db.Query(ctx, maturityCROwnerResolution, arg.FromUtc, arg.ToUtc, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityCROwnerResolutionRow{}
+	for rows.Next() {
+		var i MaturityCROwnerResolutionRow
+		if err := rows.Scan(&i.CrID, &i.ProjectID, &i.UnresolvedOwnerCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityCRUsers = `-- name: MaturityCRUsers :many
+SELECT u.cr_id, u.user_id FROM (
+    SELECT cr.cr_id AS cr_id, c.author_id AS user_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= $1::timestamptz
+        AND e.occurred_at <  $2::timestamptz
+    JOIN comment c ON c.issue_id = cr.shell_issue_id AND c.author_type = 'member'
+    JOIN member m ON m.workspace_id = cr.workspace_id AND m.user_id = c.author_id
+    WHERE cr.workspace_id = $3::uuid
+    UNION
+    SELECT cr.cr_id AS cr_id, q.initiator_user_id AS user_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= $1::timestamptz
+        AND e.occurred_at <  $2::timestamptz
+    JOIN agent_task_queue q ON (q.cr_id = cr.cr_id OR q.issue_id = cr.shell_issue_id)
+    JOIN agent a ON a.id = q.agent_id AND a.workspace_id = cr.workspace_id
+    WHERE cr.workspace_id = $3::uuid
+      AND q.initiator_user_id IS NOT NULL
+) u
+ORDER BY u.cr_id, u.user_id
+`
+
+type MaturityCRUsersParams struct {
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+}
+
+type MaturityCRUsersRow struct {
+	CrID   string      `json:"cr_id"`
+	UserID pgtype.UUID `json:"user_id"`
+}
+
+// Canonical user set per archived CR from the two verifiable sources only:
+// member comments on the shell issue, and task initiators of tasks bound to
+// the CR (the agent must belong to the same workspace — a foreign workspace
+// queue row with a colliding cr_id must not leak in). cr.owners is
+// deliberately NOT a source here: its ids are crctl free-text, handled by
+// MaturityCROwnerResolution instead.
+func (q *Queries) MaturityCRUsers(ctx context.Context, arg MaturityCRUsersParams) ([]MaturityCRUsersRow, error) {
+	rows, err := q.db.Query(ctx, maturityCRUsers, arg.FromUtc, arg.ToUtc, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityCRUsersRow{}
+	for rows.Next() {
+		var i MaturityCRUsersRow
+		if err := rows.Scan(&i.CrID, &i.UserID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityEvidenceDriftCount = `-- name: MaturityEvidenceDriftCount :one
+SELECT count(*)::bigint AS n
+FROM activity_log
+WHERE workspace_id = $1::uuid
+  AND action = 'aifirst.evidence_drift'
+  AND created_at >= $2::timestamptz
+  AND created_at <  $3::timestamptz
+`
+
+type MaturityEvidenceDriftCountParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+}
+
+func (q *Queries) MaturityEvidenceDriftCount(ctx context.Context, arg MaturityEvidenceDriftCountParams) (int64, error) {
+	row := q.db.QueryRow(ctx, maturityEvidenceDriftCount, arg.WorkspaceID, arg.FromUtc, arg.ToUtc)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
+const maturityForbiddenAttemptCount = `-- name: MaturityForbiddenAttemptCount :one
+SELECT count(*)::bigint AS n
+FROM activity_log
+WHERE workspace_id = $1::uuid
+  AND action = 'aifirst.gitguard_denied'
+  AND created_at >= $2::timestamptz
+  AND created_at <  $3::timestamptz
+`
+
+type MaturityForbiddenAttemptCountParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+}
+
+func (q *Queries) MaturityForbiddenAttemptCount(ctx context.Context, arg MaturityForbiddenAttemptCountParams) (int64, error) {
+	row := q.db.QueryRow(ctx, maturityForbiddenAttemptCount, arg.WorkspaceID, arg.FromUtc, arg.ToUtc)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
+const maturityGateFirstPass = `-- name: MaturityGateFirstPass :one
+SELECT
+    count(*)::bigint AS completed,
+    count(*) FILTER (WHERE pnr.attempt = 1 AND pnr.status = 'passed')::bigint AS first_pass
+FROM pipeline_node_run pnr
+JOIN pipeline_run pr ON pr.id = pnr.run_id
+    AND pr.workspace_id = $1::uuid
+WHERE pnr.node_id = ANY($2::uuid[])
+  AND pnr.completed_at >= $3::timestamptz
+  AND pnr.completed_at <  $4::timestamptz
+`
+
+type MaturityGateFirstPassParams struct {
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	ReviewNodeIds []pgtype.UUID      `json:"review_node_ids"`
+	FromUtc       pgtype.Timestamptz `json:"from_utc"`
+	ToUtc         pgtype.Timestamptz `json:"to_utc"`
+}
+
+type MaturityGateFirstPassRow struct {
+	Completed int64 `json:"completed"`
+	FirstPass int64 `json:"first_pass"`
+}
+
+// Governance: completed review gates in the window vs those passed on the
+// first attempt. review_node_ids scope the count to the three review gates.
+func (q *Queries) MaturityGateFirstPass(ctx context.Context, arg MaturityGateFirstPassParams) (MaturityGateFirstPassRow, error) {
+	row := q.db.QueryRow(ctx, maturityGateFirstPass,
+		arg.WorkspaceID,
+		arg.ReviewNodeIds,
+		arg.FromUtc,
+		arg.ToUtc,
+	)
+	var i MaturityGateFirstPassRow
+	err := row.Scan(&i.Completed, &i.FirstPass)
+	return i, err
 }
 
 const maturityInitiatorDistinct = `-- name: MaturityInitiatorDistinct :one
@@ -180,6 +614,129 @@ func (q *Queries) MaturityModelCostRows(ctx context.Context, arg MaturityModelCo
 			&i.UncostedCacheWriteTokens,
 			&i.UsageRows,
 			&i.AuthoritativeRows,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityPipelineCompletions = `-- name: MaturityPipelineCompletions :many
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= $1::timestamptz
+        AND e.occurred_at <  $2::timestamptz
+    WHERE cr.workspace_id = $3::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT a.cr_id, pr.pipeline_id
+FROM archived a
+JOIN pipeline_run pr ON pr.workspace_id = a.workspace_id AND pr.cr_id = a.cr_id
+WHERE pr.status = 'completed'
+`
+
+type MaturityPipelineCompletionsParams struct {
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+}
+
+type MaturityPipelineCompletionsRow struct {
+	CrID       string `json:"cr_id"`
+	PipelineID string `json:"pipeline_id"`
+}
+
+// Completed pipeline runs for CRs archived in the window; the caller checks
+// the four-pipeline set (requirement-authoring/architecture-design/
+// code-implementation/feature-writeback) for the process-completion metric.
+func (q *Queries) MaturityPipelineCompletions(ctx context.Context, arg MaturityPipelineCompletionsParams) ([]MaturityPipelineCompletionsRow, error) {
+	rows, err := q.db.Query(ctx, maturityPipelineCompletions, arg.FromUtc, arg.ToUtc, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityPipelineCompletionsRow{}
+	for rows.Next() {
+		var i MaturityPipelineCompletionsRow
+		if err := rows.Scan(&i.CrID, &i.PipelineID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityPrototypeGates = `-- name: MaturityPrototypeGates :many
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= $2::timestamptz
+        AND e.occurred_at <  $3::timestamptz
+    WHERE cr.workspace_id = $4::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT a.cr_id, pnr.node_id, pnr.attempt, pnr.status, pnr.completed_at
+FROM archived a
+JOIN pipeline_run pr ON pr.workspace_id = a.workspace_id AND pr.cr_id = a.cr_id
+JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
+    AND pnr.node_id = ANY($1::uuid[])
+`
+
+type MaturityPrototypeGatesParams struct {
+	ReviewNodeIds []pgtype.UUID      `json:"review_node_ids"`
+	FromUtc       pgtype.Timestamptz `json:"from_utc"`
+	ToUtc         pgtype.Timestamptz `json:"to_utc"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+}
+
+type MaturityPrototypeGatesRow struct {
+	CrID        string             `json:"cr_id"`
+	NodeID      pgtype.UUID        `json:"node_id"`
+	Attempt     int32              `json:"attempt"`
+	Status      string             `json:"status"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+}
+
+// Review-gate node rows for CRs archived in the window. review_node_ids come
+// from governance.ReviewGateNodes[requirement|tech-design|code] — the SQL
+// never hardcodes UUID constants. Multiple runs may yield multiple attempts
+// per gate; the caller applies the once-through (attempt=1, passed) rule.
+func (q *Queries) MaturityPrototypeGates(ctx context.Context, arg MaturityPrototypeGatesParams) ([]MaturityPrototypeGatesRow, error) {
+	rows, err := q.db.Query(ctx, maturityPrototypeGates,
+		arg.ReviewNodeIds,
+		arg.FromUtc,
+		arg.ToUtc,
+		arg.WorkspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityPrototypeGatesRow{}
+	for rows.Next() {
+		var i MaturityPrototypeGatesRow
+		if err := rows.Scan(
+			&i.CrID,
+			&i.NodeID,
+			&i.Attempt,
+			&i.Status,
+			&i.CompletedAt,
 		); err != nil {
 			return nil, err
 		}
