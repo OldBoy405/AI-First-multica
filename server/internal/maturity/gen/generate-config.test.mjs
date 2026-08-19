@@ -81,7 +81,14 @@ test('LF and CRLF sources produce byte-identical output', (t) => {
   const crlf = fixture(t, VALID.replaceAll('\n', '\r\n'));
   run(['--source', crlf], crlf);
   const b = readFileSync(OUT, 'utf8');
-  assert.equal(a, b);
+  // The two fixture repos commit in different seconds, so their HEAD SHAs
+  // differ; the emitted source-SHA lines are not part of the formatting
+  // contract (the generator's own --check strips them the same way).
+  const strip = (s) => s
+    .split('\n')
+    .filter((l) => !l.startsWith('// Source: knowledge-base@') && !l.includes('GeneratedConfigRev() string'))
+    .join('\n');
+  assert.equal(strip(a), strip(b));
 });
 
 test('missing metrics entry hard-fails naming the block', (t) => {
