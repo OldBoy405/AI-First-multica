@@ -320,3 +320,39 @@ FROM kv, checked
 WHERE checked.n_days = 28 AND checked.span_days = 27
 GROUP BY metric_key
 HAVING count(*) >= 21;
+
+-- Section 3: rollup write path (TASK-06)
+
+-- name: MaturityWorkspaces :many
+SELECT id FROM workspace ORDER BY id;
+
+-- name: MaturitySnapshotMaxBucket :one
+SELECT max(bucket_date)::date AS max_bucket
+FROM maturity_snapshot
+WHERE workspace_id = $1;
+
+-- name: MaturitySnapshotFirstBucket :one
+SELECT min(bucket_date)::date AS first_bucket
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = 'org' AND scope_id = '·';
+
+-- name: MaturitySnapshotInsert :execrows
+INSERT INTO maturity_snapshot
+    (workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (workspace_id, bucket_date, scope, scope_id) DO NOTHING;
+
+-- name: MaturityTaskDepthRows :many
+-- Task-level deep/total samples for project and user scopes (SDD §4.2 metric 7):
+-- deep = the task carries a CR or issue binding. Same tenant join and
+-- created_at window as MaturityTeamAgentCounts so org and per-scope numbers
+-- share one definition.
+SELECT
+    q.initiator_user_id,
+    COALESCE(q.project_id, issue.project_id) AS project_id,
+    (q.cr_id IS NOT NULL OR q.issue_id IS NOT NULL)::boolean AS deep
+FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id AND a.workspace_id = sqlc.arg('workspace_id')::uuid
+LEFT JOIN issue ON issue.id = q.issue_id
+WHERE q.created_at >= sqlc.arg('from_utc')::timestamptz
+  AND q.created_at <  sqlc.arg('to_utc')::timestamptz;

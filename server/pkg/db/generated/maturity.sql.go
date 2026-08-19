@@ -748,6 +748,113 @@ func (q *Queries) MaturityPrototypeGates(ctx context.Context, arg MaturityProtot
 	return items, nil
 }
 
+const maturitySnapshotFirstBucket = `-- name: MaturitySnapshotFirstBucket :one
+SELECT min(bucket_date)::date AS first_bucket
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = 'org' AND scope_id = '·'
+`
+
+func (q *Queries) MaturitySnapshotFirstBucket(ctx context.Context, workspaceID pgtype.UUID) (pgtype.Date, error) {
+	row := q.db.QueryRow(ctx, maturitySnapshotFirstBucket, workspaceID)
+	var first_bucket pgtype.Date
+	err := row.Scan(&first_bucket)
+	return first_bucket, err
+}
+
+const maturitySnapshotInsert = `-- name: MaturitySnapshotInsert :execrows
+INSERT INTO maturity_snapshot
+    (workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (workspace_id, bucket_date, scope, scope_id) DO NOTHING
+`
+
+type MaturitySnapshotInsertParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	BucketDate  pgtype.Date `json:"bucket_date"`
+	Scope       string      `json:"scope"`
+	ScopeID     string      `json:"scope_id"`
+	Metrics     []byte      `json:"metrics"`
+	Scores      []byte      `json:"scores"`
+	ConfigRev   string      `json:"config_rev"`
+}
+
+func (q *Queries) MaturitySnapshotInsert(ctx context.Context, arg MaturitySnapshotInsertParams) (int64, error) {
+	result, err := q.db.Exec(ctx, maturitySnapshotInsert,
+		arg.WorkspaceID,
+		arg.BucketDate,
+		arg.Scope,
+		arg.ScopeID,
+		arg.Metrics,
+		arg.Scores,
+		arg.ConfigRev,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const maturitySnapshotMaxBucket = `-- name: MaturitySnapshotMaxBucket :one
+SELECT max(bucket_date)::date AS max_bucket
+FROM maturity_snapshot
+WHERE workspace_id = $1
+`
+
+func (q *Queries) MaturitySnapshotMaxBucket(ctx context.Context, workspaceID pgtype.UUID) (pgtype.Date, error) {
+	row := q.db.QueryRow(ctx, maturitySnapshotMaxBucket, workspaceID)
+	var max_bucket pgtype.Date
+	err := row.Scan(&max_bucket)
+	return max_bucket, err
+}
+
+const maturityTaskDepthRows = `-- name: MaturityTaskDepthRows :many
+SELECT
+    q.initiator_user_id,
+    COALESCE(q.project_id, issue.project_id) AS project_id,
+    (q.cr_id IS NOT NULL OR q.issue_id IS NOT NULL)::boolean AS deep
+FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id AND a.workspace_id = $1::uuid
+LEFT JOIN issue ON issue.id = q.issue_id
+WHERE q.created_at >= $2::timestamptz
+  AND q.created_at <  $3::timestamptz
+`
+
+type MaturityTaskDepthRowsParams struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	FromUtc     pgtype.Timestamptz `json:"from_utc"`
+	ToUtc       pgtype.Timestamptz `json:"to_utc"`
+}
+
+type MaturityTaskDepthRowsRow struct {
+	InitiatorUserID pgtype.UUID `json:"initiator_user_id"`
+	ProjectID       pgtype.UUID `json:"project_id"`
+	Deep            bool        `json:"deep"`
+}
+
+// Task-level deep/total samples for project and user scopes (SDD §4.2 metric 7):
+// deep = the task carries a CR or issue binding. Same tenant join and
+// created_at window as MaturityTeamAgentCounts so org and per-scope numbers
+// share one definition.
+func (q *Queries) MaturityTaskDepthRows(ctx context.Context, arg MaturityTaskDepthRowsParams) ([]MaturityTaskDepthRowsRow, error) {
+	rows, err := q.db.Query(ctx, maturityTaskDepthRows, arg.WorkspaceID, arg.FromUtc, arg.ToUtc)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityTaskDepthRowsRow{}
+	for rows.Next() {
+		var i MaturityTaskDepthRowsRow
+		if err := rows.Scan(&i.InitiatorUserID, &i.ProjectID, &i.Deep); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const maturityTaskTokenRows = `-- name: MaturityTaskTokenRows :many
 SELECT
     tu.task_id,
@@ -850,4 +957,30 @@ func (q *Queries) MaturityTeamAgentCounts(ctx context.Context, arg MaturityTeamA
 	var i MaturityTeamAgentCountsRow
 	err := row.Scan(&i.Deep, &i.Total)
 	return i, err
+}
+
+const maturityWorkspaces = `-- name: MaturityWorkspaces :many
+
+SELECT id FROM workspace ORDER BY id
+`
+
+// Section 3: rollup write path (TASK-06)
+func (q *Queries) MaturityWorkspaces(ctx context.Context) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, maturityWorkspaces)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
