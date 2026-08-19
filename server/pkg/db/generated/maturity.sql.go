@@ -11,6 +11,148 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getMaturitySnapshot = `-- name: GetMaturitySnapshot :one
+
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND bucket_date = $2 AND scope = $3 AND scope_id = $4
+`
+
+type GetMaturitySnapshotParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	BucketDate  pgtype.Date `json:"bucket_date"`
+	Scope       string      `json:"scope"`
+	ScopeID     string      `json:"scope_id"`
+}
+
+// Section 4: read path (TASK-08)
+func (q *Queries) GetMaturitySnapshot(ctx context.Context, arg GetMaturitySnapshotParams) (MaturitySnapshot, error) {
+	row := q.db.QueryRow(ctx, getMaturitySnapshot,
+		arg.WorkspaceID,
+		arg.BucketDate,
+		arg.Scope,
+		arg.ScopeID,
+	)
+	var i MaturitySnapshot
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.BucketDate,
+		&i.Scope,
+		&i.ScopeID,
+		&i.Metrics,
+		&i.Scores,
+		&i.ConfigRev,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listMaturitySnapshots = `-- name: ListMaturitySnapshots :many
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2 AND scope_id = $3
+  AND bucket_date >= $4 AND bucket_date <= $5
+ORDER BY bucket_date ASC
+LIMIT $6
+`
+
+type ListMaturitySnapshotsParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	Scope        string      `json:"scope"`
+	ScopeID      string      `json:"scope_id"`
+	BucketDate   pgtype.Date `json:"bucket_date"`
+	BucketDate_2 pgtype.Date `json:"bucket_date_2"`
+	Limit        int32       `json:"limit"`
+}
+
+func (q *Queries) ListMaturitySnapshots(ctx context.Context, arg ListMaturitySnapshotsParams) ([]MaturitySnapshot, error) {
+	rows, err := q.db.Query(ctx, listMaturitySnapshots,
+		arg.WorkspaceID,
+		arg.Scope,
+		arg.ScopeID,
+		arg.BucketDate,
+		arg.BucketDate_2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturitySnapshot{}
+	for rows.Next() {
+		var i MaturitySnapshot
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.BucketDate,
+			&i.Scope,
+			&i.ScopeID,
+			&i.Metrics,
+			&i.Scores,
+			&i.ConfigRev,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMaturitySnapshotsByScope = `-- name: ListMaturitySnapshotsByScope :many
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2
+  AND bucket_date >= $3 AND bucket_date <= $4
+ORDER BY bucket_date ASC, scope_id ASC
+LIMIT $5
+`
+
+type ListMaturitySnapshotsByScopeParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	Scope        string      `json:"scope"`
+	BucketDate   pgtype.Date `json:"bucket_date"`
+	BucketDate_2 pgtype.Date `json:"bucket_date_2"`
+	Limit        int32       `json:"limit"`
+}
+
+func (q *Queries) ListMaturitySnapshotsByScope(ctx context.Context, arg ListMaturitySnapshotsByScopeParams) ([]MaturitySnapshot, error) {
+	rows, err := q.db.Query(ctx, listMaturitySnapshotsByScope,
+		arg.WorkspaceID,
+		arg.Scope,
+		arg.BucketDate,
+		arg.BucketDate_2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturitySnapshot{}
+	for rows.Next() {
+		var i MaturitySnapshot
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.BucketDate,
+			&i.Scope,
+			&i.ScopeID,
+			&i.Metrics,
+			&i.Scores,
+			&i.ConfigRev,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const maturityActiveProjectKeys14d = `-- name: MaturityActiveProjectKeys14d :many
 SELECT DISTINCT COALESCE(q.project_id, issue.project_id) AS project_id
 FROM agent_task_queue q
@@ -625,6 +767,20 @@ func (q *Queries) MaturityModelCostRows(ctx context.Context, arg MaturityModelCo
 	return items, nil
 }
 
+const maturityOrgAdminProjectID = `-- name: MaturityOrgAdminProjectID :one
+SELECT id
+FROM project
+WHERE workspace_id = $1 AND settings->>'system_key' = 'org-admin-workspace'
+LIMIT 1
+`
+
+func (q *Queries) MaturityOrgAdminProjectID(ctx context.Context, workspaceID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, maturityOrgAdminProjectID, workspaceID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const maturityPipelineCompletions = `-- name: MaturityPipelineCompletions :many
 WITH archived AS (
     SELECT DISTINCT ON (cr.cr_id)
@@ -746,6 +902,77 @@ func (q *Queries) MaturityPrototypeGates(ctx context.Context, arg MaturityProtot
 		return nil, err
 	}
 	return items, nil
+}
+
+const maturityReportHistory = `-- name: MaturityReportHistory :many
+SELECT id, completed_at, result
+FROM agent_task_queue
+WHERE project_id = $1
+  AND status = 'completed'
+  AND result->>'schema' = $4::text
+ORDER BY completed_at DESC, id DESC
+LIMIT $2 OFFSET $3
+`
+
+type MaturityReportHistoryParams struct {
+	ProjectID pgtype.UUID `json:"project_id"`
+	Limit     int32       `json:"limit"`
+	Offset    int32       `json:"offset"`
+	Schema    string      `json:"schema"`
+}
+
+type MaturityReportHistoryRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+	Result      []byte             `json:"result"`
+}
+
+func (q *Queries) MaturityReportHistory(ctx context.Context, arg MaturityReportHistoryParams) ([]MaturityReportHistoryRow, error) {
+	rows, err := q.db.Query(ctx, maturityReportHistory,
+		arg.ProjectID,
+		arg.Limit,
+		arg.Offset,
+		arg.Schema,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []MaturityReportHistoryRow{}
+	for rows.Next() {
+		var i MaturityReportHistoryRow
+		if err := rows.Scan(&i.ID, &i.CompletedAt, &i.Result); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const maturityReportLatest = `-- name: MaturityReportLatest :one
+SELECT id, completed_at, result
+FROM agent_task_queue
+WHERE project_id = $1
+  AND status = 'completed'
+  AND result->>'schema' = 'ai-first.maturity-report/v1'
+ORDER BY completed_at DESC, id DESC
+LIMIT 1
+`
+
+type MaturityReportLatestRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	CompletedAt pgtype.Timestamptz `json:"completed_at"`
+	Result      []byte             `json:"result"`
+}
+
+func (q *Queries) MaturityReportLatest(ctx context.Context, projectID pgtype.UUID) (MaturityReportLatestRow, error) {
+	row := q.db.QueryRow(ctx, maturityReportLatest, projectID)
+	var i MaturityReportLatestRow
+	err := row.Scan(&i.ID, &i.CompletedAt, &i.Result)
+	return i, err
 }
 
 const maturityRetryablePlans = `-- name: MaturityRetryablePlans :many

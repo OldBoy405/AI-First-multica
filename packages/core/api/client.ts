@@ -421,6 +421,18 @@ import {
   WorkspaceMcpServerSchema,
   ShareLinkSchema,
   ShareLinkListResponseSchema,
+  MaturityOverallResponseSchema,
+  MaturityTokenTrendResponseSchema,
+  MaturityProjectRankingsResponseSchema,
+  MaturitySuggestionResponseSchema,
+  MaturitySuggestionHistoryResponseSchema,
+  MaturityConfigResponseSchema,
+  EMPTY_MATURITY_OVERALL,
+  EMPTY_MATURITY_TOKEN_TREND,
+  EMPTY_MATURITY_RANKINGS,
+  EMPTY_MATURITY_SUGGESTIONS,
+  EMPTY_MATURITY_SUGGESTION_HISTORY,
+  EMPTY_MATURITY_CONFIG,
   ShareLinkInfoSchema,
   JoinShareLinkResponseSchema,
   EMPTY_SHARE_LINK,
@@ -430,6 +442,14 @@ import {
   type IssueViewPreference,
   type CreateIssueViewRequest,
 } from "./schemas";
+import type {
+  MaturityOverallResponse,
+  MaturityTokenTrendResponse,
+  MaturityProjectRankingsResponse,
+  MaturitySuggestionResponse,
+  MaturitySuggestionHistoryResponse,
+  MaturityConfigResponse,
+} from "../types/maturity";
 
 /** Identifies the calling client to the server.
  *  Sent on every HTTP request as X-Client-Platform / X-Client-Version /
@@ -4402,6 +4422,113 @@ export class ApiClient {
       RedeemWecomBindingTokenResponseSchema,
       EMPTY_REDEEM_WECOM_BINDING_TOKEN_RESPONSE,
       { endpoint: "POST /api/wecom/binding/redeem" },
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // AIFIRST: AI maturity dashboard (CR-2026-047 TASK-08). Read-only frozen
+  // snapshot rows and report envelopes; workspaceId is sent explicitly so the
+  // call works regardless of slug routing state.
+  // ---------------------------------------------------------------------------
+
+  private maturityHeaders(workspaceId: string): Record<string, string> {
+    return { "X-Workspace-ID": workspaceId };
+  }
+
+  async getMaturityOverall(workspaceId: string, date?: string): Promise<MaturityOverallResponse> {
+    const search = date ? `?date=${encodeURIComponent(date)}` : "";
+    const raw = await this.fetch<unknown>(`/api/maturity/overall${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturityOverallResponse>(
+      raw,
+      MaturityOverallResponseSchema,
+      EMPTY_MATURITY_OVERALL,
+      { endpoint: "GET /api/maturity/overall" },
+    );
+  }
+
+  async getMaturityTokenTrend(
+    workspaceId: string,
+    params: { dimension: "project" | "user" | "model"; dimension_id?: string; from?: string; to?: string; include_cost?: boolean },
+  ): Promise<MaturityTokenTrendResponse> {
+    const search = new URLSearchParams();
+    search.set("dimension", params.dimension);
+    if (params.dimension_id) search.set("dimension_id", params.dimension_id);
+    if (params.from) search.set("from", params.from);
+    if (params.to) search.set("to", params.to);
+    if (params.include_cost) search.set("include_cost", "true");
+    const raw = await this.fetch<unknown>(`/api/maturity/token-trend?${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturityTokenTrendResponse>(
+      raw,
+      MaturityTokenTrendResponseSchema,
+      EMPTY_MATURITY_TOKEN_TREND,
+      { endpoint: "GET /api/maturity/token-trend" },
+    );
+  }
+
+  async getMaturityRankings(
+    workspaceId: string,
+    params: { date?: string; metric?: string; limit?: number; cursor?: string },
+  ): Promise<MaturityProjectRankingsResponse> {
+    const search = new URLSearchParams();
+    search.set("scope", "project");
+    if (params.date) search.set("date", params.date);
+    if (params.metric) search.set("metric", params.metric);
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+    const raw = await this.fetch<unknown>(`/api/maturity/rankings?${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturityProjectRankingsResponse>(
+      raw,
+      MaturityProjectRankingsResponseSchema,
+      EMPTY_MATURITY_RANKINGS,
+      { endpoint: "GET /api/maturity/rankings" },
+    );
+  }
+
+  async getMaturitySuggestions(workspaceId: string): Promise<MaturitySuggestionResponse> {
+    const raw = await this.fetch<unknown>(`/api/maturity/suggestions`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturitySuggestionResponse>(
+      raw,
+      MaturitySuggestionResponseSchema,
+      EMPTY_MATURITY_SUGGESTIONS,
+      { endpoint: "GET /api/maturity/suggestions" },
+    );
+  }
+
+  async getMaturitySuggestionHistory(
+    workspaceId: string,
+    params: { limit?: number; cursor?: string },
+  ): Promise<MaturitySuggestionHistoryResponse> {
+    const search = new URLSearchParams();
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+    const raw = await this.fetch<unknown>(`/api/maturity/suggestions/history?${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturitySuggestionHistoryResponse>(
+      raw,
+      MaturitySuggestionHistoryResponseSchema,
+      EMPTY_MATURITY_SUGGESTION_HISTORY,
+      { endpoint: "GET /api/maturity/suggestions/history" },
+    );
+  }
+
+  async getMaturityConfig(workspaceId: string): Promise<MaturityConfigResponse> {
+    const raw = await this.fetch<unknown>(`/api/maturity/config`, {
+      headers: this.maturityHeaders(workspaceId),
+    });
+    return parseWithFallback<MaturityConfigResponse>(
+      raw,
+      MaturityConfigResponseSchema,
+      EMPTY_MATURITY_CONFIG,
+      { endpoint: "GET /api/maturity/config" },
     );
   }
 }

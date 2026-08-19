@@ -76,6 +76,12 @@ import type {
   User,
   WebhookDelivery,
   WorkspaceMcpServer,
+  MaturityOverallResponse,
+  MaturityTokenTrendResponse,
+  MaturityProjectRankingsResponse,
+  MaturitySuggestionResponse,
+  MaturitySuggestionHistoryResponse,
+  MaturityConfigResponse,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
@@ -3068,4 +3074,197 @@ export const EMPTY_JOIN_SHARE_LINK_RESPONSE: {
   },
   workspace_id: "",
   workspace_slug: "",
+};
+
+// ---------------------------------------------------------------------------
+// AIFIRST: AI maturity dashboard responses (CR-2026-047 TASK-08). Lenient
+// like the rest of this file: string enums degrade to fallback values, nulls
+// stay null, unknown fields pass through via .loose().
+// ---------------------------------------------------------------------------
+
+const MaturityMetricValueSchema = z.object({
+  value: z.number().nullable().default(null),
+  numerator: z.number().nullable().default(null),
+  denominator: z.number().nullable().default(null),
+  unit: z.string().default(""),
+  data_status: z.string().default("unavailable"),
+  reason: z.string().nullable().default(null),
+  attribution: z
+    .object({
+      attributed_count: z.number().default(0),
+      unattributed_count: z.number().default(0),
+      coverage: z.number().nullable().default(null),
+    })
+    .nullable()
+    .default(null),
+}).loose();
+
+const MaturityReportSchema = z.object({
+  report_key: z.string().default(""),
+  week: z.string().default(""),
+  generated_at: z.string().default(""),
+  relative_path: z.string().default(""),
+  markdown: z.string().default(""),
+  content_sha256: z.string().default(""),
+  source_task_id: z.string().default(""),
+  chat_session_id: z.string().default(""),
+  config_revs: z.array(z.string()).default([]),
+}).loose();
+
+const MaturityObservationSchema = z.object({
+  active: z.boolean().default(false),
+  calibration_status: z.string().default("observing"),
+  observation_weeks: z.number().default(4),
+  first_bucket_date: z.string().default(""),
+  elapsed_days: z.number().default(0),
+}).loose();
+
+const MaturityHeadlineSchema = z.object({
+  active_members: z.number().default(0),
+  total_tokens: z.number().default(0),
+  cost_usd: z.number().nullable().default(null),
+  cost_status: z.string().default("unavailable"),
+}).loose();
+
+const MaturityDimensionSchema = z.object({
+  key: z.string().default(""),
+  score: z.number().nullable().default(null),
+  data_status: z.string().default("empty"),
+  metrics: z
+    .array(
+      z.object({
+        key: z.string().default(""),
+        raw: MaturityMetricValueSchema,
+        score: z.number().nullable().default(null),
+      }).loose(),
+    )
+    .default([]),
+}).loose();
+
+export const MaturityOverallResponseSchema = z.object({
+  bucket_date: z.string().nullable().default(null),
+  config_rev: z.string().nullable().default(null),
+  observation: MaturityObservationSchema.nullable().default(null),
+  headline: MaturityHeadlineSchema.nullable().default(null),
+  total_score: z.number().nullable().default(null),
+  dimensions: z.array(MaturityDimensionSchema).default([]),
+  governance: z
+    .array(z.object({ key: z.string().default(""), datum: MaturityMetricValueSchema }).loose())
+    .default([]),
+  data_status: z.string().default("empty"),
+}).loose();
+
+const MaturityTrendPointSchema = z.object({
+  date: z.string().default(""),
+  tokens: z.number().default(0),
+  cost_usd: z.number().nullable().default(null),
+  cost_status: z.string().default("unavailable"),
+}).loose();
+
+export const MaturityTokenTrendResponseSchema = z.object({
+  dimension: z.string().default("project"),
+  from: z.string().default(""),
+  to: z.string().default(""),
+  series: z
+    .array(
+      z.object({
+        id: z.string().default(""),
+        label: z.string().default(""),
+        points: z.array(MaturityTrendPointSchema).default([]),
+      }).loose(),
+    )
+    .default([]),
+  data_status: z.string().default("empty"),
+}).loose();
+
+export const MaturityProjectRankingsResponseSchema = z.object({
+  scope: z.string().default("project"),
+  bucket_date: z.string().nullable().default(null),
+  metric: z.string().default("total"),
+  items: z
+    .array(
+      z.object({
+        rank: z.number().default(0),
+        project_id: z.string().default(""),
+        project_name: z.string().default(""),
+        value: z.number().nullable().default(null),
+        data_status: z.string().default("unavailable"),
+      }).loose(),
+    )
+    .default([]),
+  next_cursor: z.string().nullable().default(null),
+  data_status: z.string().default("empty"),
+}).loose();
+
+export const MaturitySuggestionResponseSchema = z.object({
+  latest: MaturityReportSchema.nullable().default(null),
+  data_status: z.string().default("empty"),
+}).loose();
+
+export const MaturitySuggestionHistoryResponseSchema = z.object({
+  items: z.array(MaturityReportSchema).default([]),
+  next_cursor: z.string().nullable().default(null),
+  data_status: z.string().default("empty"),
+}).loose();
+
+export const MaturityConfigResponseSchema = z.object({
+  config_rev: z.string().default(""),
+  observation_weeks: z.number().default(4),
+  calibration_status: z.string().default("observing"),
+  dimensions: z
+    .array(z.object({ key: z.string().default(""), metrics: z.array(z.string()).default([]) }).loose())
+    .default([]),
+  metrics: z
+    .array(
+      z.object({
+        key: z.string().default(""),
+        weight: z.number().default(0),
+        floor: z.number().default(0),
+        target: z.number().default(1),
+        unit: z.string().default(""),
+        known_gameability: z.string().default(""),
+      }).loose(),
+    )
+    .default([]),
+  price_config_rev: z.string().nullable().default(null),
+}).loose();
+
+export const EMPTY_MATURITY_OVERALL: MaturityOverallResponse = {
+  bucket_date: null,
+  config_rev: null,
+  observation: null,
+  headline: null,
+  total_score: null,
+  dimensions: [],
+  governance: [],
+  data_status: "empty",
+};
+export const EMPTY_MATURITY_TOKEN_TREND: MaturityTokenTrendResponse = {
+  dimension: "project",
+  from: "",
+  to: "",
+  series: [],
+  data_status: "empty",
+};
+export const EMPTY_MATURITY_RANKINGS: MaturityProjectRankingsResponse = {
+  scope: "project",
+  bucket_date: null,
+  metric: "total",
+  items: [],
+  next_cursor: null,
+  data_status: "empty",
+};
+export const EMPTY_MATURITY_SUGGESTIONS: MaturitySuggestionResponse = { latest: null, data_status: "empty" };
+export const EMPTY_MATURITY_SUGGESTION_HISTORY: MaturitySuggestionHistoryResponse = {
+  items: [],
+  next_cursor: null,
+  data_status: "empty",
+};
+export const EMPTY_MATURITY_CONFIG: MaturityConfigResponse = {
+  config_rev: "",
+  observation_weeks: 4,
+  calibration_status: "observing",
+  dimensions: [],
+  metrics: [],
+  price_config_rev: null,
 };

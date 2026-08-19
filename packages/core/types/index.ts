@@ -303,3 +303,17 @@ export type {
   WorkspaceSubscriptionSeatReconcileResult,
   CreateWorkspaceSubscriptionPortalResponse,
 } from "./billing";
+
+export type {
+  MaturityDataStatus,
+  MaturityMetricValue,
+  MaturityReport,
+  MaturityObservation,
+  MaturityHeadline,
+  MaturityOverallResponse,
+  MaturityTokenTrendResponse,
+  MaturityProjectRankingsResponse,
+  MaturitySuggestionResponse,
+  MaturitySuggestionHistoryResponse,
+  MaturityConfigResponse,
+} from "./maturity";

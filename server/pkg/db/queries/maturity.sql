@@ -372,3 +372,50 @@ WHERE job_name = 'maturity_snapshot'
   AND plan_time > $2
 ORDER BY plan_time ASC
 LIMIT 7;
+
+-- Section 4: read path (TASK-08)
+
+-- name: GetMaturitySnapshot :one
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND bucket_date = $2 AND scope = $3 AND scope_id = $4;
+
+-- name: ListMaturitySnapshots :many
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2 AND scope_id = $3
+  AND bucket_date >= $4 AND bucket_date <= $5
+ORDER BY bucket_date ASC
+LIMIT $6;
+
+-- name: MaturityOrgAdminProjectID :one
+SELECT id
+FROM project
+WHERE workspace_id = $1 AND settings->>'system_key' = 'org-admin-workspace'
+LIMIT 1;
+
+-- name: MaturityReportHistory :many
+SELECT id, completed_at, result
+FROM agent_task_queue
+WHERE project_id = $1
+  AND status = 'completed'
+  AND result->>'schema' = sqlc.arg('schema')::text
+ORDER BY completed_at DESC, id DESC
+LIMIT $2 OFFSET $3;
+
+-- name: MaturityReportLatest :one
+SELECT id, completed_at, result
+FROM agent_task_queue
+WHERE project_id = $1
+  AND status = 'completed'
+  AND result->>'schema' = 'ai-first.maturity-report/v1'
+ORDER BY completed_at DESC, id DESC
+LIMIT 1;
+
+-- name: ListMaturitySnapshotsByScope :many
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2
+  AND bucket_date >= $3 AND bucket_date <= $4
+ORDER BY bucket_date ASC, scope_id ASC
+LIMIT $5;

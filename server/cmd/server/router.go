@@ -1966,6 +1966,19 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/failures/by-agent", h.GetDashboardFailuresByAgent)
 			})
 
+			// AIFIRST: AI maturity dashboard reads (CR-2026-047 TASK-08).
+			// All six endpoints only read frozen snapshot rows and report
+			// envelopes; membership is enforced per handler (workspace comes
+			// from the X-Workspace-ID header).
+			r.Route("/api/maturity", func(r chi.Router) {
+				r.Get("/overall", h.GetMaturityOverall)
+				r.Get("/token-trend", h.GetMaturityTokenTrend)
+				r.Get("/rankings", h.GetMaturityRankings)
+				r.Get("/suggestions", h.GetMaturitySuggestions)
+				r.Get("/suggestions/history", h.GetMaturitySuggestionHistory)
+				r.Get("/config", h.GetMaturityConfig)
+			})
+
 			// Runtimes
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
