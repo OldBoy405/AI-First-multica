@@ -1888,6 +1888,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// cannot mint an agent carrying `system_key` and thereby claim
 				// the system instruction layer. Idempotent per workspace.
 				r.Post("/mika", h.CreateMikaAgent)
+				// AIFIRST: Org Admin workspace bootstrap (CR-2026-047 TASK-10).
+				// Server-owned, idempotent, Owner/Admin only.
+				r.Post("/org-admin", h.CreateOrgAdminAgent)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAgent)
 					r.Put("/", h.UpdateAgent)

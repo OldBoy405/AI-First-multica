@@ -427,6 +427,8 @@ import {
   MaturitySuggestionResponseSchema,
   MaturitySuggestionHistoryResponseSchema,
   MaturityConfigResponseSchema,
+  OrgAdminResponseSchema,
+  EMPTY_ORG_ADMIN_RESPONSE,
   EMPTY_MATURITY_OVERALL,
   EMPTY_MATURITY_TOKEN_TREND,
   EMPTY_MATURITY_RANKINGS,
@@ -450,6 +452,7 @@ import type {
   MaturitySuggestionHistoryResponse,
   MaturityConfigResponse,
 } from "../types/maturity";
+import type { OrgAdminResponse } from "../types/org-admin";
 
 /** Identifies the calling client to the server.
  *  Sent on every HTTP request as X-Client-Platform / X-Client-Version /
@@ -4518,6 +4521,17 @@ export class ApiClient {
       EMPTY_MATURITY_SUGGESTION_HISTORY,
       { endpoint: "GET /api/maturity/suggestions/history" },
     );
+  }
+
+  async ensureOrgAdminWorkspace(workspaceId: string, runtimeId: string): Promise<OrgAdminResponse> {
+    const raw = await this.fetch<unknown>(`/api/agents/org-admin`, {
+      method: "POST",
+      headers: this.maturityHeaders(workspaceId),
+      body: JSON.stringify({ runtime_id: runtimeId }),
+    });
+    return parseWithFallback<OrgAdminResponse>(raw, OrgAdminResponseSchema, EMPTY_ORG_ADMIN_RESPONSE, {
+      endpoint: "POST /api/agents/org-admin",
+    });
   }
 
   async getMaturityConfig(workspaceId: string): Promise<MaturityConfigResponse> {

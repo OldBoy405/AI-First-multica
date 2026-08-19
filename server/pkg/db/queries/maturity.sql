@@ -419,3 +419,17 @@ WHERE workspace_id = $1 AND scope = $2
   AND bucket_date >= $3 AND bucket_date <= $4
 ORDER BY bucket_date ASC, scope_id ASC
 LIMIT $5;
+
+-- Section 5: Org Admin + weekly report (TASK-10)
+
+-- name: MaturityOrgAdminAutopilot :one
+SELECT *
+FROM autopilot
+WHERE workspace_id = $1 AND project_id = $2 AND title = 'AI Maturity Weekly Report'
+LIMIT 1;
+
+-- name: MaturityOrgAdminScheduleTrigger :one
+SELECT *
+FROM autopilot_trigger
+WHERE autopilot_id = $1 AND kind = 'schedule'
+LIMIT 1;

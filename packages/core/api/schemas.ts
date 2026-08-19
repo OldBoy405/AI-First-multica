@@ -3229,6 +3229,20 @@ export const MaturityConfigResponseSchema = z.object({
   price_config_rev: z.string().nullable().default(null),
 }).loose();
 
+export const OrgAdminResponseSchema = z.object({
+  project_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  autopilot_id: z.string().default(""),
+  trigger_id: z.string().default(""),
+}).loose();
+
+export const EMPTY_ORG_ADMIN_RESPONSE = {
+  project_id: "",
+  agent_id: "",
+  autopilot_id: "",
+  trigger_id: "",
+};
+
 export const EMPTY_MATURITY_OVERALL: MaturityOverallResponse = {
   bucket_date: null,
   config_rev: null,

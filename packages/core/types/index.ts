@@ -317,3 +317,5 @@ export type {
   MaturitySuggestionHistoryResponse,
   MaturityConfigResponse,
 } from "./maturity";
+
+export type { OrgAdminResponse } from "./org-admin";

@@ -767,6 +767,44 @@ func (q *Queries) MaturityModelCostRows(ctx context.Context, arg MaturityModelCo
 	return items, nil
 }
 
+const maturityOrgAdminAutopilot = `-- name: MaturityOrgAdminAutopilot :one
+
+SELECT id, workspace_id, title, description, assignee_id, status, execution_mode, issue_title_template, created_by_type, created_by_id, last_run_at, created_at, updated_at, assignee_type, project_id, pause_reason
+FROM autopilot
+WHERE workspace_id = $1 AND project_id = $2 AND title = 'AI Maturity Weekly Report'
+LIMIT 1
+`
+
+type MaturityOrgAdminAutopilotParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ProjectID   pgtype.UUID `json:"project_id"`
+}
+
+// Section 5: Org Admin + weekly report (TASK-10)
+func (q *Queries) MaturityOrgAdminAutopilot(ctx context.Context, arg MaturityOrgAdminAutopilotParams) (Autopilot, error) {
+	row := q.db.QueryRow(ctx, maturityOrgAdminAutopilot, arg.WorkspaceID, arg.ProjectID)
+	var i Autopilot
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.AssigneeID,
+		&i.Status,
+		&i.ExecutionMode,
+		&i.IssueTitleTemplate,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.LastRunAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.AssigneeType,
+		&i.ProjectID,
+		&i.PauseReason,
+	)
+	return i, err
+}
+
 const maturityOrgAdminProjectID = `-- name: MaturityOrgAdminProjectID :one
 SELECT id
 FROM project
@@ -779,6 +817,38 @@ func (q *Queries) MaturityOrgAdminProjectID(ctx context.Context, workspaceID pgt
 	var id pgtype.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const maturityOrgAdminScheduleTrigger = `-- name: MaturityOrgAdminScheduleTrigger :one
+SELECT id, autopilot_id, kind, enabled, cron_expression, timezone, next_run_at, webhook_token, label, last_fired_at, created_at, updated_at, provider, signing_secret, event_filters, published_by_type, published_by_id
+FROM autopilot_trigger
+WHERE autopilot_id = $1 AND kind = 'schedule'
+LIMIT 1
+`
+
+func (q *Queries) MaturityOrgAdminScheduleTrigger(ctx context.Context, autopilotID pgtype.UUID) (AutopilotTrigger, error) {
+	row := q.db.QueryRow(ctx, maturityOrgAdminScheduleTrigger, autopilotID)
+	var i AutopilotTrigger
+	err := row.Scan(
+		&i.ID,
+		&i.AutopilotID,
+		&i.Kind,
+		&i.Enabled,
+		&i.CronExpression,
+		&i.Timezone,
+		&i.NextRunAt,
+		&i.WebhookToken,
+		&i.Label,
+		&i.LastFiredAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Provider,
+		&i.SigningSecret,
+		&i.EventFilters,
+		&i.PublishedByType,
+		&i.PublishedByID,
+	)
+	return i, err
 }
 
 const maturityPipelineCompletions = `-- name: MaturityPipelineCompletions :many
