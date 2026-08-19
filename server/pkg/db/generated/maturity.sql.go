@@ -748,6 +748,48 @@ func (q *Queries) MaturityPrototypeGates(ctx context.Context, arg MaturityProtot
 	return items, nil
 }
 
+const maturityRetryablePlans = `-- name: MaturityRetryablePlans :many
+SELECT plan_time
+FROM sys_cron_executions
+WHERE job_name = 'maturity_snapshot'
+  AND scope_kind = 'global'
+  AND scope_id = 'global'
+  AND status = 'FAILED'
+  AND attempt < max_attempts
+  AND next_retry_at <= $1
+  AND plan_time > $2
+ORDER BY plan_time ASC
+LIMIT 7
+`
+
+type MaturityRetryablePlansParams struct {
+	NextRetryAt pgtype.Timestamptz `json:"next_retry_at"`
+	PlanTime    pgtype.Timestamptz `json:"plan_time"`
+}
+
+// Retry-eligible FAILED maturity_snapshot plans inside the 7-day window,
+// oldest first. The hook merges these with fresh cron occurrences so an
+// older failed plan is never stranded behind a newer success.
+func (q *Queries) MaturityRetryablePlans(ctx context.Context, arg MaturityRetryablePlansParams) ([]pgtype.Timestamptz, error) {
+	rows, err := q.db.Query(ctx, maturityRetryablePlans, arg.NextRetryAt, arg.PlanTime)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.Timestamptz{}
+	for rows.Next() {
+		var plan_time pgtype.Timestamptz
+		if err := rows.Scan(&plan_time); err != nil {
+			return nil, err
+		}
+		items = append(items, plan_time)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const maturitySnapshotFirstBucket = `-- name: MaturitySnapshotFirstBucket :one
 SELECT min(bucket_date)::date AS first_bucket
 FROM maturity_snapshot

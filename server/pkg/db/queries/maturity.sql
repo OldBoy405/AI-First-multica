@@ -356,3 +356,19 @@ JOIN agent a ON a.id = q.agent_id AND a.workspace_id = sqlc.arg('workspace_id'):
 LEFT JOIN issue ON issue.id = q.issue_id
 WHERE q.created_at >= sqlc.arg('from_utc')::timestamptz
   AND q.created_at <  sqlc.arg('to_utc')::timestamptz;
+
+-- name: MaturityRetryablePlans :many
+-- Retry-eligible FAILED maturity_snapshot plans inside the 7-day window,
+-- oldest first. The hook merges these with fresh cron occurrences so an
+-- older failed plan is never stranded behind a newer success.
+SELECT plan_time
+FROM sys_cron_executions
+WHERE job_name = 'maturity_snapshot'
+  AND scope_kind = 'global'
+  AND scope_id = 'global'
+  AND status = 'FAILED'
+  AND attempt < max_attempts
+  AND next_retry_at <= $1
+  AND plan_time > $2
+ORDER BY plan_time ASC
+LIMIT 7;

@@ -593,6 +593,12 @@ func main() {
 	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
 		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
 	}
+	// AIFIRST: maturity snapshot rollup (CR-2026-047 TASK-07). Hook-driven
+	// planning for the daily 00:30 Asia/Shanghai grid; catch-up and retry
+	// compensation live entirely inside maturityPlansForScope.
+	if err := schedulerMgr.Register(scheduler.MaturitySnapshotJob(pool)); err != nil {
+		slog.Warn("scheduler: failed to register maturity_snapshot job", "error", err)
+	}
 	// AIFIRST: server-mode CR reconcile (CR-2026-002 TASK-07). Mounted only when
 	// REMOTE_RECONCILE_MODE=server with a usable GitHub remote; a broken
 	// server-mode config refuses startup (fail loudly, not silently unguarded).
