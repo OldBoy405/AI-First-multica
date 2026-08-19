@@ -11,7 +11,8 @@
     "usage": "统计",
     "runtimes": "运行时",
     "skills": "Skills",
-    "settings": "设置"
+    "settings": "设置",
+    "maturity": "AI 成熟度"
   },
   "tab": {
     "issue": "任务",

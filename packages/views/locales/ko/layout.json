@@ -11,7 +11,8 @@
     "usage": "분석",
     "runtimes": "런타임",
     "skills": "스킬",
-    "settings": "설정"
+    "settings": "설정",
+    "maturity": "AI 성숙도"
   },
   "tab": {
     "issue": "태스크",
