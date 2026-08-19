@@ -92,3 +92,231 @@ WHERE tu.created_at >= sqlc.arg('from_utc')::timestamptz
   AND tu.created_at <  sqlc.arg('to_utc')::timestamptz
 GROUP BY LOWER(tu.provider), tu.model
 ORDER BY LOWER(tu.provider), tu.model;
+-- Section 2: CR/pipeline metrics and governance guardrails (TASK-05)
+
+-- name: MaturityArchivedCRs :many
+-- CRs that first entered "archived" inside [from_utc, to_utc), with their
+-- canonical project mapping (shell issue -> issue.project_id, workspace
+-- checked). A CR whose shell issue is missing/cross-workspace stays org-only
+-- (project_id NULL). Same-day duplicate events collapse to the earliest.
+SELECT DISTINCT ON (cr.cr_id)
+    cr.cr_id,
+    e.occurred_at AS archived_at,
+    issue.project_id
+FROM cr
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    AND e.event_kind = 'status'
+    AND e.payload->>'to_status' = 'archived'
+    AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+    AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+LEFT JOIN issue ON issue.id = cr.shell_issue_id AND issue.workspace_id = cr.workspace_id
+WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY cr.cr_id, e.occurred_at ASC;
+
+-- name: MaturityCRUsers :many
+-- Canonical user set per archived CR from the two verifiable sources only:
+-- member comments on the shell issue, and task initiators of tasks bound to
+-- the CR (the agent must belong to the same workspace — a foreign workspace
+-- queue row with a colliding cr_id must not leak in). cr.owners is
+-- deliberately NOT a source here: its ids are crctl free-text, handled by
+-- MaturityCROwnerResolution instead.
+SELECT u.cr_id, u.user_id FROM (
+    SELECT cr.cr_id AS cr_id, c.author_id AS user_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+        AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+    JOIN comment c ON c.issue_id = cr.shell_issue_id AND c.author_type = 'member'
+    JOIN member m ON m.workspace_id = cr.workspace_id AND m.user_id = c.author_id
+    WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+    UNION
+    SELECT cr.cr_id AS cr_id, q.initiator_user_id AS user_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+        AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+    JOIN agent_task_queue q ON (q.cr_id = cr.cr_id OR q.issue_id = cr.shell_issue_id)
+    JOIN agent a ON a.id = q.agent_id AND a.workspace_id = cr.workspace_id
+    WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+      AND q.initiator_user_id IS NOT NULL
+) u
+ORDER BY u.cr_id, u.user_id;
+
+-- name: MaturityCROwnerResolution :many
+-- One row per archived CR: how many owner entries carry a non-empty free-text
+-- id. Never matches names, never casts to uuid — the values come from crctl
+-- --caller and are not verifiable user identities. TASK-06 propagates a
+-- non-zero count as project_collab_scale unavailable (reason
+-- cr_owner_identity_unresolved) for the affected org/project scope.
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id, cr.shell_issue_id, cr.owners
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+        AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+    WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT
+    a.cr_id,
+    issue.project_id,
+    count(*) FILTER (WHERE btrim(o.value->>'id') <> '')::bigint AS unresolved_owner_count
+FROM archived a
+LEFT JOIN issue ON issue.id = a.shell_issue_id AND issue.workspace_id = a.workspace_id
+CROSS JOIN LATERAL jsonb_each(COALESCE(a.owners, '{}'::jsonb)) o
+GROUP BY a.cr_id, issue.project_id;
+
+-- name: MaturityActiveProjectKeys14d :many
+-- Distinct business projects with task activity or CR status events in
+-- [from_utc, to_utc). Org Admin system projects are excluded by the
+-- business-projects filter in the caller (this query returns raw keys).
+SELECT DISTINCT COALESCE(q.project_id, issue.project_id) AS project_id
+FROM agent_task_queue q
+JOIN agent a ON a.id = q.agent_id AND a.workspace_id = sqlc.arg('workspace_id')::uuid
+LEFT JOIN issue ON issue.id = q.issue_id
+WHERE q.created_at >= sqlc.arg('from_utc')::timestamptz
+  AND q.created_at <  sqlc.arg('to_utc')::timestamptz
+  AND COALESCE(q.project_id, issue.project_id) IS NOT NULL
+UNION
+SELECT DISTINCT issue.project_id
+FROM cr
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    AND e.event_kind = 'status'
+    AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+    AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+LEFT JOIN issue ON issue.id = cr.shell_issue_id AND issue.workspace_id = cr.workspace_id
+WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+  AND issue.project_id IS NOT NULL;
+
+-- name: MaturityPrototypeGates :many
+-- Review-gate node rows for CRs archived in the window. review_node_ids come
+-- from governance.ReviewGateNodes[requirement|tech-design|code] — the SQL
+-- never hardcodes UUID constants. Multiple runs may yield multiple attempts
+-- per gate; the caller applies the once-through (attempt=1, passed) rule.
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+        AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+    WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT a.cr_id, pnr.node_id, pnr.attempt, pnr.status, pnr.completed_at
+FROM archived a
+JOIN pipeline_run pr ON pr.workspace_id = a.workspace_id AND pr.cr_id = a.cr_id
+JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
+    AND pnr.node_id = ANY(sqlc.arg('review_node_ids')::uuid[]);
+
+-- name: MaturityPipelineCompletions :many
+-- Completed pipeline runs for CRs archived in the window; the caller checks
+-- the four-pipeline set (requirement-authoring/architecture-design/
+-- code-implementation/feature-writeback) for the process-completion metric.
+WITH archived AS (
+    SELECT DISTINCT ON (cr.cr_id)
+        cr.cr_id, cr.workspace_id
+    FROM cr
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+        AND e.event_kind = 'status'
+        AND e.payload->>'to_status' = 'archived'
+        AND e.occurred_at >= sqlc.arg('from_utc')::timestamptz
+        AND e.occurred_at <  sqlc.arg('to_utc')::timestamptz
+    WHERE cr.workspace_id = sqlc.arg('workspace_id')::uuid
+    ORDER BY cr.cr_id, e.occurred_at ASC
+)
+SELECT a.cr_id, pr.pipeline_id
+FROM archived a
+JOIN pipeline_run pr ON pr.workspace_id = a.workspace_id AND pr.cr_id = a.cr_id
+WHERE pr.status = 'completed';
+
+-- name: MaturityGateFirstPass :one
+-- Governance: completed review gates in the window vs those passed on the
+-- first attempt. review_node_ids scope the count to the three review gates.
+SELECT
+    count(*)::bigint AS completed,
+    count(*) FILTER (WHERE pnr.attempt = 1 AND pnr.status = 'passed')::bigint AS first_pass
+FROM pipeline_node_run pnr
+JOIN pipeline_run pr ON pr.id = pnr.run_id
+    AND pr.workspace_id = sqlc.arg('workspace_id')::uuid
+WHERE pnr.node_id = ANY(sqlc.arg('review_node_ids')::uuid[])
+  AND pnr.completed_at >= sqlc.arg('from_utc')::timestamptz
+  AND pnr.completed_at <  sqlc.arg('to_utc')::timestamptz;
+
+-- name: MaturityEvidenceDriftCount :one
+SELECT count(*)::bigint AS n
+FROM activity_log
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+  AND action = 'aifirst.evidence_drift'
+  AND created_at >= sqlc.arg('from_utc')::timestamptz
+  AND created_at <  sqlc.arg('to_utc')::timestamptz;
+
+-- name: MaturityForbiddenAttemptCount :one
+SELECT count(*)::bigint AS n
+FROM activity_log
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+  AND action = 'aifirst.gitguard_denied'
+  AND created_at >= sqlc.arg('from_utc')::timestamptz
+  AND created_at <  sqlc.arg('to_utc')::timestamptz;
+
+-- name: MaturityApprovalLatencies :many
+-- One positive latency sample per approval decision: the latest completed
+-- review node of that stage before approval_record.created_at. Only approve
+-- decisions count (SDD §4.3).
+SELECT DISTINCT ON (ar.id)
+    ar.stage,
+    (extract(epoch FROM (ar.created_at - pnr.completed_at)) * 1000)::bigint AS latency_ms
+FROM approval_record ar
+JOIN pipeline_run pr ON pr.workspace_id = ar.workspace_id AND pr.cr_id = ar.cr_id
+JOIN pipeline_node_run pnr ON pnr.run_id = pr.id
+    AND pnr.node_id = ANY(sqlc.arg('review_node_ids')::uuid[])
+    AND pnr.completed_at IS NOT NULL
+    AND pnr.completed_at < ar.created_at
+WHERE ar.workspace_id = sqlc.arg('workspace_id')::uuid
+  AND ar.decision = 'approve'
+  AND ar.created_at >= sqlc.arg('from_utc')::timestamptz
+  AND ar.created_at <  sqlc.arg('to_utc')::timestamptz
+ORDER BY ar.id, pnr.completed_at DESC;
+
+-- name: MaturityBaselinePercentiles :many
+-- Week-4 baseline suggestions (SDD §4.4): over the FIRST consecutive 28 org
+-- buckets (must be exactly 28 distinct days spanning 27), per metric keep only
+-- ready non-null raw values; a metric needs >= 21 samples. Percentiles are
+-- PostgreSQL percentile_cont — the caller never recomputes them in Go.
+WITH first28 AS (
+    SELECT bucket_date, metrics
+    FROM maturity_snapshot
+    WHERE workspace_id = $1 AND scope = 'org' AND scope_id = '·'
+    ORDER BY bucket_date ASC
+    LIMIT 28
+),
+checked AS (
+    SELECT
+        count(DISTINCT bucket_date) AS n_days,
+        max(bucket_date) - min(bucket_date) AS span_days
+    FROM first28
+),
+kv AS (
+    SELECT j.key::text AS metric_key, (j.value->>'value')::float8 AS value
+    FROM first28, LATERAL jsonb_each(metrics->'metric_values') AS j(key, value)
+    WHERE j.value->>'data_status' = 'ready'
+      AND j.value->>'value' IS NOT NULL
+)
+SELECT
+    metric_key,
+    count(*)::bigint AS sample_count,
+    percentile_cont(0.10) WITHIN GROUP (ORDER BY value) AS p10,
+    percentile_cont(0.75) WITHIN GROUP (ORDER BY value) AS p75
+FROM kv, checked
+WHERE checked.n_days = 28 AND checked.span_days = 27
+GROUP BY metric_key
+HAVING count(*) >= 21;

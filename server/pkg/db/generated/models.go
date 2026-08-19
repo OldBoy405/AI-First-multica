@@ -948,6 +948,17 @@ type LarkUserBinding struct {
 	BoundAt        pgtype.Timestamptz `json:"bound_at"`
 }
 
+type MaturitySnapshot struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	BucketDate  pgtype.Date        `json:"bucket_date"`
+	Scope       string             `json:"scope"`
+	ScopeID     string             `json:"scope_id"`
+	Metrics     []byte             `json:"metrics"`
+	Scores      []byte             `json:"scores"`
+	ConfigRev   string             `json:"config_rev"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Member struct {
 	ID          pgtype.UUID        `json:"id"`
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
