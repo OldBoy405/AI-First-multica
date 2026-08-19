@@ -33,7 +33,16 @@ func newMaturityTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Skipf("database unreachable: %v", err)
 	}
-	t.Cleanup(pool.Close)
+	// The tests seed fixed plan_times; leftover rows from earlier runs would
+	// pollute the retry-eligible scan.
+	if _, err := pool.Exec(ctx, `DELETE FROM sys_cron_executions WHERE job_name = 'maturity_snapshot'`); err != nil {
+		pool.Close()
+		t.Skipf("sys_cron_executions unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM sys_cron_executions WHERE job_name = 'maturity_snapshot'`)
+		pool.Close()
+	})
 	return pool
 }
 
