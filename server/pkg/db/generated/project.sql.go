@@ -159,7 +159,7 @@ func (q *Queries) GetProjectInWorkspace(ctx context.Context, arg GetProjectInWor
 const getProjectIssueStats = `-- name: GetProjectIssueStats :many
 SELECT project_id,
        count(*)::bigint AS total_count,
-       count(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done_count
+       count(*) FILTER (WHERE issue_effective_status(workspace_id, status) IN ('done', 'cancelled'))::bigint AS done_count
 FROM issue
 WHERE project_id = ANY($1::uuid[])
   AND origin_type IS DISTINCT FROM 'project_chat'

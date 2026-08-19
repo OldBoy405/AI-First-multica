@@ -1,7 +1,6 @@
 {
   "title": "분석",
   "tab_usage": "사용량",
-  "subtitle": "이 워크스페이스의 토큰 비용과 에이전트 활동입니다.",
   "header": {
     "timezone_and_updated": "{{tz}} · {{time}} 업데이트",
     "refresh": "새로고침"

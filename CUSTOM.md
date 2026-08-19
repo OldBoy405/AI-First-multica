@@ -8,7 +8,7 @@
 grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=*.ts --include=*.tsx --include=*.sql --include=*.mjs | grep -v node_modules
 ```
 
-**基线（2026-08-07，合并前）：156 个文件 / 452 处命中**，其中 `AIFIRST` 字样 84 处、`packages/` 下 0 处。合并后这三个数只能升不能降；降了就是挂钩点被上游覆盖掉了。前端不带标记，靠《前端定制文件清单》一节逐个文件核对。
+**基线（2026-08-19 合并后）：172 个文件 / 503 处命中**，其中 `AIFIRST` 字样 106 处、`packages/` 下 2 处（chat-input.tsx 与 inbox-page.tsx 的 CR 溯源注释）。合并后这三个数只能升不能降；降了就是挂钩点被上游覆盖掉了。前端不带标记，靠《前端定制文件清单》一节逐个文件核对。
 
 ## 合并冲突总则
 
@@ -24,7 +24,7 @@ grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=
 
 ## 迁移编号冲突（已发生，不是「注意别撞」）
 
-fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全部已被占用**（上游已排到 169）：
+fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全部已被占用**（2026-08-19 合并时上游已排到 361；另 fork 的 265–268 与上游 issue_view 系列撞号）。合并后 fork 迁移已整体顺延为 **362–374**（158→362 … 166→370、265→371 … 268→374），文件已 `git mv` 改名，本机库 `schema_migrations` 已手工改号：
 
 | 号 | fork | upstream/main |
 |---|---|---|
@@ -38,11 +38,13 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 | 165 | `165_atq_project_active_index` | `165_attachment_task_id_index` |
 | 166 | `166_project_presenter_grant` | `166_project_dates` |
 
-**合并口径**：fork 的 9 个整体顺延到上游末位之后（170 起，保持相对顺序不变）。注意三件事：
+**合并口径**：fork 的 13 个整体顺延到上游末位之后（362 起，保持相对顺序不变）。注意三件事：
 
 1. **`160` / `163` 必须保持相对先后**——两者都用 `DROP CONSTRAINT + ADD CONSTRAINT` 重写 `issue_origin_type_check` 的整张枚举表。上游若也动了这个 CHECK，重编号后要把**上游的枚举值并进来**再加 `project_chat` / `project_discussion`，否则会把上游新 origin_type 静默删掉。
 2. **`165` 是 `CREATE INDEX CONCURRENTLY` 单语句迁移**，不能与别的语句合并进同一文件（迁移器限制，见上游 068）。
-3. **已应用的库要手工修 `schema_migrations`**——重编号不是改个文件名就完事：已部署环境按旧号记过版本，直接改名会导致新号重跑（`IF NOT EXISTS` 大多幂等，但 158/162 建表不是）或旧号残留。重编号后对每个已存在的库核对一次版本表。
+3. **已应用的库要手工修 `schema_migrations`**——重编号不是改个文件名就完事：已部署环境按旧号记过版本，直接改名会导致新号重跑（`IF NOT EXISTS` 大多幂等，但 158/162 建表不是）或旧号残留。重编号后对每个已存在的库核对一次版本表。本机库 2026-08-19 已执行（`schema_migrations.version` 旧号→新号，注意只改 fork 行：上游同名号迁移如 `162_resource_labels` 必须保留原号）。
+
+4. **上游 214/215 已收编 `chat_session.project_id` 列**（软引用，无 FK；`214_chat_session_project` + `215_chat_session_project_index`，上游还建了同名 `idx_chat_session_project` 单列索引）。fork 的 161 顺延为 365 时**改写**：不再建列，只补 fork 语义依赖的三件套——FK（`chat_session_project_fk`，fork 保留硬引用）、复合查找索引（改名 `idx_chat_session_project_creator` 避让上游同名索引）、active 唯一索引（`chat_session_project_creator_active_unique`，get-or-create 并发收敛的锁）。
 
 历史先例：CR-2026-010 的三个迁移在 worktree 里原编号 161–163，合并进 main 时因与 CR-008/009 已占用的号撞上而顺延为 164–166——顺延本身是走通过的流程，不是新发明。
 
@@ -76,6 +78,8 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 
 | 日期 | 对齐 | 冲突要点 |
 |---|---|---|
+| 2026-08-19 | `upstream/main` @ `b4137fc5b`（258 个提交，第二次同步） | 24 个冲突文件（2026-08-07 的 52 个减半）。核心：① 上游把 repo-checkout 认证从 body `auth_token` 改为 `Authorization: Bearer`（新 `registerActiveRepoCheckoutTask` 机制），fork 的 `activeTaskAuth` 任务身份校验保留并适配 header 回落（`health.go`）；`cmd_repo.go` 随上游改发 header。② 迁移全量顺延 362–374（见《迁移编号冲突》），`160/163` 的 CHECK 并上游 dingtalk/wecom 枚举；`161` 因上游 214/215 收编列而改写为纯约束补丁。③ `agent.sql` 冲突取并集：上游 `WHERE lock_task_owner_rows` 防 workspace-teardown 围栏与 fork 的 `project_id` 归因并存。④ 上游 API 变更适配 fork 代码：`DeleteComment` 返 `(DeleteCommentRow, error)`（新增 `commentFromCreateRow` 适配器）、`publishTaskEvent`/`publishChat` 增参、`DiscussionComposer.submitComment` 签名收窄、上游 `agent_task_queue_accountable_matches_originator(_strict)` CHECK 使 fork 测试 fixture 补 `accountable_user_id`、`hermesLaunchArgs` 被上游 hermesOverlay 机制吸收。⑤ 前端 `chat-input.test.tsx` 冲突重组：上游 focus describe 保留，fork adapter-isolation describe 完整贴回（含 spy 化 mock 与 `mockClear` 钩子）。⑥ `pnpm-lock.yaml` 由 pnpm 重解析（lockfile-only）。验证：Go 全量 build/vet 绿，governance/service/handler/daemon 定向套件全绿（含此前已知失败的 `TestTransitionTableShape`，断言已更新为 50）；TS 9 包 typecheck 全绿，chat-input 49 项、projects 九套件 118 项、core 135 项全绿。
+
 | 2026-08-07 | `upstream/main` @ `c7a8b1699`（608 个提交，fork 首次同步上游） | 52 个冲突文件。① `chat-input.tsx`：上游重写为受控值 + 协同上传 composer（新增 ProjectPicker/`uploadEnabled`/`allowSubmitWhileRunning`/`draftKeyOverride`）；按总则以上游为基底，把二开 `ChatInputCore` + `ChatInputDraftAdapter`（CR-2026-012 DD-9/FR-8）追加保留在文件尾部，上游组件补回二开 `mentionItemTypes`、`onUploadFile`、`onRestoreDraftConsumed` 兼容 prop；废弃二开旧全局 wrapper `useGlobalChatDraftAdapter`（被上游 composer 取代）。② `agent.sql`/`chat.sql`：上游 attribution 列组与二开 `cr_id`/`pipeline_node_run_id`/`project_id` 取并集；生成物按总则丢弃冲突块重跑 `sqlc generate`。③ `service/task.go`（9 块）：上游 attribution 体系为基底，二开项目队列门禁/抑制抢占/Private Ask 投递贴回；`taskEvent` 上游改为方法，二开 `task_failure_event_test.go` 适配并强化 `ChatRecipientID` 断言。④ `router.go`：保留上游新增 VCS webhook 路由，Stripe 摘除（#1 减法定制）在新基底重新摘除。⑤ `computeCommentAgentTriggers` 上游改双返回值，二开 4 个测试文件 16 处调用点适配。⑥ daemon 层快照上报/`crevents.go` 挂钩按上游新事件结构贴回。验证：TS 五包 typecheck 全绿；core 1375 项、views chat/projects 定向套件全过；Go build/vet 绿，handler/service/governance/events/vcs/channel 等合并相关包全过，剩余失败见《已知测试失败基线》 |
 
 ## 已知测试失败基线
@@ -133,6 +137,7 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 | 34 | `server/internal/daemon/crevents.go`（`buildReviewPayload` + `stageAnnotationFile` + `normalizeBlockers`）+ `crevents_test.go` | review 事件 parity：commit-scan fallback 用显式 stage→文件映射（`tech-design→sdd.yml`），通过受限 `git show {sha}:path` 读取该轮历史 annotation，scalar/结构化 blocker 归一化为 `[]string`，payload 补 `subject_sha256`，与 crctl outbox 同字段集合；旧 payload 缺 Core 字段时 Runner fail closed | CR-2026-045 TASK-10（SDD B05）。tools controlled-shell 仅放行 40 位 commit SHA + canonical review annotation 路径，outbox 优先仍保留 | 2026-08-17 | 上游改 `buildReviewPayload`/`reviewAnnotationDoc` 时保留 exact-commit 读取、stage 映射与 blocker 归一化；`knownEventKinds` 补回 `review`。验证：`cd server && go test ./internal/daemon/ -run 'ParseCRCommitMessageReview\|BuildReviewPayload' -v` |
 
 | 35 | `server/internal/governance/runner.go` + `server/internal/governance/runner_integration_test.go` | Runner Core recoverability: template digest drift is non-terminal and resumes same run; failed/cancelled `push-progress` retries only the checkpoint node with one active successor; real PostgreSQL coverage locks both semantics | CR-2026-045 CODE-B08/B09 | 2026-08-18 | 上游改 Runner reconcile/partial unique indexes时保留 same-run digest recovery 与 checkpoint-only retry；验证：`DATABASE_URL=... go test ./internal/governance -count=1`（真实 PostgreSQL） |
+| 38 | 第二次上游合并的 fork 侧适配（无单一 CR 归属）：`internal/daemon/health.go`（activeTaskAuth 校验增加 `Authorization` header 回落）、`health_test.go`（fork 测试适配 bearer 注册机制 + Windows 路径 `filepath.ToSlash`）、`cmd/multica/cmd_repo.go`（body `auth_token` 字段随上游移除）、`internal/service/{discussion_coordinator,project_chat}.go`（`commentFromCreateRow` 适配 sqlc 新返回行）、`task.go`/`mika_onboarding.go`（`publishTaskEvent`/`publishChat` 增参）、`cancel_task_by_user_test.go`/`project_queue_capacity_test.go`（fixture 补 `accountable_user_id` 满足上游 strict CHECK）、迁移 362–374 顺延与 `364/367` CHECK 并枚举、前端 `chat-input.test.tsx`（adapter-isolation describe 重组 + spy mock）、`discussion-pane.tsx`（submitComment 签名适配） | 上游 258 提交合并（`b4137fc5b`）。合并总则适配：上游改签名则跟改、上游收编则改写（161→365）、上游新约束则 fixture 补列 | 2026-08-19 | 下次合并前对照本行复核：上游再改 checkout 认证协议时重贴 `health.go` 回落；上游再改 `agent_task_queue` 归因约束时复核 fork fixture；`commentFromCreateRow` 随 sqlc 行结构同步。验证：`go test ./internal/daemon/ -run 'RepoCheckout'`、`go test ./internal/handler/ -run 'CancelTaskByUser|ProjectQueueCapacity'`、`pnpm -C packages/views vitest run chat/components/chat-input.test.tsx` |
 | 36 | `server/internal/daemon/pipeline_task.go`、`daemon.go`、`execenv/{context,execenv}.go` + tests | Pipeline task controlled environment: task-local `crctl` launcher, validated `CRCTL_OPERATIONAL_WORKSPACE`/`GIT_CONFIG_GLOBAL` trust config, `.crctl` writable root for Codex, and no generic worktree sidecars that would make workspace preflight dirty | CR-2026-045 CODE-B10 | 2026-08-18 | 上游改 execenv Prepare 或 Codex shell policy 时保留 pipeline sidecar opt-out与路径 containment；验证：`go test ./internal/daemon/... -run 'Pipeline|ConfigurePipelineGit|InstallPipeline' -count=1` |
 | 37 | `server/internal/governance/reconcile.go` + `reconcile_test.go`、`gate_nodes_gen.go`（生成更新）、`server/migrations/267_issue_origin_type_restore.*.sql`、`268_issue_origin_type_restore_validate.*.sql`、`server/internal/service/project_chat_test.go` | E2E hardening：active architecture pipeline 期间 root snapshot 不覆盖 live CR projection；architecture push-progress registry 去除未解析 workspace placeholder；向前 repair migration 恢复 `project_chat`/`project_discussion` + dingtalk/wecom 的完整九值 issue origin constraint | CR-2026-045 TASK-13/TASK-14/TASK-15（SDD §3.7） | 2026-08-18 | 上游改 snapshot reconcile 时保留 active-run guard；generated registry 冲突时从 CR tools HEAD 重生；未来任何 `issue_origin_*` migration 重建 CHECK 必须携完整九值集合。验证：`go test ./internal/governance -run TestApplySnapshotSkipsActiveArchitecturePipeline -count=1 -v`、`go test ./internal/service -run 'Test(EnsureProjectChatAndDiscussionIssue_ShareTheSamePlumbing|ProjectContainerOriginConstraintRejectsUnknownOrigin)' -count=1 -v`、`go run ./cmd/migrate up` |
 
@@ -160,12 +165,10 @@ fork 的 9 个迁移占用 158–166，上游 `upstream/main` **这 9 个号全�
 | `TestEnsureDaemonID_Persists` / `TestListRuntimeLocalSkills_*` 等 26 项 | `server/internal/daemon` | 未改动 trunk 检出 A/B 失败名单逐条一致（2026-07-31，T10 全量时发现）；典型根因：测试改 `HOME` 但 Windows 代码走 `USERPROFILE`（daemon.id 写进真实家目录路径失败）、本机已装 IDE 的 skill 根目录被真实发现。上游 Windows 环境假设缺陷，非 fork 引入 | 2026-07-31 |
 | `builtin_skills` 相关 / `TestShortTaskIDMatchesDaemon` / `TestParseSkillArchive_RejectsUnsafeSkillMdPath` | `server/internal/service` 等 | CR-2026-010 TASK-01 期复核：CRLF 检出与 Windows 路径分隔符断言差异，与 claim/队列逻辑无关 | 2026-08-02 |
 | gofmt：本机对上游 794 个文件报格式差异 | 全仓 | **根因是 CRLF**：Windows autocrlf 检出的上游 .go 文件字节级 ≠ gofmt 输出（LF），并非格式真差异（T06 期核实，修正 T05 时"工具链版本差异"的初判）。**fork 新增 .go 文件以 LF 写入且必须过 gofmt**；上游文件不动 | 2026-07-31 |
-| `TestTransitionTableShape`（expanded count 50 ≠ want 45） | `server/internal/governance` | A/B 验证（2026-08-13，CR-2026-032 TASK-04 全包回归时发现）：在 merge 基线 `082a7536`（不含 CR-2026-032 任何改动）上同命令同失败。根因：CR-2026-031 把 `transitions_gen.go` 更新为 28 声明/50 展开，但该测试的硬编码断言仍为 45；纯测试断言同步问题，与投影逻辑无关。修复建议另开小 CR（或与既定的"PLAN/TASK schema ID 口径统一"治理 CR 合并），不在 CR-2026-032 白名单内 | 2026-08-13 |
-
 ## 未做（防止误以为已做）
 
 - **Tools Root 契约接入现存跨仓消费点**——CR-2026-028 只收敛 tools 仓的 active executable surfaces，不改 multica。当前 `server/internal/governance/gen/generate-{transitions,gate-nodes}.mjs` 默认猜测 sibling `../tools`，`approval_crosscheck_test.go` 与 `pkg/gitguard/gitguard_test.go` 也会扫描 sibling tools 路径；后续首次修改这些文件时应删除路径猜测：生成器要求显式 tools root，跨工具测试要求显式 `CRCTL_PATH` / rules path。生产环境现有 `MULTICA_CONTROLLED_SHELL_RULES=<绝对路径>` 属于安装时物化，继续复用，不在 multica 内新增 resolver。
-- **Pipeline Runner**——`pipeline_run` / `pipeline_node_run` 两表已建（#12），但只有治理层的门禁节点投影器在写（#13，仅 4 个 human_approval 节点）；真正的 Runner（执行非 human 节点、驱动流水线）未做。
+- **Pipeline Runner**——CR-2026-045 已交付 Runner Core（#31，architecture-design 五节点 `Reconcile`）；仍未做的是**其它 pipeline 的 Runner**（当前只有 architecture-design 有执行器）与 crctl `--caller` 到 Multica 用户的身份桥接（#15 的 `canApprove` 限制）。
 - **crctl `--caller` 到 Multica 用户的身份桥接**——因此 `canApprove`（#15）只能按工作区 owner/admin 判定，无法按 `cr.owners` 的角色判定（`canApprove` 注释内有 `ponytail:` 标注）。
 - **controlled-shell L1 层（`--disallowedTools Bash`）**——agent 的 `permission.bash` 平台不持久化、无可信键，只落地了 L2 PATH shim + L3 IDE hooks（#8）。L2 用绝对路径可绕过，已在文档明示。
 - **多知识库的 workspace→remote 映射表**——server 模式 reconcile（#10）当前假定单一知识库远端。

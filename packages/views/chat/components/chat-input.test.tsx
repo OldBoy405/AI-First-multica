@@ -1034,39 +1034,24 @@ describe("ChatInput attachment wiring", () => {
 
 describe("ChatInput async send", () => {
   it("restores a cancelled empty run draft into the editor", async () => {
-    const onRestoreDraftConsumed = vi.fn();
-    const props = {
+    const onRestoreDraftApplied = vi.fn();
+    renderInput({
       restoreDraftRequest: {
         id: "msg-restored",
         content: "bring this back",
       },
-      onRestoreDraftConsumed,
-    };
-    // Fresh element per render — React bails out when the root receives the
-    // exact same element reference.
-    const makeElement = () => (
-      <I18nProvider locale="en" resources={TEST_RESOURCES}>
-        <ChatInput onSend={vi.fn()} onUploadFile={vi.fn()} agentName="Multica" {...props} />
-      </I18nProvider>
-    );
-    const { rerender } = render(makeElement());
+      onRestoreDraftApplied,
+    });
 
     await waitFor(() => {
       expect(useChatStore.getState().setInputDraft).toHaveBeenCalledWith(
         "__draft_new__",
         "bring this back",
       );
-      expect(onRestoreDraftConsumed).toHaveBeenCalledTimes(1);
+      expect(editorProps.last?.value).toBe("bring this back");
+      // The single terminal transition — the owner may now delete the server row.
+      expect(onRestoreDraftApplied).toHaveBeenCalledTimes(1);
     });
-    // The real zustand store notifies subscribers, re-rendering the compose
-    // box with the restored draft; the mock store has no subscription
-    // mechanism, so emulate that notification with a plain rerender. The
-    // consumed-id guard must keep the restore one-shot across it — pinned
-    // via the store write count (the controlled-value editor shows whatever
-    // the store holds).
-    rerender(makeElement());
-    expect(useChatStore.getState().setInputDraft).toHaveBeenCalledTimes(1);
-    expect(onRestoreDraftConsumed).toHaveBeenCalledTimes(1);
   });
 
   // A restore the composer cannot apply yet must NOT be reported as done: the
@@ -1433,11 +1418,73 @@ describe("ChatInput commit handoff", () => {
   });
 });
 
-// CR-2026-012 DD-9 double lock: ChatInputCore codes against
-// ChatInputDraftAdapter only. The STATIC lock asserts the store mock is never
-// called with a custom adapter (structural decoupling); the BEHAVIORAL locks
-// assert each user action routes to the adapter methods while the global
-// store stays byte-for-byte untouched.
+// Send and Stop must retain composer focus so Android's keyboard stays open.
+describe("ChatInput send keeps composer focus", () => {
+  async function readySendButton() {
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "msg" } });
+    let sendButton!: HTMLElement;
+    await waitFor(() => {
+      const buttons = screen.getAllByRole("button");
+      sendButton = buttons[buttons.length - 1]!;
+      expect(sendButton).not.toBeDisabled();
+    });
+    return sendButton;
+  }
+
+  it("cancels the send button's pointer-down so focus never leaves the editor", async () => {
+    renderInput();
+    const sendButton = await readySendButton();
+
+    // fireEvent returns false when a handler called preventDefault().
+    expect(fireEvent.pointerDown(sendButton)).toBe(false);
+  });
+
+  it("cancels the send button's compatibility mouse-down on Android", async () => {
+    renderInput();
+    const sendButton = await readySendButton();
+
+    expect(fireEvent.mouseDown(sendButton)).toBe(false);
+  });
+
+  it("still submits on tap — cancelling pointer-down suppresses focus, not activation", async () => {
+    const onSend = vi.fn<ChatInputOnSend>((_content, _ids, commitInput) => {
+      commitInput();
+      return true;
+    });
+    renderInput({ onSend });
+    const sendButton = await readySendButton();
+
+    fireEvent.pointerDown(sendButton);
+    fireEvent.click(sendButton);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect(onSend.mock.calls[0]![0]).toBe("msg");
+  });
+
+  it("cancels the stop button's pointer-down too — the slot must not flip behaviour mid-run", () => {
+    renderInput({ isRunning: true, onStop: vi.fn() });
+
+    expect(fireEvent.pointerDown(screen.getByRole("button", { name: "Stop" }))).toBe(false);
+  });
+
+  it("cancels the stop button's compatibility mouse-down on Android", () => {
+    renderInput({ isRunning: true, onStop: vi.fn() });
+
+    expect(fireEvent.mouseDown(screen.getByRole("button", { name: "Stop" }))).toBe(false);
+  });
+
+  it("still stops on tap", () => {
+    const onStop = vi.fn();
+    renderInput({ isRunning: true, onStop });
+
+    const stopButton = screen.getByRole("button", { name: "Stop" });
+    fireEvent.pointerDown(stopButton);
+    fireEvent.click(stopButton);
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ChatInputCore adapter isolation", () => {
   const ADAPTER_KEY = "project-x:team";
 

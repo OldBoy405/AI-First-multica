@@ -220,7 +220,12 @@ function DiscussionBody({
         comments={selectedComments}
         onForwarded={handleForwarded}
       />
-      <DiscussionComposer issueId={issueId} submitComment={submitComment} />
+      <DiscussionComposer
+        issueId={issueId}
+        submitComment={async (content, attachmentIds) =>
+          Boolean(await submitComment(content, attachmentIds))
+        }
+      />
     </div>
   );
 }

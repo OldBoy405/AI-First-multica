@@ -1,7 +1,6 @@
 {
   "title": "分析",
   "tab_usage": "使用量",
-  "subtitle": "このワークスペース全体のトークン消費とエージェントの活動です。",
   "header": {
     "timezone_and_updated": "{{tz}} · {{time}} 更新",
     "refresh": "更新"

@@ -223,8 +223,8 @@ func TestCancelTaskByUser_PlainMember_NotOriginator_Returns403(t *testing.T) {
 
 	var taskID string
 	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', 0, $2, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', 0, $2, $3, $3)
 		RETURNING id
 	`, agentID, issueID, originatorID).Scan(&taskID); err != nil {
 		t.Fatalf("create task: %v", err)
@@ -269,8 +269,8 @@ func TestCancelTaskByUser_OwnerCancelsAny(t *testing.T) {
 
 	var taskID string
 	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', 0, $2, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', 0, $2, $3, $3)
 		RETURNING id
 	`, agentID, issueID, originatorID).Scan(&taskID); err != nil {
 		t.Fatalf("create task: %v", err)

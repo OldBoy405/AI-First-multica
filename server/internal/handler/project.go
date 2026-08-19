@@ -340,6 +340,15 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			localDirSeen[ld.DaemonID] = i
+			// Same worktree gate the standalone POST/PUT paths run. This
+			// bundled-create surface skipped it, so a project created with a
+			// worktree local_directory could store a mode the machine cannot
+			// run — caught only later, by the claim gate cancelling the task.
+			// It writes its own 422; it runs before the transaction, so a
+			// rejection leaves nothing behind.
+			if !h.requireWorktreeCapableDaemon(w, r, wsUUID, res.ResourceType, ref) {
+				return
+			}
 		}
 	}
 
@@ -786,6 +795,15 @@ func (h *Handler) DeleteProject(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: project.WorkspaceID,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to clear project chat context")
+		return
+	}
+	// Project-scoped saved views live on the project page; once the project
+	// is gone they are unreachable, so they go in the same transaction.
+	if err := qtx.DeleteIssueViewsByProjectScope(r.Context(), db.DeleteIssueViewsByProjectScopeParams{
+		WorkspaceID: project.WorkspaceID,
+		ScopeID:     project.ID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete project views")
 		return
 	}
 	if err := qtx.DeleteProject(r.Context(), db.DeleteProjectParams{

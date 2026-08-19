@@ -1,7 +1,6 @@
 {
   "title": "统计",
   "tab_usage": "用量",
-  "subtitle": "查看当前 Workspace 的 token 消耗和智能体运行情况。",
   "header": {
     "timezone_and_updated": "{{tz}} · 更新于 {{time}}",
     "refresh": "刷新"

@@ -258,7 +258,7 @@ func (s *TaskService) sendProjectChatCore(ctx context.Context, issue db.Issue, a
 	// queue-jump priority while a presenter other than themselves is active.
 	task, err := s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{})
 	if err != nil {
-		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
+		if _, derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
 			ID: comment.ID, WorkspaceID: issue.WorkspaceID,
 		}); derr != nil {
 			// Double fault: the compensating delete also failed, leaving a
@@ -293,7 +293,7 @@ func (s *TaskService) sendProjectChatCore(ctx context.Context, issue db.Issue, a
 			"issue_status": issue.Status,
 		},
 	})
-	return comment, task, nil
+	return commentFromCreateRow(comment), task, nil
 }
 
 // ErrPresenterRequired is returned when a project has an active presenter and

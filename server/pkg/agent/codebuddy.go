@@ -41,7 +41,6 @@ func buildCodebuddyArgs(opts ExecOptions, logger *slog.Logger) []string {
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
-		"--strict-mcp-config",
 		"--permission-mode", "bypassPermissions",
 		// CodeBuddy's interactive tools have no UI to render in under the
 		// daemon's headless stream-json transport. AskUserQuestion and
@@ -60,6 +59,20 @@ func buildCodebuddyArgs(opts ExecOptions, logger *slog.Logger) []string {
 		// would match nothing despite what the CLI's own help text claims.
 		"--disallowedTools", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 	}
+	// NOTE: --strict-mcp-config is deliberately never passed. It means "only
+	// use servers from --mcp-config", which drops CodeBuddy's user, project
+	// AND local scopes. Measured against CodeBuddy 2.x with one real MCP
+	// server registered per scope, using process spawns as the oracle:
+	//
+	//	--mcp-config only ....... managed + user + local  <- what we want
+	//	--mcp-config + strict ... managed only
+	//	strict only ............. nothing at all
+	//
+	// The union is also what mergeRuntimeAndAgentMcpConfig promises: adding
+	// one managed server must not disable the user's own. CodeBuddy applies
+	// it natively, and a managed entry already wins a same-name collision
+	// (verified), so the daemon does not pre-merge — see the codebuddy note
+	// in loadRuntimeMcpServerConfigs.
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
@@ -94,11 +107,18 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 
 	args := buildCodebuddyArgs(opts, b.cfg.Logger)
 
-	// If the caller provided an MCP config, write it to a temp file and pass
-	// --mcp-config <path> so the agent uses a controlled set of MCP servers.
+	// A managed agent config is written to a temp file and added with
+	// --mcp-config, which ADDS to whatever CodeBuddy loads from its own user,
+	// project and local scopes — buildCodebuddyArgs never passes
+	// --strict-mcp-config, so those stay on. A managed entry wins a same-name
+	// collision natively.
+	//
+	// Three-state, as everywhere else: a JSON `null` means "inherit the runtime
+	// configuration" and skips the flag entirely, while an explicitly empty
+	// object is a managed set that happens to contain no servers.
 	var mcpConfigPath string
 	var mcpFileCleanup func()
-	if len(opts.McpConfig) > 0 {
+	if hasManagedMcpConfig(opts.McpConfig) {
 		path, err := writeMcpConfigToTemp(opts.McpConfig)
 		if err != nil {
 			cancel()
@@ -115,9 +135,9 @@ func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts Exec
 		}
 	}()
 
-	cmd := exec.CommandContext(runCtx, execPath, args...)
+	cmd := b.cfg.commandAt(execPath).exec(runCtx, args...)
 	hideAgentWindow(cmd)
-	b.cfg.Logger.Info("agent command", "exec", execPath, "args", args)
+	b.cfg.logAgentCommand(cmd, newAgentCommandLogArgs(args))
 	cmd.WaitDelay = 10 * time.Second
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd

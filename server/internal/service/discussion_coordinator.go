@@ -122,7 +122,7 @@ func (s *TaskService) RouteDiscussionToTeamAgent(ctx context.Context, chatIssue 
 	// returned verbatim.
 	task, err := s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, chatIssue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", false, originatorID, pgtype.UUID{}, originatorID)
 	if err != nil {
-		if derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
+		if _, derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
 			ID: comment.ID, WorkspaceID: chatIssue.WorkspaceID,
 		}); derr != nil {
 			slog.Error("discussion route compensating delete failed",
@@ -155,7 +155,22 @@ func (s *TaskService) RouteDiscussionToTeamAgent(ctx context.Context, chatIssue 
 			"issue_status": chatIssue.Status,
 		},
 	})
-	return comment, task, nil
+	return commentFromCreateRow(comment), task, nil
+}
+
+// commentFromCreateRow adapts sqlc's CreateCommentRow to the Comment model.
+// IssueRevision exists only on the row (activity-touch feedback), never on
+// the stored comment, so it is dropped here.
+func commentFromCreateRow(row db.CreateCommentRow) db.Comment {
+	return db.Comment{
+		ID: row.ID, IssueID: row.IssueID, AuthorType: row.AuthorType,
+		AuthorID: row.AuthorID, Content: row.Content, Type: row.Type,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, ParentID: row.ParentID,
+		WorkspaceID: row.WorkspaceID, ResolvedAt: row.ResolvedAt,
+		ResolvedByType: row.ResolvedByType, ResolvedByID: row.ResolvedByID,
+		SourceTaskID: row.SourceTaskID, QuickActionID: row.QuickActionID,
+		ViaPluginID: row.ViaPluginID, Revision: row.Revision,
+	}
 }
 
 // PostDiscussionSystemNotice writes an auditable system comment authored by

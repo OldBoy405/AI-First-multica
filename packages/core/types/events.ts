@@ -125,20 +125,24 @@ export interface IssueDeletedPayload {
 export interface IssueLabelsChangedPayload {
   issue_id: string;
   labels: Label[];
+  issue_revision?: number;
 }
 
 export interface IssueAttachmentsChangedPayload {
   issue_id: string;
+  issue_revision?: number;
 }
 
 export interface IssueMetadataChangedPayload {
   issue_id: string;
   metadata: IssueMetadata;
+  issue_revision?: number;
 }
 
 export interface IssuePropertiesChangedPayload {
   issue_id: string;
   properties: IssuePropertyValues;
+  issue_revision?: number;
 }
 
 export interface PropertyChangedPayload {
@@ -199,15 +203,18 @@ export interface InboxBatchArchivedPayload {
 
 export interface CommentCreatedPayload {
   comment: Comment;
+  issue_revision?: number;
 }
 
 export interface CommentUpdatedPayload {
   comment: Comment;
+  issue_revision?: number;
 }
 
 export interface CommentDeletedPayload {
   comment_id: string;
   issue_id: string;
+  issue_revision?: number;
 }
 
 export interface CommentResolvedPayload {
@@ -340,6 +347,7 @@ export interface TaskCancelledPayload {
 export interface ReactionAddedPayload {
   reaction: Reaction;
   issue_id: string;
+  comment_revision?: number;
 }
 
 export interface ReactionRemovedPayload {
@@ -348,11 +356,13 @@ export interface ReactionRemovedPayload {
   emoji: string;
   actor_type: string;
   actor_id: string;
+  comment_revision?: number;
 }
 
 export interface IssueReactionAddedPayload {
   reaction: IssueReaction;
   issue_id: string;
+  issue_revision?: number;
 }
 
 export interface IssueReactionRemovedPayload {
@@ -360,6 +370,7 @@ export interface IssueReactionRemovedPayload {
   emoji: string;
   actor_type: string;
   actor_id: string;
+  issue_revision?: number;
 }
 
 export interface ChatMessageEventPayload {

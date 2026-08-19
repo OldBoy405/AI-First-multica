@@ -1,7 +1,6 @@
 {
   "title": "Analytics",
   "tab_usage": "Usage",
-  "subtitle": "Token spend and agent activity across this workspace.",
   "header": {
     "timezone_and_updated": "{{tz}} · updated {{time}}",
     "refresh": "Refresh"

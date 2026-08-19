@@ -9,15 +9,20 @@ import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { useModalStore } from "@multica/core/modals";
 import { useUpdateIssue } from "@multica/core/issues/mutations";
+import { errorCode } from "@multica/core/api";
 import { pinListOptions, useCreatePin, useDeletePin } from "@multica/core/pins";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { useIssueSurfaceActionsOptional } from "../surface/actions-context";
+import type { IssueSurfaceMutationOptions } from "../surface/actions-context";
 
 export interface UseIssueActionsResult {
   isPinned: boolean;
-  updateField: (updates: Partial<UpdateIssueRequest>) => void;
+  updateField: (
+    updates: Partial<UpdateIssueRequest>,
+    options?: IssueSurfaceMutationOptions,
+  ) => void;
   openInNewTab: () => void;
   togglePin: () => void;
   copyLink: () => Promise<void>;
@@ -61,10 +66,14 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
   const issueId = issue?.id ?? null;
   const issueIdentifier = issue?.identifier ?? null;
   const issueProjectId = issue?.project_id ?? null;
+  const issueAssigneeType = issue?.assignee_type ?? null;
+  const issueAssigneeId = issue?.assignee_id ?? null;
   const issueStatus = issue?.status ?? null;
-
   const updateField = useCallback(
-    (updates: Partial<UpdateIssueRequest>) => {
+    (
+      updates: Partial<UpdateIssueRequest>,
+      options?: IssueSurfaceMutationOptions,
+    ) => {
       if (!issueId) return;
       // Assigning to an agent/squad may start a run. Route through the
       // pre-trigger confirm modal (preview + optional handoff note + "暂不开始"),
@@ -92,17 +101,24 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
       if (surfaceActions) {
         surfaceActions.updateIssue(issueId, updates, {
           errorMessage: t(($) => $.detail.update_failed),
+          ...options,
         });
       } else {
         updateIssue.mutate(
           { id: issueId, ...updates },
           {
-            onError: (err) =>
+            onSuccess: options?.onSuccess,
+            onError: (err) => {
               toast.error(
-                err instanceof Error && err.message
+                errorCode(err) === "revision_conflict"
+                  ? t(($) => $.revision.conflict)
+                  : err instanceof Error && err.message
                   ? err.message
                   : t(($) => $.detail.update_failed),
-              ),
+              );
+              options?.onError?.(err);
+            },
+            onSettled: () => options?.onSettled?.(),
           },
         );
       }
@@ -165,8 +181,25 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
       parent_issue_id: issueId,
       parent_issue_identifier: issueIdentifier,
       ...(issueProjectId ? { project_id: issueProjectId } : {}),
+      // Inherit the parent's assignee (member/agent/squad) so a sub-issue
+      // created from the "Add sub-issue" entry starts with the same owner
+      // (discussion #1728). The modal keys off whether these fields are
+      // present, not their value, so a seed overrides the sticky last-used
+      // assignee it would otherwise fall back to, while omitting both for
+      // an unassigned parent leaves that fallback intact. Seed the two
+      // together — assignee_type is meaningless without assignee_id.
+      ...(issueAssigneeType && issueAssigneeId
+        ? { assignee_type: issueAssigneeType, assignee_id: issueAssigneeId }
+        : {}),
     });
-  }, [openModal, issueId, issueIdentifier, issueProjectId]);
+  }, [
+    openModal,
+    issueId,
+    issueIdentifier,
+    issueProjectId,
+    issueAssigneeType,
+    issueAssigneeId,
+  ]);
 
   const openSetParent = useCallback(() => {
     if (!issueId) return;
@@ -186,7 +219,10 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
     if (surfaceActions) {
       surfaceActions.updateIssue(
         issueId,
-        { parent_issue_id: null, stage: null },
+        {
+          parent_issue_id: null,
+          stage: null,
+        },
         {
           onSuccess: () =>
             toast.success(t(($) => $.actions.remove_parent_issue_success)),
@@ -195,7 +231,11 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
       );
     } else {
       updateIssue.mutate(
-        { id: issueId, parent_issue_id: null, stage: null },
+        {
+          id: issueId,
+          parent_issue_id: null,
+          stage: null,
+        },
         {
           onSuccess: () =>
             toast.success(t(($) => $.actions.remove_parent_issue_success)),

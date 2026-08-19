@@ -67,7 +67,7 @@ WHERE project_id = $1
 -- container issues from stats.
 SELECT project_id,
        count(*)::bigint AS total_count,
-       count(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done_count
+       count(*) FILTER (WHERE issue_effective_status(workspace_id, status) IN ('done', 'cancelled'))::bigint AS done_count
 FROM issue
 WHERE project_id = ANY(sqlc.arg('project_ids')::uuid[])
   AND origin_type IS DISTINCT FROM 'project_chat'
