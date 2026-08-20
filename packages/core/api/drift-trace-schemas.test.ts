@@ -42,9 +42,9 @@ describe("SpecTraceResponseSchema", () => {
       ],
     });
     expect(parsed.workspaceId).toBe("ws");
-    expect(parsed.events[0].eventId).toBe(1);
-    expect(parsed.events[0].milestone?.frs).toHaveLength(1);
-    expect(parsed.events[0].milestone?.source).toBe("baseline-imported");
+    expect(parsed.events[0]!.eventId).toBe(1);
+    expect(parsed.events[0]!.milestone?.frs).toHaveLength(1);
+    expect(parsed.events[0]!.milestone?.source).toBe("baseline-imported");
   });
 
   it("keeps unknown state values (views render unknown fallback)", () => {
@@ -54,13 +54,13 @@ describe("SpecTraceResponseSchema", () => {
       spec_id: "s",
       events: [{ event_id: 1, cr_id: "x", commit_sha: "", occurred_at: null, state: "future-state" }],
     });
-    expect(parsed.events[0].state).toBe("future-state");
+    expect(parsed.events[0]!.state).toBe("future-state");
   });
 
   it("tolerates missing event fields with safe defaults", () => {
     const parsed = SpecTraceResponseSchema.parse({ v: 1, workspace_id: "ws", spec_id: "s", events: [{}] });
-    expect(parsed.events[0].state).toBe("malformed");
-    expect(parsed.events[0].crId).toBe("");
+    expect(parsed.events[0]!.state).toBe("malformed");
+    expect(parsed.events[0]!.crId).toBe("");
   });
 
   it("exports a safe empty fallback", () => {
@@ -76,8 +76,8 @@ describe("SpecSearchResponseSchema", () => {
       specs: [{ spec_id: "alpha", latest_cr_id: "CR-2026-049", owners: { requirement: { id: "Ray" } }, updated_at: "t" }],
       next_cursor: "cur",
     });
-    expect(parsed.specs[0].specId).toBe("alpha");
-    expect(parsed.specs[0].owners).toEqual({ requirement: { id: "Ray" } });
+    expect(parsed.specs[0]!.specId).toBe("alpha");
+    expect(parsed.specs[0]!.owners).toEqual({ requirement: { id: "Ray" } });
     expect(parsed.nextCursor).toBe("cur");
   });
   it("empty envelope when specs missing", () => {
@@ -134,9 +134,9 @@ describe("DriftFindingsResponseSchema", () => {
       ],
       next_cursor: null,
     });
-    expect(parsed.findings[0].repositoryId).toBe("tools");
-    expect(parsed.findings[0].kind).toBe("bypass-commit");
-    expect(parsed.findings[0].resolvedAt).toBeNull();
+    expect(parsed.findings[0]!.repositoryId).toBe("tools");
+    expect(parsed.findings[0]!.kind).toBe("bypass-commit");
+    expect(parsed.findings[0]!.resolvedAt).toBeNull();
   });
   it("unknown kind/status keep their string (fallback rendering)", () => {
     const f = DriftFindingSchema.parse({ id: "f", kind: "weird-kind", status: "weird-status" });
