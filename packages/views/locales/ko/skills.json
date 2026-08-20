@@ -364,7 +364,6 @@
     "sort_usage": "By usage",
     "sort_name": "By name",
     "session_export_filter": "Session exports",
-    "session_export_hint": "Session-export filtering shows skills whose source marker came from a chat session export.",
     "empty": "No org-visible skills yet. Publish a skill to make it available to the team.",
     "visibility_private": "Private",
     "visibility_org": "Org",
@@ -379,6 +378,13 @@
     "appeal_submitted": "Appeal submitted",
     "approve": "Approve",
     "reject": "Reject",
-    "decided": "Decision recorded"
+    "decided": "Decision recorded",
+    "load_failed": "Failed to load the skill market.",
+    "card_title": "How to use",
+    "applicable_scenarios": "Applicable scenarios",
+    "context_dependencies": "Context dependencies",
+    "permission_declaration": "Permission declaration",
+    "failure_handling": "Failure handling",
+    "requirements": "Requirements"
   }
 }

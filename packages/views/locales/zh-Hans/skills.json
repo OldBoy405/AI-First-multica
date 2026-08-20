@@ -364,7 +364,6 @@
     "sort_usage": "按使用量",
     "sort_name": "按名称",
     "session_export_filter": "会话导出",
-    "session_export_hint": "会话导出筛选展示来源标记为会话导出的 Skill。",
     "empty": "还没有组织可见的 Skill。发布一个 Skill 即可让团队复用。",
     "visibility_private": "私有",
     "visibility_org": "组织可见",
@@ -379,6 +378,13 @@
     "appeal_submitted": "申诉已提交",
     "approve": "放行",
     "reject": "驳回",
-    "decided": "决定已记录"
+    "decided": "决定已记录",
+    "load_failed": "Skill 市场加载失败。",
+    "card_title": "使用说明",
+    "applicable_scenarios": "适用场景",
+    "context_dependencies": "上下文依赖",
+    "permission_declaration": "权限声明",
+    "failure_handling": "失败处理",
+    "requirements": "运行时要求"
   }
 }

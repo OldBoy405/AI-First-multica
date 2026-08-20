@@ -54,29 +54,6 @@ func updateSkillVisibility(t *testing.T, skillID, visibility string) *httptest.R
 	return rec
 }
 
-func TestUpdateSkillBlocksOrgPublishOnSecrets(t *testing.T) {
-	if testPool == nil {
-		t.Skip("no database available")
-	}
-	secret := "ghp_" + strings.Repeat("A", 40)
-	id := createSkillViaHandler(t, "market-secret-"+time.Now().Format("150405"), marketFrontmatter("secret-skill", ""))
-
-	rec := updateSkillVisibility(t, id, "org")
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal 422: %v", err)
-	}
-	if body["code"] != "skill_publish_blocked" {
-		t.Fatalf("code = %v", body["code"])
-	}
-	// Content did not contain the secret; craft an update that does, so the
-	// gate has something to find. Then visibility must remain private.
-	_ = secret
-}
-
 func TestUpdateSkillRejectsBlockedPublishAndKeepsVisibility(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database available")
@@ -219,7 +196,8 @@ func TestAppealFlowUnblocksPublishAndRejectsNonOwners(t *testing.T) {
 	// 3. Author submits appeal -> 201; duplicate -> 200 no-op.
 	submit := func() *httptest.ResponseRecorder {
 		req := newRequest(http.MethodPost, "/api/skills/"+id+"/appeals", submitSkillAppealRequest{
-			File: blocked.Findings[0].File, Line: blocked.Findings[0].Line, PatternID: blocked.Findings[0].PatternID,
+			AppealID: appealID, File: blocked.Findings[0].File,
+			Line: blocked.Findings[0].Line, PatternID: blocked.Findings[0].PatternID,
 		})
 		req = withURLParam(req, "id", id)
 		rec := httptest.NewRecorder()
@@ -326,5 +304,185 @@ func TestGetSkillMarketScopesAndDedupes(t *testing.T) {
 	}
 	if len(body.Builtin) == 0 {
 		t.Fatal("builtin list empty")
+	}
+}
+
+// AIFIRST: CR-2026-048 review attempt 1 blocker 4: a later rejection must
+// revoke an earlier approval, otherwise a released secret can never be pulled
+// back (PRD AC-11).
+func TestDecideSkillAppealRejectionRevokesEarlierApproval(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database available")
+	}
+	content := marketFrontmatter("revoke-skill", "") + "\nexport GITHUB_TOKEN=ghp_" + strings.Repeat("B", 40) + "\n"
+	id := createSkillViaHandler(t, "market-revoke-"+time.Now().Format("150405"), content)
+
+	appealID := blockedAppealID(t, id)
+	decideAppeal(t, id, appealID, true)
+	if rec := publishOrg(t, id); rec.Code != http.StatusOK {
+		t.Fatalf("publish after approval: %d: %s", rec.Code, rec.Body.String())
+	}
+	// Flip back to private so the publish gate runs again on the next attempt.
+	if _, err := testPool.Exec(context.Background(), `UPDATE skill SET visibility = 'private' WHERE id = $1`, id); err != nil {
+		t.Fatalf("reset visibility: %v", err)
+	}
+	decideAppeal(t, id, appealID, false)
+	if rec := publishOrg(t, id); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("publish after rejection: expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// AIFIRST: CR-2026-048 review attempt 1 blocker 5: a finding raised by the
+// post-publish rescan is on content that is not in the database yet, so the
+// appeal must be keyed by the id the gate handed out, not by a server-side
+// rehash of the stored row.
+func TestAppealReleasesRescanFindingOnUnsavedContent(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database available")
+	}
+	id := createSkillViaHandler(t, "market-rescan-appeal-"+time.Now().Format("150405"), marketFrontmatter("rescan-appeal", ""))
+	if rec := publishOrg(t, id); rec.Code != http.StatusOK {
+		t.Fatalf("initial publish: %d: %s", rec.Code, rec.Body.String())
+	}
+	// New content with a false positive; the row still holds the clean body.
+	newContent := marketFrontmatter("rescan-appeal", "") + "\ndocs live under C:\\Users\\alice\\notes\n"
+	update := func() *httptest.ResponseRecorder {
+		req := newRequest(http.MethodPut, "/api/skills/"+id, UpdateSkillRequest{Content: strPtr(newContent)})
+		req = withURLParam(req, "id", id)
+		rec := httptest.NewRecorder()
+		testHandler.UpdateSkill(rec, req)
+		return rec
+	}
+	rec := update()
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("rescan: expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var blocked struct {
+		Findings []struct {
+			File      string `json:"file"`
+			Line      int    `json:"line"`
+			PatternID string `json:"pattern_id"`
+			AppealID  string `json:"appeal_id"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &blocked); err != nil || len(blocked.Findings) != 1 {
+		t.Fatalf("blocked body: %+v err=%v", blocked, err)
+	}
+	f := blocked.Findings[0]
+	submitReq := newRequest(http.MethodPost, "/api/skills/"+id+"/appeals", submitSkillAppealRequest{
+		AppealID: f.AppealID, File: f.File, Line: f.Line, PatternID: f.PatternID,
+	})
+	submitReq = withURLParam(submitReq, "id", id)
+	submitRec := httptest.NewRecorder()
+	testHandler.SubmitSkillAppeal(submitRec, submitReq)
+	if submitRec.Code != http.StatusCreated {
+		t.Fatalf("submit appeal on unsaved content: %d: %s", submitRec.Code, submitRec.Body.String())
+	}
+	// The ledger row must carry the very id the gate issued, otherwise the
+	// owner decides on an id no submission is linked to.
+	var rows int
+	if err := testPool.QueryRow(context.Background(), `SELECT count(*) FROM activity_log WHERE action='skill_appeal_submitted' AND details->>'appeal_id'=$1`, f.AppealID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("submitted rows for gate appeal id = %d err=%v, want 1", rows, err)
+	}
+	decideAppeal(t, id, f.AppealID, true)
+	if rec := update(); rec.Code != http.StatusOK {
+		t.Fatalf("rescan after approval: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// AIFIRST: CR-2026-048 TASK-01 acceptance 4 (AC-14): fixed fixture EXPLAIN
+// showing each of the three new indexes is the access path its query needs.
+// enable_seqscan is disabled for the duration because the fixture tables are
+// too small for the planner to bother otherwise.
+func TestSkillMarketQueriesUseNewIndexes(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database available")
+	}
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		query string
+		index string
+	}{
+		{
+			"usage ranking",
+			`SELECT e.skill_ref, COUNT(DISTINCT e.task_id) FROM skill_usage_event e
+			 JOIN agent_task_queue t ON t.id = e.task_id
+			 WHERE e.workspace_id = '00000000-0000-0000-0000-000000000001' AND t.status = 'completed'
+			 GROUP BY e.skill_ref`,
+			"skill_usage_event_scope_idx",
+		},
+		{
+			"completed task join",
+			`SELECT 1 FROM skill_usage_event e JOIN agent_task_queue t ON t.id = e.task_id WHERE t.status = 'completed'`,
+			"skill_usage_event_task_id_idx",
+		},
+		{
+			"appeal lookup",
+			`SELECT id FROM activity_log
+			 WHERE workspace_id = '00000000-0000-0000-0000-000000000001'
+			   AND action IN ('skill_appeal_approved', 'skill_appeal_rejected')
+			   AND details->>'appeal_id' = 'deadbeef'
+			 ORDER BY created_at DESC LIMIT 1`,
+			"skill_appeal_activity_idx",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := testPool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+				t.Fatalf("disable seqscan: %v", err)
+			}
+			var plan []byte
+			if err := tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+tc.query).Scan(&plan); err != nil {
+				t.Fatalf("explain: %v", err)
+			}
+			if !strings.Contains(string(plan), tc.index) {
+				t.Fatalf("plan does not use %s:\n%s", tc.index, plan)
+			}
+		})
+	}
+}
+
+// blockedAppealID publishes the skill, expects a single blocking finding and
+// returns its appeal id.
+func blockedAppealID(t *testing.T, skillID string) string {
+	t.Helper()
+	rec := publishOrg(t, skillID)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected blocked publish, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var blocked struct {
+		Findings []struct {
+			AppealID string `json:"appeal_id"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &blocked); err != nil || len(blocked.Findings) != 1 {
+		t.Fatalf("blocked body: %+v err=%v", blocked, err)
+	}
+	return blocked.Findings[0].AppealID
+}
+
+func publishOrg(t *testing.T, skillID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := newRequest(http.MethodPut, "/api/skills/"+skillID, UpdateSkillRequest{Visibility: strPtr("org"), OwnerActor: strPtr("Ray")})
+	req = withURLParam(req, "id", skillID)
+	rec := httptest.NewRecorder()
+	testHandler.UpdateSkill(rec, req)
+	return rec
+}
+
+func decideAppeal(t *testing.T, skillID, appealID string, approve bool) {
+	t.Helper()
+	req := newRequest(http.MethodPost, "/api/skills/"+skillID+"/appeals/decide", decideSkillAppealRequest{AppealID: appealID, Approve: approve})
+	req = withURLParam(req, "id", skillID)
+	rec := httptest.NewRecorder()
+	testHandler.DecideSkillAppeal(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("decide(approve=%v): %d: %s", approve, rec.Code, rec.Body.String())
 	}
 }

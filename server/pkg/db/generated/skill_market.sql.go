@@ -13,7 +13,9 @@ import (
 
 const getAppealDecision = `-- name: GetAppealDecision :one
 SELECT id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at FROM activity_log
-WHERE workspace_id = $1 AND action = 'skill_appeal_approved' AND details->>'appeal_id' = $2::text
+WHERE workspace_id = $1
+  AND action IN ('skill_appeal_approved', 'skill_appeal_rejected')
+  AND details->>'appeal_id' = $2::text
 ORDER BY created_at DESC
 LIMIT 1
 `
@@ -23,6 +25,8 @@ type GetAppealDecisionParams struct {
 	AppealID    string      `json:"appeal_id"`
 }
 
+// Latest owner decision for one appeal id, approved OR rejected, so a later
+// rejection revokes an earlier approval instead of being shadowed by it.
 // Served by the 384 partial index (details->>'appeal_id', appeal actions).
 func (q *Queries) GetAppealDecision(ctx context.Context, arg GetAppealDecisionParams) (ActivityLog, error) {
 	row := q.db.QueryRow(ctx, getAppealDecision, arg.WorkspaceID, arg.AppealID)
@@ -133,7 +137,7 @@ func (q *Queries) InsertSkillUsageEvent(ctx context.Context, arg InsertSkillUsag
 }
 
 const listOrgSkillSummariesByWorkspace = `-- name: ListOrgSkillSummariesByWorkspace :many
-SELECT id, workspace_id, name, description, config, visibility, version, owner_actor, created_by, created_at, updated_at
+SELECT id, workspace_id, name, description, content, config, visibility, version, owner_actor, created_by, created_at, updated_at
 FROM skill
 WHERE workspace_id = $1 AND visibility = 'org'
 ORDER BY name ASC
@@ -144,6 +148,7 @@ type ListOrgSkillSummariesByWorkspaceRow struct {
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
 	Name        string             `json:"name"`
 	Description string             `json:"description"`
+	Content     string             `json:"content"`
 	Config      []byte             `json:"config"`
 	Visibility  string             `json:"visibility"`
 	Version     string             `json:"version"`
@@ -153,8 +158,9 @@ type ListOrgSkillSummariesByWorkspaceRow struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
-// Org-visible skills for the market list. Omits the SKILL.md `content` column,
-// same payload-size rationale as ListSkillSummariesByWorkspace.
+// Org-visible skills for the market list. `content` is selected only so the
+// handler can read the frontmatter `source` marker (FR-23); it is not part of
+// the market payload, same size rationale as ListSkillSummariesByWorkspace.
 func (q *Queries) ListOrgSkillSummariesByWorkspace(ctx context.Context, workspaceID pgtype.UUID) ([]ListOrgSkillSummariesByWorkspaceRow, error) {
 	rows, err := q.db.Query(ctx, listOrgSkillSummariesByWorkspace, workspaceID)
 	if err != nil {
@@ -169,6 +175,7 @@ func (q *Queries) ListOrgSkillSummariesByWorkspace(ctx context.Context, workspac
 			&i.WorkspaceID,
 			&i.Name,
 			&i.Description,
+			&i.Content,
 			&i.Config,
 			&i.Visibility,
 			&i.Version,

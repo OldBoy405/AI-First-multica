@@ -821,6 +821,8 @@ export interface SkillSummary {
   visibility?: string;
   version?: string;
   owner_actor?: string | null;
+  /** Parsed SKILL.md frontmatter (metadata card, `source`, requirements). */
+  metadata?: Record<string, string>;
 	/** Present only when returned from an agent-scoped assignment endpoint. */
 	enabled?: boolean;
 }
@@ -867,6 +869,8 @@ export interface MarketSkill {
   version: string;
   owner_actor: string;
   usage_count: number;
+  /** Frontmatter `source` marker, e.g. "session-export". */
+  source: string;
 }
 
 export interface MarketBuiltin {
@@ -896,6 +900,8 @@ export interface SkillPublishBlockedBody {
 }
 
 export interface SubmitSkillAppealRequest {
+  /** The appeal id the publish gate returned with the finding. */
+  appeal_id: string;
   file: string;
   line: number;
   pattern_id: string;

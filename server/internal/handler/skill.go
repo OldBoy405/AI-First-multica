@@ -22,7 +22,6 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
-	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -52,9 +51,13 @@ type SkillResponse struct {
 	Visibility  string  `json:"visibility"`
 	Version     string  `json:"version"`
 	OwnerActor  *string `json:"owner_actor"`
-	CreatedBy   *string `json:"created_by"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	// Metadata is the parsed SKILL.md frontmatter (metadata card fields,
+	// `source` marker, runtime requirements). Parsed once server-side so no
+	// client has to reimplement frontmatter parsing (PRD FR-20/FR-21/FR-23).
+	Metadata  map[string]string `json:"metadata"`
+	CreatedBy *string           `json:"created_by"`
+	CreatedAt string            `json:"created_at"`
+	UpdatedAt string            `json:"updated_at"`
 }
 
 // SkillSummaryResponse is the list-endpoint shape: everything SkillResponse
@@ -149,6 +152,7 @@ func skillToResponse(s db.Skill) SkillResponse {
 		Visibility:  s.Visibility,
 		Version:     s.Version,
 		OwnerActor:  ownerActor,
+		Metadata:    skillpkg.ParseSkillMetadata(s.Content).Fields,
 		CreatedBy:   uuidToPtr(s.CreatedBy),
 		CreatedAt:   timestampToString(s.CreatedAt),
 		UpdatedAt:   timestampToString(s.UpdatedAt),
@@ -502,31 +506,7 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 				fileSet[f.Path] = f.Content
 			}
 		}
-		bundleFiles := make([]skillbundle.File, 0, len(fileSet))
-		for p, c := range fileSet {
-			bundleFiles = append(bundleFiles, skillbundle.File{Path: p, Content: c})
-		}
-		contentHash := skillbundle.BuildManifest(skillbundle.Skill{
-			ID:          id,
-			Source:      skillbundle.SourceWorkspace,
-			Name:        skill.Name,
-			Description: skill.Description,
-			Content:     effContent,
-			Files:       bundleFiles,
-		}).Hash
-
-		gate := skillpkg.EvaluatePublish(effContent, fileSet, effOwner, id, contentHash, nil)
-		if len(gate.Findings) > 0 {
-			// Per-item release: an owner-approved appeal id drops only its own finding.
-			approved := make(map[string]bool, len(gate.Findings))
-			wsUUID := parseUUID(h.resolveWorkspaceID(r))
-			for _, f := range gate.Findings {
-				if _, err := h.Queries.GetAppealDecision(r.Context(), db.GetAppealDecisionParams{WorkspaceID: wsUUID, AppealID: f.AppealID}); err == nil {
-					approved[f.AppealID] = true
-				}
-			}
-			gate = skillpkg.EvaluatePublish(effContent, fileSet, effOwner, id, contentHash, approved)
-		}
+		gate := runPublishGate(r.Context(), h.Queries, parseUUID(h.resolveWorkspaceID(r)), skill, effContent, effOwner, fileSet)
 		if gate.Blocked() {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 				"code":     "skill_publish_blocked",

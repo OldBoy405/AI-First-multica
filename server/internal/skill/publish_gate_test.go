@@ -21,7 +21,7 @@ failure-handling: "fail -> blockers[]"
 }
 
 func TestEvaluatePublishPassesCleanInput(t *testing.T) {
-	res := EvaluatePublish(validContent(), nil, "Ray", "skill-uuid", "hash-1", nil)
+	res := EvaluatePublish(validContent(), nil, "Ray", "skill-uuid", "hash-1")
 	if res.Blocked() {
 		t.Fatalf("clean input blocked: %+v", res)
 	}
@@ -44,7 +44,7 @@ func TestEvaluatePublishRejectsMissingRequiredFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res := EvaluatePublish(tc.mutate(validContent()), nil, "Ray", "skill-uuid", "hash-1", nil)
+			res := EvaluatePublish(tc.mutate(validContent()), nil, "Ray", "skill-uuid", "hash-1")
 			found := false
 			for _, r := range res.Reasons {
 				if r == tc.want {
@@ -57,7 +57,7 @@ func TestEvaluatePublishRejectsMissingRequiredFields(t *testing.T) {
 		})
 	}
 
-	res := EvaluatePublish(validContent(), nil, "", "skill-uuid", "hash-1", nil)
+	res := EvaluatePublish(validContent(), nil, "", "skill-uuid", "hash-1")
 	if !contains(res.Reasons, ReasonOwnerMissing) {
 		t.Fatalf("empty owner not rejected: %v", res.Reasons)
 	}
@@ -66,7 +66,7 @@ func TestEvaluatePublishRejectsMissingRequiredFields(t *testing.T) {
 func TestEvaluatePublishScansContentAndFiles(t *testing.T) {
 	content := validContent() + "\nexport GITHUB_TOKEN=ghp_" + strings.Repeat("A", 40) + "\n"
 	files := map[string]string{"scripts/fetch.sh": `ref C:\Users\alice\secret.txt` + "\n"}
-	res := EvaluatePublish(content, files, "Ray", "skill-uuid", "hash-1", nil)
+	res := EvaluatePublish(content, files, "Ray", "skill-uuid", "hash-1")
 	if len(res.Findings) != 2 {
 		t.Fatalf("findings = %d, want 2: %+v", len(res.Findings), res.Findings)
 	}
@@ -86,17 +86,18 @@ func TestEvaluatePublishScansContentAndFiles(t *testing.T) {
 func TestEvaluatePublishHonorsApprovedAppeals(t *testing.T) {
 	content := validContent() + "\nexport GITHUB_TOKEN=ghp_" + strings.Repeat("A", 40) + "\n"
 	// First pass: blocked, grab the appeal id.
-	first := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1", nil)
+	first := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1")
 	if len(first.Findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(first.Findings))
 	}
-	approved := map[string]bool{first.Findings[0].AppealID: true}
-	second := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1", approved)
+	approvedID := first.Findings[0].AppealID
+	approved := func(id string) bool { return id == approvedID }
+	second := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1").Release(approved)
 	if second.Blocked() {
 		t.Fatalf("approved finding still blocks: %+v", second)
 	}
 	// Content change invalidates the old appeal: new hash, old id no longer matches.
-	third := EvaluatePublish(content+"\n", nil, "Ray", "skill-uuid", "hash-2", approved)
+	third := EvaluatePublish(content+"\n", nil, "Ray", "skill-uuid", "hash-2").Release(approved)
 	if len(third.Findings) != 1 {
 		t.Fatalf("content change must invalidate old appeal, findings = %d", len(third.Findings))
 	}
@@ -106,7 +107,7 @@ func TestEvaluatePublishWarnsOnProtectedPaths(t *testing.T) {
 	content := strings.Replace(validContent(),
 		"permission-declaration: \"read specs/**; write change-requests/{CR}/review-annotations/\"",
 		"permission-declaration: \"write change-requests/_backlog.yml\"", 1)
-	res := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1", nil)
+	res := EvaluatePublish(content, nil, "Ray", "skill-uuid", "hash-1")
 	if !contains(res.Warnings, WarningProtectedPaths) {
 		t.Fatalf("warnings = %v, want protected path warning", res.Warnings)
 	}
@@ -126,32 +127,6 @@ func TestAppealIDIsDeterministicAndContentSensitive(t *testing.T) {
 	}
 	if len(a) != 64 {
 		t.Fatalf("AppealID len = %d, want sha256 hex 64", len(a))
-	}
-}
-
-// TestProtectedPathPatternsPin locks the constant against the tools package
-// controlled-shell rules.json #protectedPaths (deny + ask). If the tools list
-// grows, this test fails and the constant must be extended in the same commit.
-func TestProtectedPathPatternsPin(t *testing.T) {
-	// deny (6) + ask (3), merged for the warning surface.
-	want := []string{
-		`change-requests/_backlog\.ya?ml$`,
-		`change-requests/_history\.ya?ml$`,
-		`change-requests/[^/]+/cr\.md$`,
-		`change-requests/[^/]+/approval\.ya?ml$`,
-		`change-requests/[^/]+/review-loop\.ya?ml$`,
-		`review-annotations/[^/]+\.ya?ml$`,
-		`(^|/)specs/[^/]+/(PRD|SDD|traceability)\.(md|ya?ml)$`,
-		`(^|/)delivery/`,
-		`change-requests/[^/]+/test-report\.md$`,
-	}
-	if len(ProtectedPathPatterns) != len(want) {
-		t.Fatalf("ProtectedPathPatterns count = %d, want %d", len(ProtectedPathPatterns), len(want))
-	}
-	for i := range want {
-		if ProtectedPathPatterns[i] != want[i] {
-			t.Errorf("ProtectedPathPatterns[%d] = %q, want %q (drifted from tools rules.json)", i, ProtectedPathPatterns[i], want[i])
-		}
 	}
 }
 

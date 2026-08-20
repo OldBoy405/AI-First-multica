@@ -2,9 +2,8 @@
 
 // AIFIRST: CR-2026-048 TASK-09: org skill market page. One query returns org
 // workspace skills + builtins, each with deduplicated completed-task usage.
-// The session-export filter reads the frontmatter `source` marker parsed
-// server-side for detail pages; for the list it filters on name/description
-// presence of org skills exported from sessions.
+// The session-export filter matches the frontmatter `source` marker parsed
+// server-side (FR-23); builtins carry no marker, so the filter empties them.
 
 import { useMemo, useState } from "react";
 import { ArrowDownUp, Globe, Package } from "lucide-react";
@@ -30,13 +29,16 @@ function useSkillMarketQuery(wsId: string) {
 export function MarketPage() {
   const { t } = useT("skills");
   const wsId = useWorkspaceId();
-  const { data, isLoading } = useSkillMarketQuery(wsId);
+  const { data, isLoading, isError } = useSkillMarketQuery(wsId);
   const [query, setQuery] = useState("");
   const [sessionOnly, setSessionOnly] = useState(false);
   const [sortByUsage, setSortByUsage] = useState(true);
 
   const workspaceSkills = useMemo(() => {
     let rows = data?.workspace ?? [];
+    if (sessionOnly) {
+      rows = rows.filter((s) => s.source === "session-export");
+    }
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       rows = rows.filter(
@@ -51,10 +53,11 @@ export function MarketPage() {
         : a.name.localeCompare(b.name),
     );
     return rows;
-  }, [data, query, sortByUsage]);
+  }, [data, query, sortByUsage, sessionOnly]);
 
   const builtins = useMemo(() => {
-    let rows = data?.builtin ?? [];
+    // Builtins have no SKILL.md frontmatter, so none carries the marker.
+    let rows = sessionOnly ? [] : (data?.builtin ?? []);
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       rows = rows.filter(
@@ -68,7 +71,7 @@ export function MarketPage() {
         ? b.usage_count - a.usage_count || a.name.localeCompare(b.name)
         : a.name.localeCompare(b.name),
     );
-  }, [data, query, sortByUsage]);
+  }, [data, query, sortByUsage, sessionOnly]);
 
   const renderSkill = (s: MarketSkill) => (
     <AppLink
@@ -81,7 +84,7 @@ export function MarketPage() {
         <div className="flex items-center gap-2">
           <span className="truncate text-body font-medium">{s.name}</span>
           {s.version && (
-            <span className="text-caption text-muted-foreground">v{s.version}</span>
+            <span className="text-caption text-muted-foreground">{`v${s.version}`}</span>
           )}
         </div>
         <p className="truncate text-caption text-muted-foreground">{s.description}</p>
@@ -104,7 +107,7 @@ export function MarketPage() {
           <span className="truncate text-body font-medium">{b.name}</span>
           <Badge variant="outline" className="gap-1">
             <Package className="h-3 w-3" />
-            builtin
+            {t(($) => $.market.builtin)}
           </Badge>
         </div>
         <p className="truncate text-caption text-muted-foreground">{b.description}</p>
@@ -122,6 +125,14 @@ export function MarketPage() {
         {[1, 2, 3].map((i) => (
           <Skeleton key={i} className="h-16 w-full" />
         ))}
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="mx-auto w-full max-w-3xl p-4 text-body text-destructive sm:p-6 md:p-8">
+        {t(($) => $.market.load_failed)}
       </div>
     );
   }
@@ -181,11 +192,6 @@ export function MarketPage() {
         </h2>
         <div className="space-y-2">{builtins.map(renderBuiltin)}</div>
       </section>
-      {sessionOnly && (
-        <p className="mt-4 text-caption text-muted-foreground">
-          {t(($) => $.market.session_export_hint)}
-        </p>
-      )}
     </div>
   );
 }

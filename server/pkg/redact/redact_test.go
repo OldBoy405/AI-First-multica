@@ -514,3 +514,20 @@ func TestFindingsLocatesSecretsWithoutLeakingPlaintext(t *testing.T) {
 		}
 	}
 }
+
+// AIFIRST: CR-2026-048 review attempt 1: Text() masks the local user's home
+// dir before running patterns, so the masked form must survive the new
+// personal_path rule (and CRLF input must not leak a trailing \r).
+func TestTextKeepsMaskedHomeDirAndFindingsHandleCRLF(t *testing.T) {
+	t.Parallel()
+	if got := Text("/Users/****/Documents/a.txt"); !strings.Contains(got, "****") {
+		t.Errorf("masked home dir re-redacted by personal_path: %q", got)
+	}
+	got := Findings("clean line\r\nexport TOKEN=" + strings.Repeat("z", 20) + "\r\n")
+	if len(got) != 1 || got[0].Line != 2 {
+		t.Fatalf("findings = %+v, want one hit on line 2", got)
+	}
+	if strings.Contains(got[0].Excerpt, "\r") {
+		t.Errorf("excerpt keeps CR: %q", got[0].Excerpt)
+	}
+}

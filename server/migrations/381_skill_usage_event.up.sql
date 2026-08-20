@@ -13,3 +13,6 @@ CREATE TABLE skill_usage_event (
     project_id UUID,
     used_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+COMMENT ON TABLE skill_usage_event IS
+    'Append-only skill usage telemetry. used_at is DISPATCH-TIME MATERIALIZATION, not completion-time use (PRD FR-7): a claim writes one row per skill ref and retries write more rows, so every aggregation must join agent_task_queue with status=''completed'' and count DISTINCT task_id per skill_ref.';

@@ -79,6 +79,19 @@ type GateResult struct {
 // Blocked reports whether the gate refuses the publish.
 func (g GateResult) Blocked() bool { return len(g.Reasons) > 0 || len(g.Findings) > 0 }
 
+// Release drops the findings an owner already approved (per-item release,
+// never a whole-package pass). Callers scan once and release afterwards.
+func (g GateResult) Release(approved func(appealID string) bool) GateResult {
+	var kept []GateFinding
+	for _, f := range g.Findings {
+		if !approved(f.AppealID) {
+			kept = append(kept, f)
+		}
+	}
+	g.Findings = kept
+	return g
+}
+
 // AppealID binds an appeal to the exact content hash of the skill so an
 // approval can never outlive the content it was granted for: any content
 // change yields a different hash and the old appeal stops matching.
@@ -96,9 +109,9 @@ func AppealID(skillRef, contentHash, file string, line int, patternID string) st
 //   - ownerActor: effective owner (request override or stored row).
 //   - skillRef, contentHash: identity inputs for AppealID (contentHash comes
 //     from skillbundle.BuildManifest(...).Hash, computed by the caller).
-//   - approved: appeal ids already approved by an owner; matching findings
-//     are dropped (per-item release, never a whole-package pass).
-func EvaluatePublish(content string, files map[string]string, ownerActor, skillRef, contentHash string, approved map[string]bool) GateResult {
+//
+// Owner-approved findings are dropped afterwards via GateResult.Release.
+func EvaluatePublish(content string, files map[string]string, ownerActor, skillRef, contentHash string) GateResult {
 	var res GateResult
 
 	meta := ParseSkillMetadata(content)
@@ -127,16 +140,12 @@ func EvaluatePublish(content string, files map[string]string, ownerActor, skillR
 
 	scan := func(path, text string) {
 		for _, f := range redact.Findings(text) {
-			appealID := AppealID(skillRef, contentHash, path, f.Line, f.PatternID)
-			if approved[appealID] {
-				continue
-			}
 			res.Findings = append(res.Findings, GateFinding{
 				File:      path,
 				Line:      f.Line,
 				PatternID: f.PatternID,
 				Excerpt:   f.Excerpt,
-				AppealID:  appealID,
+				AppealID:  AppealID(skillRef, contentHash, path, f.Line, f.PatternID),
 			})
 		}
 	}

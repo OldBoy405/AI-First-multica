@@ -11,39 +11,23 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	skillpkg "github.com/multica-ai/multica/server/internal/skill"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
-	"github.com/multica-ai/multica/server/pkg/skillbundle"
 )
 
-// skillAppealActions is the closed action set for appeal rows. Forged actions
-// never enter through these handlers; the set is asserted by test.
-var skillAppealActions = map[string]bool{
-	"skill_appeal_submitted": true,
-	"skill_appeal_approved":  true,
-	"skill_appeal_rejected":  true,
-}
-
-func appealContentHash(h *Handler, r *http.Request, skillRow db.Skill) (string, error) {
-	rows, err := h.Queries.ListSkillFiles(r.Context(), skillRow.ID)
-	if err != nil {
-		return "", err
-	}
-	bundleFiles := make([]skillbundle.File, 0, len(rows))
-	for _, f := range rows {
-		bundleFiles = append(bundleFiles, skillbundle.File{Path: f.Path, Content: f.Content})
-	}
-	return skillbundle.BuildManifest(skillbundle.Skill{
-		ID:          uuidToString(skillRow.ID),
-		Source:      skillbundle.SourceWorkspace,
-		Name:        skillRow.Name,
-		Description: skillRow.Description,
-		Content:     skillRow.Content,
-		Files:       bundleFiles,
-	}).Hash, nil
-}
+// Appeal ledger actions (closed set, activity_log#action).
+const (
+	appealActionSubmitted = "skill_appeal_submitted"
+	appealActionApproved  = "skill_appeal_approved"
+	appealActionRejected  = "skill_appeal_rejected"
+)
 
 type submitSkillAppealRequest struct {
+	// AppealID is the id the gate returned with the finding. It already binds
+	// skill + content hash + file + line + pattern, so the server does not
+	// recompute it: the blocked content may be an unsaved request body the
+	// server cannot reconstruct, and only an owner decision on an id the gate
+	// itself produces can release anything.
+	AppealID  string `json:"appeal_id"`
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	PatternID string `json:"pattern_id"`
@@ -65,26 +49,19 @@ func (h *Handler) SubmitSkillAppeal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.File == "" || req.PatternID == "" || req.Line < 1 {
-		writeError(w, http.StatusBadRequest, "file, line and pattern_id are required")
+	if len(req.AppealID) != 64 || req.File == "" || req.PatternID == "" || req.Line < 1 {
+		writeError(w, http.StatusBadRequest, "appeal_id, file, line and pattern_id are required")
 		return
 	}
-
-	contentHash, err := appealContentHash(h, r, skillRow)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to hash skill content: "+err.Error())
-		return
-	}
-	appealID := skillpkg.AppealID(id, contentHash, req.File, req.Line, req.PatternID)
 
 	wsUUID := parseUUID(h.resolveWorkspaceID(r))
-	already, err := h.Queries.HasAppealSubmitted(r.Context(), db.HasAppealSubmittedParams{WorkspaceID: wsUUID, AppealID: appealID})
+	already, err := h.Queries.HasAppealSubmitted(r.Context(), db.HasAppealSubmittedParams{WorkspaceID: wsUUID, AppealID: req.AppealID})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check appeal: "+err.Error())
 		return
 	}
 	if already {
-		writeJSON(w, http.StatusOK, map[string]any{"appeal_id": appealID, "duplicate": true})
+		writeJSON(w, http.StatusOK, map[string]any{"appeal_id": req.AppealID, "duplicate": true})
 		return
 	}
 
@@ -93,12 +70,11 @@ func (h *Handler) SubmitSkillAppeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	details, err := json.Marshal(map[string]any{
-		"appeal_id":    appealID,
-		"skill_id":     id,
-		"content_hash": contentHash,
-		"file":         req.File,
-		"line":         req.Line,
-		"pattern_id":   req.PatternID,
+		"appeal_id":  req.AppealID,
+		"skill_id":   id,
+		"file":       req.File,
+		"line":       req.Line,
+		"pattern_id": req.PatternID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to encode appeal: "+err.Error())
@@ -108,13 +84,13 @@ func (h *Handler) SubmitSkillAppeal(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: wsUUID,
 		ActorType:   pgtype.Text{String: "member", Valid: true},
 		ActorID:     parseUUID(actorID),
-		Action:      "skill_appeal_submitted",
+		Action:      appealActionSubmitted,
 		Details:     details,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record appeal: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"appeal_id": appealID})
+	writeJSON(w, http.StatusCreated, map[string]any{"appeal_id": req.AppealID})
 }
 
 type decideSkillAppealRequest struct {
@@ -148,9 +124,9 @@ func (h *Handler) DecideSkillAppeal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	action := "skill_appeal_rejected"
+	action := appealActionRejected
 	if req.Approve {
-		action = "skill_appeal_approved"
+		action = appealActionApproved
 	}
 	details, err := json.Marshal(map[string]any{
 		"appeal_id":  req.AppealID,

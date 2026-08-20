@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { Button } from "@multica/ui/components/ui/button";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@multica/ui/components/ui/dialog";
+import { parseRequirements } from "../lib/skill-metadata";
 import { useT } from "../../i18n";
 
 export function SkillMarketCard({
@@ -54,6 +55,7 @@ export function SkillMarketCard({
   const appeal = async (f: SkillGateFinding) => {
     try {
       await api.submitSkillAppeal(skill.id, {
+        appeal_id: f.appeal_id,
         file: f.file,
         line: f.line,
         pattern_id: f.pattern_id,
@@ -75,6 +77,7 @@ export function SkillMarketCard({
   };
 
   return (
+    <div className="space-y-2">
     <div className="flex flex-wrap items-center gap-2">
       {isOrg ? (
         <Badge variant="secondary" className="gap-1">
@@ -154,6 +157,52 @@ export function SkillMarketCard({
             </DialogFooter>
           </DialogContent>
         </Dialog>
+      )}
+    </div>
+    {isOrg && <SkillMetadataCard metadata={skill.metadata} />}
+    </div>
+  );
+}
+
+// AIFIRST: CR-2026-048 TASK-09 (FR-20/FR-21): the metadata card and runtime
+// requirement tags for an org-visible skill. Values come from the frontmatter
+// parsed server-side (`skill.metadata`); unknown or missing fields are simply
+// not rendered, never an error.
+const CARD_FIELDS = [
+  ["applicable-scenarios", "applicable_scenarios"],
+  ["context-dependencies", "context_dependencies"],
+  ["permission-declaration", "permission_declaration"],
+  ["failure-handling", "failure_handling"],
+] as const;
+
+export function SkillMetadataCard({ metadata }: { metadata?: Record<string, string> }) {
+  const { t } = useT("skills");
+  if (!metadata) return null;
+  const rows = CARD_FIELDS.filter(([key]) => metadata[key]);
+  const requirements = parseRequirements(metadata.requirements);
+  if (rows.length === 0 && requirements.length === 0) return null;
+  return (
+    <div className="rounded-md border p-3">
+      <div className="mb-2 text-caption font-medium">{t(($) => $.market.card_title)}</div>
+      <dl className="space-y-1">
+        {rows.map(([key, label]) => (
+          <div key={key} className="flex gap-2 text-caption">
+            <dt className="shrink-0 text-muted-foreground">{t(($) => $.market[label])}</dt>
+            <dd className="min-w-0 break-words">{metadata[key]}</dd>
+          </div>
+        ))}
+      </dl>
+      {requirements.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1">
+          <span className="text-caption text-muted-foreground">
+            {t(($) => $.market.requirements)}
+          </span>
+          {requirements.map((r) => (
+            <Badge key={r} variant="outline">
+              {r}
+            </Badge>
+          ))}
+        </div>
       )}
     </div>
   );

@@ -207,7 +207,9 @@ const maxFindingExcerptLen = 120
 // never carry the matched secret in plaintext back to a caller.
 func Findings(s string) []Finding {
 	var out []Finding
-	for i, line := range strings.Split(s, "\n") {
+	// CRLF is normalized first: Windows checkouts would otherwise leave a
+	// trailing \r inside every excerpt.
+	for i, line := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
 		for _, p := range patterns {
 			if p.re.FindStringIndex(line) == nil {
 				continue

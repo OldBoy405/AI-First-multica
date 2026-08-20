@@ -7,6 +7,8 @@ package handler
 
 import (
 	"net/http"
+
+	skillpkg "github.com/multica-ai/multica/server/internal/skill"
 )
 
 // MarketSkill is one workspace skill in the market list.
@@ -17,6 +19,10 @@ type MarketSkill struct {
 	Version     string `json:"version"`
 	OwnerActor  string `json:"owner_actor"`
 	UsageCount  int64  `json:"usage_count"`
+	// Source is the frontmatter `source` marker (e.g. "session-export"),
+	// parsed server-side so the list filter uses the same parse as the detail
+	// page (FR-23). Empty when the skill declares none.
+	Source string `json:"source"`
 }
 
 // MarketBuiltin is one builtin skill in the market list. Builtins have no
@@ -68,6 +74,7 @@ func (h *Handler) GetSkillMarket(w http.ResponseWriter, r *http.Request) {
 			Version:     s.Version,
 			OwnerActor:  s.OwnerActor.String,
 			UsageCount:  usage[uuidToString(s.ID)],
+			Source:      skillpkg.ParseSkillMetadata(s.Content).Fields["source"],
 		})
 	}
 	for _, b := range h.TaskService.BuiltinSkills() {

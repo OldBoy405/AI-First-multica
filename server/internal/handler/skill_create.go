@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	skillpkg "github.com/multica-ai/multica/server/internal/skill"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
-	"github.com/multica-ai/multica/server/pkg/skillbundle"
 )
 
 type skillCreateInput struct {
@@ -187,30 +186,10 @@ func (h *Handler) overwriteSkillWithFiles(ctx context.Context, input skillOverwr
 	// its content/files are replaced (SDD §3.1 trigger 2).
 	if existing.Visibility == "org" {
 		fileSet := make(map[string]string, len(input.Files))
-		bundleFiles := make([]skillbundle.File, 0, len(input.Files))
 		for _, f := range input.Files {
 			fileSet[f.Path] = f.Content
-			bundleFiles = append(bundleFiles, skillbundle.File{Path: f.Path, Content: f.Content})
 		}
-		contentHash := skillbundle.BuildManifest(skillbundle.Skill{
-			ID:          uuidToString(existing.ID),
-			Source:      skillbundle.SourceWorkspace,
-			Name:        existing.Name,
-			Description: existing.Description,
-			Content:     input.Content,
-			Files:       bundleFiles,
-		}).Hash
-		gate := skillpkg.EvaluatePublish(input.Content, fileSet, existing.OwnerActor.String, uuidToString(existing.ID), contentHash, nil)
-		if len(gate.Findings) > 0 {
-			approved := make(map[string]bool, len(gate.Findings))
-			for _, f := range gate.Findings {
-				if _, err := qtx.GetAppealDecision(ctx, db.GetAppealDecisionParams{WorkspaceID: existing.WorkspaceID, AppealID: f.AppealID}); err == nil {
-					approved[f.AppealID] = true
-				}
-			}
-			gate = skillpkg.EvaluatePublish(input.Content, fileSet, existing.OwnerActor.String, uuidToString(existing.ID), contentHash, approved)
-		}
-		if gate.Blocked() {
+		if runPublishGate(ctx, qtx, existing.WorkspaceID, existing, input.Content, existing.OwnerActor.String, fileSet).Blocked() {
 			return SkillWithFilesResponse{}, errSkillPublishGateBlocked
 		}
 	}

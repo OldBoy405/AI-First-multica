@@ -1166,6 +1166,7 @@ type SkillToLabel struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+// Append-only skill usage telemetry. used_at is DISPATCH-TIME MATERIALIZATION, not completion-time use (PRD FR-7): a claim writes one row per skill ref and retries write more rows, so every aggregation must join agent_task_queue with status='completed' and count DISTINCT task_id per skill_ref.
 type SkillUsageEvent struct {
 	ID          pgtype.UUID        `json:"id"`
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`

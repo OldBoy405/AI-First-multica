@@ -16,9 +16,10 @@ WHERE e.workspace_id = $1 AND t.status = 'completed'
 GROUP BY e.skill_ref;
 
 -- name: ListOrgSkillSummariesByWorkspace :many
--- Org-visible skills for the market list. Omits the SKILL.md `content` column,
--- same payload-size rationale as ListSkillSummariesByWorkspace.
-SELECT id, workspace_id, name, description, config, visibility, version, owner_actor, created_by, created_at, updated_at
+-- Org-visible skills for the market list. `content` is selected only so the
+-- handler can read the frontmatter `source` marker (FR-23); it is not part of
+-- the market payload, same size rationale as ListSkillSummariesByWorkspace.
+SELECT id, workspace_id, name, description, content, config, visibility, version, owner_actor, created_by, created_at, updated_at
 FROM skill
 WHERE workspace_id = $1 AND visibility = 'org'
 ORDER BY name ASC;
@@ -30,9 +31,13 @@ VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: GetAppealDecision :one
+-- Latest owner decision for one appeal id, approved OR rejected, so a later
+-- rejection revokes an earlier approval instead of being shadowed by it.
 -- Served by the 384 partial index (details->>'appeal_id', appeal actions).
 SELECT * FROM activity_log
-WHERE workspace_id = $1 AND action = 'skill_appeal_approved' AND details->>'appeal_id' = sqlc.arg('appeal_id')::text
+WHERE workspace_id = $1
+  AND action IN ('skill_appeal_approved', 'skill_appeal_rejected')
+  AND details->>'appeal_id' = sqlc.arg('appeal_id')::text
 ORDER BY created_at DESC
 LIMIT 1;
 
