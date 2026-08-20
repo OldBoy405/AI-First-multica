@@ -31,6 +31,18 @@ import (
 // MaxEventsPerBatch bounds one report call (PRD FR-2).
 const MaxEventsPerBatch = 100
 
+// MaxTracePayloadBytes bounds one trace payload (CR-2026-049 TASK-06, SDD §3.1);
+// the current accumulated baseline is ~192 KiB.
+const MaxTracePayloadBytes = 2 << 20 // 2 MiB
+
+// Trace ingest rejection codes (CR-2026-049 TASK-06): surfaced as rejected
+// event codes so the daemon keeps the outbox file (never deletes on reject).
+var (
+	errBadTracePayload          = errors.New("BAD_TRACE_PAYLOAD")
+	errTracePayloadTooLarge     = errors.New("TRACE_PAYLOAD_TOO_LARGE")
+	errEventIdempotencyConflict = errors.New("EVENT_IDEMPOTENCY_CONFLICT")
+)
+
 // EventCRUpdated is the WS event type broadcast to workspace rooms after a
 // projection change (board refresh signal).
 const EventCRUpdated = protocol.EventCRUpdated
@@ -43,6 +55,7 @@ var knownEventKinds = map[string]bool{
 	"audit":    true, // TASK-10: activity_log rows, bypasses the cr ledger
 	"snapshot": true, // TASK-07: daemon-mode reconcile, bypasses the cr ledger
 	"review":   true, // CR-2026-011 TASK-03: review-verdict visibility (blocked/passed), not a status transition
+	"trace":    true, // CR-2026-049 TASK-06: cross-CR traceability snapshot, ledger-only (no status transition)
 }
 
 // ledgerlessKinds carry no commit sha (the ledger's idempotency key) and may
@@ -146,6 +159,16 @@ func (s *SyncService) HandleCREvents(w http.ResponseWriter, r *http.Request) {
 			resp.Rejected = append(resp.Rejected, rejectedEvent{File: ev.File, Code: code})
 			continue
 		}
+		if ev.EventKind == "trace" {
+			// CR-2026-049 TASK-06: ledger-only ingest with its own transaction and
+			// rejection codes; rejected files stay on the daemon (never deleted).
+			if err := s.ingestTrace(r.Context(), workspaceID, ev); err != nil {
+				resp.Rejected = append(resp.Rejected, rejectedEvent{File: ev.File, Code: err.Error()})
+				continue
+			}
+			resp.Accepted = append(resp.Accepted, ev.File)
+			continue
+		}
 		if err := s.ingest(r.Context(), workspaceID, ev); err != nil {
 			resp.Rejected = append(resp.Rejected, rejectedEvent{File: ev.File, Code: "INGEST_FAILED"})
 			continue
@@ -170,6 +193,9 @@ func validateEvent(ev OutboxEvent) string {
 	}
 	if ev.OccurredAt.IsZero() {
 		return "BAD_EVENT"
+	}
+	if ev.EventKind == "trace" && len(ev.Payload) > MaxTracePayloadBytes {
+		return "TRACE_PAYLOAD_TOO_LARGE"
 	}
 	return ""
 }
@@ -214,6 +240,120 @@ func (s *SyncService) ingest(ctx context.Context, workspaceID string, ev OutboxE
 		WHERE workspace_id = $1 AND cr_id = $2 AND commit_sha = $3 AND event_kind = $4`,
 		workspaceID, ev.CRID, ev.CommitSHA, ev.EventKind)
 	return err
+}
+
+// CR-2026-049 TASK-06 (SDD §3.1): trace is a ledger-only event — the canonical
+// envelope is {spec_id, traceability} where traceability carries spec-id/cr-ref/
+// milestones; exactly one milestone must belong to this event's CR.
+func validateTracePayload(ev OutboxEvent, payload json.RawMessage) error {
+	var env struct {
+		SpecID       string          `json:"spec_id"`
+		Traceability json.RawMessage `json:"traceability"`
+	}
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return errBadTracePayload
+	}
+	if env.SpecID == "" || len(env.Traceability) == 0 {
+		return errBadTracePayload
+	}
+	var t struct {
+		SpecID     string            `json:"spec-id"`
+		CRRef      string            `json:"cr-ref"`
+		Milestones []json.RawMessage `json:"milestones"`
+	}
+	if err := json.Unmarshal(env.Traceability, &t); err != nil {
+		return errBadTracePayload
+	}
+	if t.SpecID != env.SpecID || t.SpecID == "" {
+		return errBadTracePayload
+	}
+	if t.CRRef != ev.CRID {
+		return errBadTracePayload
+	}
+	if len(t.Milestones) == 0 {
+		return errBadTracePayload
+	}
+	mine := 0
+	for _, m := range t.Milestones {
+		var seg struct {
+			CR string `json:"cr"`
+		}
+		if err := json.Unmarshal(m, &seg); err != nil {
+			return errBadTracePayload
+		}
+		if seg.CR == ev.CRID {
+			mine++
+		}
+	}
+	if mine != 1 {
+		// New-event ingestion requires the event's CR to appear exactly once
+		// in the snapshot (SDD §3.5).
+		return errBadTracePayload
+	}
+	return nil
+}
+
+// ingestTrace records a trace event in a recoverable transaction (TD-B3):
+// insert-or-load → FOR UPDATE → processed/idempotency check → processed_at →
+// commit. Only a committed processed row is acked; a conflicting payload for
+// the same key is rejected with EVENT_IDEMPOTENCY_CONFLICT and the file stays
+// on the daemon. No cr.status transition is ever applied (ledger-only).
+func (s *SyncService) ingestTrace(ctx context.Context, workspaceID string, ev OutboxEvent) error {
+	payload := ev.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage(`{}`)
+	}
+	if len(payload) > MaxTracePayloadBytes {
+		return errTracePayloadTooLarge
+	}
+	if err := validateTracePayload(ev, payload); err != nil {
+		return err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. insert-or-load on the workspace-scoped idempotency key.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, evidence, actor, occurred_at)
+		VALUES ($1, $2, $3, 'trace', $4, '{}', $5, $6)
+		ON CONFLICT (workspace_id, cr_id, commit_sha, event_kind) DO NOTHING`,
+		workspaceID, ev.CRID, ev.CommitSHA, payload, ev.Actor, ev.OccurredAt); err != nil {
+		return err
+	}
+	// 2. lock the row for the rest of the transaction.
+	var id int64
+	var processedAt *time.Time
+	var existing []byte
+	err = tx.QueryRow(ctx, `
+		SELECT id, processed_at, payload FROM cr_sync_event
+		WHERE workspace_id = $1 AND cr_id = $2 AND commit_sha = $3 AND event_kind = 'trace'
+		FOR UPDATE`, workspaceID, ev.CRID, ev.CommitSHA).Scan(&id, &processedAt, &existing)
+	if err != nil {
+		return err
+	}
+	// 3. already processed: JSONB semantic equality → idempotent success;
+	// conflicting payload → reject without touching the row.
+	if processedAt != nil {
+		var stored, incoming any
+		if json.Unmarshal(existing, &stored) != nil || json.Unmarshal(payload, &incoming) != nil {
+			return errEventIdempotencyConflict
+		}
+		canonStored, err1 := json.Marshal(stored)
+		canonIncoming, err2 := json.Marshal(incoming)
+		if err1 == nil && err2 == nil && string(canonStored) == string(canonIncoming) {
+			return tx.Commit(ctx)
+		}
+		return errEventIdempotencyConflict
+	}
+	// 4. first sighting: mark processed in the same transaction and commit.
+	if _, err := tx.Exec(ctx, `UPDATE cr_sync_event SET processed_at = now() WHERE id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *SyncService) apply(ctx context.Context, workspaceID string, ev OutboxEvent) error {
