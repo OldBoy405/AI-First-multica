@@ -15,9 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/drift"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/governance"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/integrations/ghsnapshot"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/profiling"
@@ -611,6 +613,25 @@ func main() {
 			slog.Warn("scheduler: failed to register aifirst_cr_reconcile job", "error", err)
 		} else {
 			slog.Info("aifirst cr reconcile job registered", "interval", reconcileCfg.Interval, "remote", reconcileCfg.RemoteURL)
+		}
+	}
+	// AIFIRST: commit-prefix drift scan (CR-2026-049 TASK-10). Registered only
+	// when the GitHub App is configured; otherwise the workspace plans would
+	// FAILED hourly with repository_access_missing noise and the governance page
+	// reports uninitialized instead (no SUCCESS plan exists).
+	if scanGH, err := ghsnapshot.NewClientFromEnv(); err != nil {
+		slog.Warn("github: commit_prefix_scan disabled (invalid App private key)", "error", err)
+	} else if scanGH != nil && scanGH.Enabled() {
+		if err := schedulerMgr.Register(*scheduler.CommitPrefixScanJob(scheduler.CommitPrefixScanDeps{
+			Pool:     pool,
+			Queries:  queries,
+			Resolver: drift.NewResolver(scanGH),
+			GH:       scanGH,
+			Findings: drift.NewFindingRepo(pool),
+		})); err != nil {
+			slog.Warn("scheduler: failed to register commit_prefix_scan job", "error", err)
+		} else {
+			slog.Info("commit_prefix_scan job registered")
 		}
 	}
 	go func() {
