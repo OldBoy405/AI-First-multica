@@ -38,6 +38,7 @@ const {
   mockPush,
   mockSearchIssues,
   mockSearchProjects,
+  mockSearchSpecs,
   mockRecentItems,
   mockAllIssues,
   mockSetTheme,
@@ -59,6 +60,7 @@ const {
   mockPush: vi.fn(),
   mockSearchIssues: vi.fn(),
   mockSearchProjects: vi.fn(),
+  mockSearchSpecs: vi.fn(),
   mockRecentItems: { current: [] as Array<{ id: string; visitedAt: number }> },
   mockAllIssues: { current: [] as Array<Record<string, unknown>> },
   mockSetTheme: vi.fn(),
@@ -106,6 +108,7 @@ vi.mock("@multica/core/api", () => ({
     getBaseUrl: () => "http://127.0.0.1:8080",
     searchIssues: mockSearchIssues,
     searchProjects: mockSearchProjects,
+    searchSpecs: mockSearchSpecs,
   },
 }));
 
@@ -182,6 +185,7 @@ vi.mock("@multica/core/paths", async (importOriginal) => ({
     projects: () => "/ws-test/projects",
     autopilots: () => "/ws-test/autopilots",
     agents: () => "/ws-test/agents",
+    governanceSpecDetail: (specId: string) => `/ws-test/governance/specs/${specId}`,
     squads: () => "/ws-test/squads",
     usage: () => "/ws-test/usage",
     maturity: () => "/ws-test/maturity",
@@ -279,6 +283,7 @@ describe("SearchCommand", () => {
     mockPush.mockReset();
     mockSearchIssues.mockReset().mockResolvedValue({ issues: [] });
     mockSearchProjects.mockReset().mockResolvedValue({ projects: [] });
+    mockSearchSpecs.mockReset().mockResolvedValue({ specs: [], nextCursor: null });
     mockRecentItems.current = [];
     mockAllIssues.current = [];
     mockAgents.current = [];
@@ -1249,6 +1254,28 @@ describe("SearchCommand", () => {
 
       expect(mockPush).not.toHaveBeenCalled();
       expect(useSearchStore.getState().open).toBe(true);
+    });
+  });
+  // AIFIRST: CR-2026-049 TASK-12 — Specs group renders and navigates to the
+  // governance spec trace page.
+  it("renders the Specs group and navigates to the spec trace page", async () => {
+    mockSearchSpecs.mockResolvedValue({
+      specs: [{ specId: "ai-first-platform", latestCrId: "CR-2026-049", owners: { requirement: { id: "Ray" } }, updatedAt: "t" }],
+      next_cursor: null,
+    });
+    const user = userEvent.setup();
+    renderSearch();
+    const input = screen.getByPlaceholderText("Type a command or search...");
+    await user.type(input, "spec");
+    await waitFor(
+      () => {
+        expect(screen.getByText("ai-first-platform")).toBeInTheDocument();
+      },
+      { timeout: 2000 },
+    );
+    await user.keyboard("{Enter}");
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith("/ws-test/governance/specs/ai-first-platform");
     });
   });
 });

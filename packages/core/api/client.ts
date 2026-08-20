@@ -431,6 +431,15 @@ import {
   MaturitySuggestionHistoryResponseSchema,
   MaturityConfigResponseSchema,
   OrgAdminResponseSchema,
+  SpecTraceResponseSchema,
+  SpecSearchResponseSchema,
+  DriftOverviewSchema,
+  DriftFindingsResponseSchema,
+  DriftFindingSchema,
+  EMPTY_SPEC_TRACE,
+  EMPTY_SPEC_SEARCH,
+  EMPTY_DRIFT_OVERVIEW,
+  EMPTY_DRIFT_FINDINGS,
   EMPTY_ORG_ADMIN_RESPONSE,
   EMPTY_MATURITY_OVERALL,
   EMPTY_MATURITY_TOKEN_TREND,
@@ -455,6 +464,16 @@ import type {
   MaturitySuggestionHistoryResponse,
   MaturityConfigResponse,
 } from "../types/maturity";
+import type {
+  SpecTraceResponse,
+  SpecSearchResponse,
+  SpecSearchParams,
+  DriftOverview,
+  DriftFindingsResponse,
+  DriftFindingsParams,
+  DriftPatchRequest,
+  DriftFinding,
+} from "../types";
 import type { OrgAdminResponse } from "../types/org-admin";
 
 /** Identifies the calling client to the server.
@@ -4458,6 +4477,88 @@ export class ApiClient {
 
   private maturityHeaders(workspaceId: string): Record<string, string> {
     return { "X-Workspace-ID": workspaceId };
+  }
+
+  // ---------------------------------------------------------------------------
+  // AIFIRST: CR-2026-049 TASK-12 — spec trace / spec-search / drift reads.
+  // All responses parseWithFallback; unknown enums surface as "unknown".
+  // ---------------------------------------------------------------------------
+
+  async getSpecTrace(workspaceId: string, specId: string, signal?: AbortSignal): Promise<SpecTraceResponse> {
+    const raw = await this.fetch<unknown>(`/api/cr/specs/${encodeURIComponent(specId)}/trace`, {
+      headers: this.maturityHeaders(workspaceId),
+      signal,
+    });
+    return parseWithFallback<SpecTraceResponse>(
+      raw,
+      SpecTraceResponseSchema,
+      EMPTY_SPEC_TRACE,
+      { endpoint: "GET /api/cr/specs/{spec_id}/trace" },
+    );
+  }
+
+  async searchSpecs(workspaceId: string, params: SpecSearchParams): Promise<SpecSearchResponse> {
+    const search = new URLSearchParams();
+    if (params.q) search.set("q", params.q);
+    if (params.owner) search.set("owner", params.owner);
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+    const raw = await this.fetch<unknown>(`/api/cr/spec-search?${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+      signal: params.signal,
+    });
+    return parseWithFallback<SpecSearchResponse>(
+      raw,
+      SpecSearchResponseSchema,
+      EMPTY_SPEC_SEARCH,
+      { endpoint: "GET /api/cr/spec-search" },
+    );
+  }
+
+  async getDriftOverview(workspaceId: string, signal?: AbortSignal): Promise<DriftOverview> {
+    const raw = await this.fetch<unknown>(`/api/drift/overview`, {
+      headers: this.maturityHeaders(workspaceId),
+      signal,
+    });
+    return parseWithFallback<DriftOverview>(
+      raw,
+      DriftOverviewSchema,
+      EMPTY_DRIFT_OVERVIEW,
+      { endpoint: "GET /api/drift/overview" },
+    );
+  }
+
+  async listDriftFindings(workspaceId: string, params: DriftFindingsParams): Promise<DriftFindingsResponse> {
+    const search = new URLSearchParams();
+    if (params.status) search.set("status", params.status);
+    if (params.kind) search.set("kind", params.kind);
+    if (params.repositoryId) search.set("repository_id", params.repositoryId);
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+    const raw = await this.fetch<unknown>(`/api/drift/findings?${search}`, {
+      headers: this.maturityHeaders(workspaceId),
+      signal: params.signal,
+    });
+    return parseWithFallback<DriftFindingsResponse>(
+      raw,
+      DriftFindingsResponseSchema,
+      EMPTY_DRIFT_FINDINGS,
+      { endpoint: "GET /api/drift/findings" },
+    );
+  }
+
+  async patchDriftFinding(workspaceId: string, findingId: string, req: DriftPatchRequest): Promise<DriftFinding | null> {
+    const raw = await this.fetch<unknown>(`/api/drift/findings/${encodeURIComponent(findingId)}`, {
+      method: "PATCH",
+      headers: { ...this.maturityHeaders(workspaceId), "Content-Type": "application/json" },
+      body: JSON.stringify({ from_status: req.fromStatus, to_status: req.toStatus }),
+    });
+    return parseWithFallback<DriftFinding | null>(
+      raw,
+      DriftFindingSchema,
+      null,
+      { endpoint: "PATCH /api/drift/findings/{id}" },
+    );
   }
 
   async getMaturityOverall(workspaceId: string, date?: string): Promise<MaturityOverallResponse> {

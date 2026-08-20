@@ -83,6 +83,10 @@ import type {
   MaturitySuggestionHistoryResponse,
   MaturityConfigResponse,
   OrgAdminResponse,
+  SpecTraceResponse,
+  SpecSearchResponse,
+  DriftOverview,
+  DriftFindingsResponse,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
@@ -3306,4 +3310,116 @@ export const EMPTY_MATURITY_CONFIG: MaturityConfigResponse = {
   metrics: [],
   baselineSuggestions: [],
   priceConfigRev: null,
+};
+
+// ── AIFIRST: CR-2026-049 TASK-12 — trace / spec-search / drift schemas ───────
+// Enums stay z.string() so unknown values parse; views render an "unknown"
+// fallback. Malformed responses fall back to the EMPTY_* envelopes.
+
+export const TraceMilestoneSchema = z.object({
+  cr: z.string().default(""),
+  milestone: z.string().default(""),
+  frs: z.array(z.unknown()).default([]),
+  merge_commits: z.array(z.unknown()).default([]),
+  evidence: z.unknown().nullable().default(null),
+  source: z.string().default("baseline-imported"),
+  trace_snapshot_conflict: z.boolean().optional().default(false),
+}).loose();
+
+export const SpecTraceResponseSchema = z.object({
+  v: z.number().default(1),
+  workspace_id: z.string().default(""),
+  spec_id: z.string().default(""),
+  events: z
+    .array(
+      z.object({
+        event_id: z.number().default(0),
+        cr_id: z.string().default(""),
+        commit_sha: z.string().default(""),
+        occurred_at: z.string().nullable().default(null),
+        state: z.string().default("malformed"),
+        error_code: z.string().optional(),
+        milestone: TraceMilestoneSchema.optional(),
+      }).loose(),
+    )
+    .default([]),
+}).loose().transform((value) => camelizeMaturity(value) as SpecTraceResponse);
+
+export const SpecSearchResponseSchema = z.object({
+  v: z.number().default(1),
+  specs: z
+    .array(
+      z.object({
+        spec_id: z.string().default(""),
+        latest_cr_id: z.string().default(""),
+        owners: z.record(z.string(), z.unknown()).default({}),
+        updated_at: z.string().default(""),
+      }).loose(),
+    )
+    .default([]),
+  next_cursor: z.string().nullable().default(null),
+}).loose().transform((value) => camelizeMaturity(value) as SpecSearchResponse);
+
+export const DriftOverviewSchema = z.object({
+  v: z.number().default(1),
+  scan_health: z.string().default("unknown"),
+  last_plan_status: z.string().default(""),
+  last_success_at: z.string().nullable().default(null),
+  repository_ids: z.array(z.string()).default([]),
+  bypass_count: z.number().default(0),
+  wip_on_trunk_count: z.number().default(0),
+  resolve_latency_ms: z
+    .object({
+      sample_count: z.number().default(0),
+      p50: z.number().nullable().default(null),
+      p90: z.number().nullable().default(null),
+    })
+    .default({ sample_count: 0, p50: null, p90: null }),
+}).loose().transform((value) => camelizeMaturity(value) as DriftOverview);
+
+export const DriftFindingSchema = z.object({
+  id: z.string().default(""),
+  repository_id: z.string().default(""),
+  spec_id: z.string().nullable().default(null),
+  cr_id: z.string().nullable().default(null),
+  kind: z.string().default("unknown"),
+  severity: z.string().default("unknown"),
+  summary: z.string().default(""),
+  evidence: z.record(z.string(), z.unknown()).default({}),
+  status: z.string().default("unknown"),
+  found_at: z.string().default(""),
+  resolved_at: z.string().nullable().default(null),
+}).loose();
+
+export const DriftFindingsResponseSchema = z.object({
+  v: z.number().default(1),
+  findings: z.array(DriftFindingSchema).default([]),
+  next_cursor: z.string().nullable().default(null),
+}).loose().transform((value) => camelizeMaturity(value) as DriftFindingsResponse);
+
+export const EMPTY_SPEC_TRACE: SpecTraceResponse = {
+  v: 1,
+  workspaceId: "",
+  specId: "",
+  events: [],
+};
+export const EMPTY_SPEC_SEARCH: SpecSearchResponse = {
+  v: 1,
+  specs: [],
+  nextCursor: null,
+};
+export const EMPTY_DRIFT_OVERVIEW: DriftOverview = {
+  v: 1,
+  scanHealth: "unknown",
+  lastPlanStatus: "",
+  lastSuccessAt: null,
+  repositoryIds: [],
+  bypassCount: 0,
+  wipOnTrunkCount: 0,
+  resolveLatencyMs: { sampleCount: 0, p50: null, p90: null },
+};
+export const EMPTY_DRIFT_FINDINGS: DriftFindingsResponse = {
+  v: 1,
+  findings: [],
+  nextCursor: null,
 };

@@ -26,6 +26,7 @@ import type {
   MemberWithUser,
   SearchIssueResult,
   SearchProjectResult,
+  SpecSearchItem,
 } from "@multica/core/types";
 import { api } from "@multica/core/api";
 import { partitionAggregatedSearchResults } from "@multica/core/search/cancelled-rank";
@@ -293,9 +294,10 @@ interface SearchResults {
   query: string;
   issues: SearchIssueResult[];
   projects: SearchProjectResult[];
+  specs: SpecSearchItem[];
 }
 
-const NO_RESULTS: SearchResults = { query: "", issues: [], projects: [] };
+const NO_RESULTS: SearchResults = { query: "", issues: [], projects: [], specs: [] };
 
 // One heading treatment for every group. Headings go through cmdk's `heading`
 // prop rather than a hand-rolled div: cmdk renders it into a
@@ -556,6 +558,7 @@ export function SearchCommand() {
   const hasResults =
     results.issues.length > 0 ||
     results.projects.length > 0 ||
+    results.specs.length > 0 ||
     filteredMembers.length > 0;
 
   // Rows answering an earlier query are still painted while the next request
@@ -626,7 +629,7 @@ export function SearchCommand() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const [issueRes, projectRes] = await Promise.all([
+        const [issueRes, projectRes, specRes] = await Promise.all([
           api.searchIssues({
             q: q.trim(),
             limit: 20,
@@ -639,12 +642,16 @@ export function SearchCommand() {
             include_closed: true,
             signal: controller.signal,
           }),
+          // AIFIRST: CR-2026-049 TASK-12 — parallel spec search (free-text
+          // spec_id / owner identity; server scopes to the workspace).
+          api.searchSpecs(wsId, { q: q.trim(), limit: 10, signal: controller.signal }),
         ]);
         if (!controller.signal.aborted) {
           setResults({
             query: q.trim(),
             issues: issueRes.issues,
             projects: projectRes.projects,
+            specs: specRes.specs,
           });
           setIsLoading(false);
         }
@@ -653,12 +660,12 @@ export function SearchCommand() {
           // Drop the previous query's rows rather than leaving them on screen
           // permanently greyed out: the request that would have replaced them
           // is never coming. The list falls through to the empty state.
-          setResults({ query: q.trim(), issues: [], projects: [] });
+          setResults({ query: q.trim(), issues: [], projects: [], specs: [] });
           setIsLoading(false);
         }
       }
     }, 300);
-  }, []);
+  }, [wsId]);
 
   const handleValueChange = useCallback(
     (value: string) => {
@@ -674,11 +681,17 @@ export function SearchCommand() {
       const href = value.startsWith("project:")
         ? // value is "project:<id>" — slice off the 8-char prefix to extract the id.
           p.projectDetail(value.slice(8))
-        : p.issueDetail(value);
+        : value.startsWith("spec:")
+          ? // AIFIRST: CR-2026-049 TASK-12 — spec result → governance trace page.
+            p.governanceSpecDetail(value.slice(5))
+          : p.issueDetail(value);
       intentNavigate(href, consumeIntent());
     },
     [intentNavigate, consumeIntent, setOpen, p],
   );
+  // searchSpecs needs the workspace id; the callback is recreated on wsId
+  // change through the search useCallback below.
+  void wsId;
 
   const handlePageSelect = useCallback(
     (key: WorkspacePageKey) => {
@@ -687,6 +700,9 @@ export function SearchCommand() {
     },
     [intentNavigate, consumeIntent, setOpen, p],
   );
+  // searchSpecs needs the workspace id; the callback is recreated on wsId
+  // change through the search useCallback below.
+  void wsId;
 
   const handleMemberSelect = useCallback(
     (userId: string) => {
@@ -695,6 +711,9 @@ export function SearchCommand() {
     },
     [intentNavigate, consumeIntent, setOpen, p],
   );
+  // searchSpecs needs the workspace id; the callback is recreated on wsId
+  // change through the search useCallback below.
+  void wsId;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -894,6 +913,27 @@ export function SearchCommand() {
                     disabled={resultsAreStale}
                     onSelect={handleSelect}
                   />
+                ))}
+              </CommandPrimitive.Group>
+            )}
+
+            {/* AIFIRST: CR-2026-049 TASK-12 — Specs group (cross-CR traceability). */}
+            {results.specs.length > 0 && (
+              <CommandPrimitive.Group
+                heading={t(($) => $.groups.specs)}
+                className={GROUP_CLASS}
+              >
+                {results.specs.map((spec) => (
+                  <CommandPrimitive.Item
+                    key={`spec:${spec.specId}`}
+                    value={`spec:${spec.specId}`}
+                    disabled={resultsAreStale}
+                    onSelect={() => handleSelect(`spec:${spec.specId}`)}
+                  >
+                    <SearchIcon className="size-4 text-muted-foreground" />
+                    <span>{spec.specId}</span>
+                    <span className="ml-auto text-caption text-muted-foreground">{spec.latestCrId}</span>
+                  </CommandPrimitive.Item>
                 ))}
               </CommandPrimitive.Group>
             )}
