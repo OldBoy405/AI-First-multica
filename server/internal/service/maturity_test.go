@@ -143,6 +143,15 @@ func TestMaturityServiceReadPath(t *testing.T) {
 		t.Fatalf("history = %+v, %v", hist, err)
 	}
 
+	// Persisted projection corruption must fail closed, never masquerade as an
+	// observation-period empty score payload.
+	if _, err := pool.Exec(ctx, `UPDATE maturity_snapshot SET scores='{"metric_scores":"invalid"}'::jsonb WHERE workspace_id=$1 AND scope='org' AND bucket_date='2026-08-19'`, wsID); err != nil {
+		t.Fatalf("corrupt scores fixture: %v", err)
+	}
+	if _, err := svc.Overall(ctx, wsID, nil); err == nil {
+		t.Fatal("corrupt snapshot scores must return an error")
+	}
+
 	// empty workspace: overall empty, no crash.
 	emptyWS := pgtype.UUID{Bytes: uuid.New(), Valid: true}
 	if _, err := pool.Exec(ctx, `INSERT INTO workspace (id, name, slug) VALUES ($1,'empty',$2)`, uuid.UUID(emptyWS.Bytes), "empty-"+uuid.UUID(emptyWS.Bytes).String()[:8]); err != nil {

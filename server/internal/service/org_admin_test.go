@@ -29,6 +29,7 @@ func TestMaturityReportBuiltinSkillContract(t *testing.T) {
 		t.Fatal("maturity report built-in skill not embedded")
 	}
 	for _, required := range []string{
+		"allowed-tools: Write", "Bash(mkdir *)", "Bash(mv *)", "Bash(sha256sum *)",
 		"atomic temp-file + rename", "baseline_suggestions", "ai-first.maturity-report/v1",
 		"source_task_id", "chat_session_id", "## Individual efficiency",
 		"## Team delivery", "## Knowledge compounding", "## Risk & yield", "## Cost",
@@ -239,5 +240,41 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE workspace_id=$1 AND recipient_id=$2 AND type='maturity_report_ready'`, wsID, ownerID).Scan(&inboxCount); err != nil || inboxCount != 1 {
 		t.Fatalf("same-week report inboxes = %d, %v", inboxCount, err)
+	}
+
+	// Another run-only Autopilot may share the Org Admin agent and project. Its
+	// ordinary output must not be mistaken for a weekly report envelope.
+	other, err := queries.CreateAutopilot(ctx, db.CreateAutopilotParams{
+		WorkspaceID: wsp, Title: "Org Admin housekeeping",
+		Description:  pgtype.Text{String: "Not a maturity report.", Valid: true},
+		AssigneeType: "agent", AssigneeID: first.AgentID, Status: "active",
+		ExecutionMode: "run_only", IssueTitleTemplate: pgtype.Text{},
+		ProjectID: first.ProjectID, CreatedByType: "member", CreatedByID: ownp,
+	})
+	if err != nil {
+		t.Fatalf("create non-report Autopilot: %v", err)
+	}
+	if err := RecordAutopilotRuleVersion(ctx, queries, other, "member", ownp); err != nil {
+		t.Fatalf("publish non-report Autopilot: %v", err)
+	}
+	otherRun, err := autopilotSvc.DispatchAutopilot(ctx, other, pgtype.UUID{}, "api", nil)
+	if err != nil {
+		t.Fatalf("dispatch non-report Autopilot: %v", err)
+	}
+	otherTask, err := queries.GetAgentTask(ctx, otherRun.TaskID)
+	if err != nil {
+		t.Fatalf("load non-report task: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status='running', started_at=now() WHERE id=$1`, otherTask.ID); err != nil {
+		t.Fatalf("start non-report task: %v", err)
+	}
+	ordinary := []byte(`{"output":"housekeeping complete"}`)
+	otherCompleted, err := taskSvc.CompleteTask(ctx, otherTask.ID, ordinary, "", "", "", false, "")
+	if err != nil {
+		t.Fatalf("complete non-report Autopilot: %v", err)
+	}
+	var ordinaryResult map[string]string
+	if err := json.Unmarshal(otherCompleted.Result, &ordinaryResult); err != nil || ordinaryResult["output"] != "housekeeping complete" {
+		t.Fatalf("non-report result changed to %s: %v", otherCompleted.Result, err)
 	}
 }

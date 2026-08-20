@@ -38,12 +38,29 @@ func persistMaturityReportCompletion(
 	if !agent.SystemKey.Valid || agent.SystemKey.String != orgAdminAgentKey {
 		return result, nil
 	}
-	if !task.ProjectID.Valid || !task.ChatSessionID.Valid {
-		return nil, fmt.Errorf("maturity report completion: project and chat session are required")
+	if !task.ProjectID.Valid {
+		return result, nil
 	}
 	projectID, err := qtx.MaturityOrgAdminProjectID(ctx, agent.WorkspaceID)
 	if err != nil || !projectID.Valid || projectID.Bytes != task.ProjectID.Bytes {
-		return nil, fmt.Errorf("maturity report completion: task is not bound to the Org Admin project")
+		return result, nil
+	}
+	run, err := qtx.GetAutopilotRun(ctx, task.AutopilotRunID)
+	if err != nil {
+		return nil, fmt.Errorf("maturity report completion: load Autopilot run: %w", err)
+	}
+	canonicalAutopilot, err := qtx.MaturityOrgAdminAutopilot(ctx, db.MaturityOrgAdminAutopilotParams{
+		WorkspaceID: agent.WorkspaceID, ProjectID: projectID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("maturity report completion: load canonical Autopilot: %w", err)
+	}
+	if run.AutopilotID.Bytes != canonicalAutopilot.ID.Bytes || canonicalAutopilot.AssigneeType != "agent" ||
+		canonicalAutopilot.AssigneeID.Bytes != agent.ID.Bytes || canonicalAutopilot.ExecutionMode != "run_only" {
+		return result, nil
+	}
+	if !task.ChatSessionID.Valid {
+		return nil, fmt.Errorf("maturity report completion: canonical report task requires a chat session")
 	}
 
 	report, err := decodeMaturityReportResult(result)

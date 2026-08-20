@@ -2,7 +2,7 @@
 name: multica-maturity-weekly-report
 description: "Use when the Org Admin weekly Autopilot fires to produce the workspace AI maturity report. Fetch the maturity snapshot API data, write the five-section report markdown to docs/org-admin/maturity-review-{YYYY-Www}.md, and return the structured report envelope for the task result."
 user-invocable: false
-allowed-tools: Bash(multica *)
+allowed-tools: Write, Bash(multica *), Bash(mkdir *), Bash(mv *), Bash(sha256sum *)
 ---
 
 # Weekly AI maturity report
@@ -45,8 +45,17 @@ Use the exact H2 headings `## Individual efficiency`, `## Team delivery`,
 must cite the metric keys it uses. End with the anti-Goodhart note: tokens are
 behavioural data, not individual performance metrics.
 
-Write with an atomic temp-file + rename in the project local directory; never
-run `git add` or `git commit` for the report.
+Use only the declared tools for this atomic temp-file + rename sequence:
+
+1. `mkdir -p docs/org-admin`.
+2. Use `Write` to create
+   `docs/org-admin/.maturity-review-{YYYY-Www}.md.tmp` with the exact Markdown.
+3. Run `sha256sum` on the temp file and keep the lowercase digest.
+4. Run `mv -f` from the temp path to the final path. This same-directory rename
+   is the atomic publish boundary on the project local directory.
+
+Never write the final path directly, and never run `git add` or `git commit`
+for the report.
 
 Return **only JSON** as the final task output. The server validates it and
 stores this direct envelope in `agent_task_queue.result` before notifying the

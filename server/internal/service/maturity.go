@@ -62,7 +62,9 @@ func (s *MaturityService) Overall(ctx context.Context, workspaceID pgtype.UUID, 
 		return nil, fmt.Errorf("unmarshal snapshot metrics: %w", err)
 	}
 	var scores maturity.SnapshotScoresV1
-	_ = json.Unmarshal(row.Scores, &scores)
+	if err := json.Unmarshal(row.Scores, &scores); err != nil {
+		return nil, fmt.Errorf("unmarshal snapshot scores: %w", err)
+	}
 
 	resp := &maturity.MaturityOverallResponse{
 		BucketDate: row.BucketDate.Time.Format("2006-01-02"),
@@ -99,7 +101,10 @@ func (s *MaturityService) Overall(ctx context.Context, workspaceID pgtype.UUID, 
 	}
 
 	first, err := s.queries.MaturitySnapshotFirstBucket(ctx, workspaceID)
-	if err == nil && first.Valid {
+	if err != nil {
+		return nil, fmt.Errorf("load first maturity bucket: %w", err)
+	}
+	if first.Valid {
 		elapsed := int(row.BucketDate.Time.Sub(first.Time).Hours() / 24)
 		resp.Observation = &maturity.Observation{
 			Active:            maturity.ObservationActive(first.Time, time.Now(), s.cfg),
