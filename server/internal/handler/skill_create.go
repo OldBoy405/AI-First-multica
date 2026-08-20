@@ -102,6 +102,7 @@ var (
 	errSkillOverwriteForbidden    = errors.New("not permitted to overwrite target skill")
 	errSkillOverwriteNameMismatch = errors.New("target skill name does not match the imported skill")
 	errSkillOverwriteNameConflict = errors.New("another skill in the workspace already has the imported name")
+	errSkillPublishGateBlocked    = errors.New("publish gate blocked the overwrite")
 )
 
 type skillOverwriteInput struct {
@@ -178,6 +179,19 @@ func (h *Handler) overwriteSkillWithFiles(ctx context.Context, input skillOverwr
 	// one skill's content onto another.
 	if input.ExpectedName != "" && existing.Name != input.ExpectedName {
 		return SkillWithFilesResponse{}, errSkillOverwriteNameMismatch
+	}
+
+	// AIFIRST: CR-2026-048 TASK-07: post-publish rescan on runtime-local
+	// overwrite imports. An org-visible skill must pass the same gate before
+	// its content/files are replaced (SDD §3.1 trigger 2).
+	if existing.Visibility == "org" {
+		fileSet := make(map[string]string, len(input.Files))
+		for _, f := range input.Files {
+			fileSet[f.Path] = f.Content
+		}
+		if runPublishGate(ctx, qtx, existing.WorkspaceID, existing, input.Content, existing.OwnerActor.String, fileSet).Blocked() {
+			return SkillWithFilesResponse{}, errSkillPublishGateBlocked
+		}
 	}
 
 	// Name stays unset by default (COALESCE keeps the existing name): the

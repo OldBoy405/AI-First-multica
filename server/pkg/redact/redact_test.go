@@ -467,3 +467,67 @@ func TestRedactMultipleSecrets(t *testing.T) {
 		t.Fatal("GitHub token not redacted in multi-secret text")
 	}
 }
+
+// AIFIRST: CR-2026-048 TASK-02.
+
+func TestPatternsSingleNamedTable(t *testing.T) {
+	// The PRD's "16 patterns" counts the local-user home dir masking inside
+	// Text() as one; the regex table itself has 15 entries and this CR adds
+	// one personal_path rule. Lock the real count and name uniqueness so a
+	// second parallel table can never be introduced silently.
+	const want = 16
+	if len(patterns) != want {
+		t.Fatalf("patterns count = %d, want %d (single named table)", len(patterns), want)
+	}
+	seen := make(map[string]bool, len(patterns))
+	for _, p := range patterns {
+		if p.name == "" {
+			t.Fatal("pattern with empty name")
+		}
+		if seen[p.name] {
+			t.Fatalf("duplicate pattern name %q", p.name)
+		}
+		seen[p.name] = true
+	}
+}
+
+func TestFindingsLocatesSecretsWithoutLeakingPlaintext(t *testing.T) {
+	in := "export GITHUB_TOKEN=ghp_" + strings.Repeat("A", 40) + "\n" +
+		"some normal line\n" +
+		`ref C:\Users\alice\project\config.json` + "\n"
+	got := Findings(in)
+	if len(got) != 2 {
+		t.Fatalf("findings = %d, want 2", len(got))
+	}
+	if got[0].PatternID != "github_token" || got[0].Line != 1 {
+		t.Errorf("finding[0] = %+v, want github_token at line 1", got[0])
+	}
+	if got[1].PatternID != "personal_path" || got[1].Line != 3 {
+		t.Errorf("finding[1] = %+v, want personal_path at line 3", got[1])
+	}
+	for _, f := range got {
+		if strings.Contains(f.Excerpt, "ghp_") || strings.Contains(f.Excerpt, `C:\Users\alice`) {
+			t.Errorf("excerpt leaks plaintext: %q", f.Excerpt)
+		}
+		if !strings.Contains(f.Excerpt, "[REDACTED") {
+			t.Errorf("excerpt not redacted: %q", f.Excerpt)
+		}
+	}
+}
+
+// AIFIRST: CR-2026-048 review attempt 1: Text() masks the local user's home
+// dir before running patterns, so the masked form must survive the new
+// personal_path rule (and CRLF input must not leak a trailing \r).
+func TestTextKeepsMaskedHomeDirAndFindingsHandleCRLF(t *testing.T) {
+	t.Parallel()
+	if got := Text("/Users/****/Documents/a.txt"); !strings.Contains(got, "****") {
+		t.Errorf("masked home dir re-redacted by personal_path: %q", got)
+	}
+	got := Findings("clean line\r\nexport TOKEN=" + strings.Repeat("z", 20) + "\r\n")
+	if len(got) != 1 || got[0].Line != 2 {
+		t.Fatalf("findings = %+v, want one hit on line 2", got)
+	}
+	if strings.Contains(got[0].Excerpt, "\r") {
+		t.Errorf("excerpt keeps CR: %q", got[0].Excerpt)
+	}
+}

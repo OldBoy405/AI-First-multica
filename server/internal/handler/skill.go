@@ -48,9 +48,16 @@ type SkillResponse struct {
 	Description string  `json:"description"`
 	Content     string  `json:"content"`
 	Config      any     `json:"config"`
-	CreatedBy   *string `json:"created_by"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	Visibility  string  `json:"visibility"`
+	Version     string  `json:"version"`
+	OwnerActor  *string `json:"owner_actor"`
+	// Metadata is the parsed SKILL.md frontmatter (metadata card fields,
+	// `source` marker, runtime requirements). Parsed once server-side so no
+	// client has to reimplement frontmatter parsing (PRD FR-20/FR-21/FR-23).
+	Metadata  map[string]string `json:"metadata"`
+	CreatedBy *string           `json:"created_by"`
+	CreatedAt string            `json:"created_at"`
+	UpdatedAt string            `json:"updated_at"`
 }
 
 // SkillSummaryResponse is the list-endpoint shape: everything SkillResponse
@@ -130,6 +137,11 @@ func writeSkillImportDuplicateConflict(w http.ResponseWriter, existing ExistingS
 }
 
 func skillToResponse(s db.Skill) SkillResponse {
+	var ownerActor *string
+	if s.OwnerActor.Valid {
+		v := s.OwnerActor.String
+		ownerActor = &v
+	}
 	return SkillResponse{
 		ID:          uuidToString(s.ID),
 		WorkspaceID: uuidToString(s.WorkspaceID),
@@ -137,6 +149,10 @@ func skillToResponse(s db.Skill) SkillResponse {
 		Description: s.Description,
 		Content:     s.Content,
 		Config:      decodeSkillConfig(s.Config),
+		Visibility:  s.Visibility,
+		Version:     s.Version,
+		OwnerActor:  ownerActor,
+		Metadata:    skillpkg.ParseSkillMetadata(s.Content).Fields,
 		CreatedBy:   uuidToPtr(s.CreatedBy),
 		CreatedAt:   timestampToString(s.CreatedAt),
 		UpdatedAt:   timestampToString(s.UpdatedAt),
@@ -232,6 +248,9 @@ type UpdateSkillRequest struct {
 	Description *string                  `json:"description"`
 	Content     *string                  `json:"content"`
 	Config      any                      `json:"config"`
+	Visibility  *string                  `json:"visibility"` // "private" | "org"
+	OwnerActor  *string                  `json:"owner_actor"`
+	Version     *string                  `json:"version"`
 	Files       []CreateSkillFileRequest `json:"files,omitempty"`
 }
 
@@ -443,9 +462,58 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Visibility != nil && *req.Visibility != "private" && *req.Visibility != "org" {
+		writeError(w, http.StatusBadRequest, "visibility must be 'private' or 'org'")
+		return
+	}
+
 	for _, f := range req.Files {
 		if !validateFilePath(f.Path) {
 			writeError(w, http.StatusBadRequest, "invalid file path: "+f.Path)
+			return
+		}
+	}
+
+	// AIFIRST: CR-2026-048 TASK-07: org-publish gate.
+	// Two trigger conditions (SDD §3.1): private->org publish, or an org skill
+	// whose content/files change after publish (post-publish rescan). Both run
+	// the same pure gate; a blocked verdict aborts before any write.
+	publishToOrg := req.Visibility != nil && *req.Visibility == "org" && skill.Visibility != "org"
+	rescanOrg := skill.Visibility == "org" && (req.Content != nil || req.Files != nil)
+	if publishToOrg || rescanOrg {
+		effContent := skill.Content
+		if req.Content != nil {
+			effContent = *req.Content
+		}
+		effOwner := skill.OwnerActor.String
+		if req.OwnerActor != nil {
+			effOwner = *req.OwnerActor
+		}
+		files, err := h.Queries.ListSkillFiles(r.Context(), skill.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list skill files: "+err.Error())
+			return
+		}
+		fileSet := make(map[string]string, len(files)+len(req.Files))
+		for _, f := range files {
+			fileSet[f.Path] = f.Content
+		}
+		if req.Files != nil {
+			for _, f := range req.Files {
+				if skillpkg.IsReservedContentPath(f.Path) {
+					continue
+				}
+				fileSet[f.Path] = f.Content
+			}
+		}
+		gate := runPublishGate(r.Context(), h.Queries, parseUUID(h.resolveWorkspaceID(r)), skill, effContent, effOwner, fileSet)
+		if gate.Blocked() {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"code":     "skill_publish_blocked",
+				"reasons":  gate.Reasons,
+				"findings": gate.Findings,
+				"warnings": gate.Warnings,
+			})
 			return
 		}
 	}
@@ -474,6 +542,15 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	if req.Config != nil {
 		config, _ := json.Marshal(req.Config)
 		params.Config = config
+	}
+	if req.Visibility != nil {
+		params.Visibility = pgtype.Text{String: *req.Visibility, Valid: true}
+	}
+	if req.Version != nil {
+		params.Version = pgtype.Text{String: *req.Version, Valid: true}
+	}
+	if req.OwnerActor != nil {
+		params.OwnerActor = pgtype.Text{String: *req.OwnerActor, Valid: true}
 	}
 
 	skill, err = qtx.UpdateSkill(r.Context(), params)

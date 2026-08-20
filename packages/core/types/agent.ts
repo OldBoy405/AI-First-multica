@@ -817,6 +817,12 @@ export interface SkillSummary {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  // AIFIRST: CR-2026-048 TASK-09 — org market columns (defaulted server-side).
+  visibility?: string;
+  version?: string;
+  owner_actor?: string | null;
+  /** Parsed SKILL.md frontmatter (metadata card, `source`, requirements). */
+  metadata?: Record<string, string>;
 	/** Present only when returned from an agent-scoped assignment endpoint. */
 	enabled?: boolean;
 }
@@ -849,6 +855,61 @@ export interface UpdateSkillRequest {
   content?: string;
   config?: Record<string, unknown>;
   files?: { path: string; content: string }[];
+  // AIFIRST: CR-2026-048 TASK-09 — org publish fields.
+  visibility?: "private" | "org";
+  owner_actor?: string;
+  version?: string;
+}
+
+// AIFIRST: CR-2026-048 TASK-09 — skill market payloads.
+export interface MarketSkill {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  owner_actor: string;
+  usage_count: number;
+  /** Frontmatter `source` marker, e.g. "session-export". */
+  source: string;
+}
+
+export interface MarketBuiltin {
+  name: string;
+  description: string;
+  usage_count: number;
+}
+
+export interface SkillMarketResponse {
+  workspace: MarketSkill[];
+  builtin: MarketBuiltin[];
+}
+
+export interface SkillGateFinding {
+  file: string;
+  line: number;
+  pattern_id: string;
+  excerpt: string;
+  appeal_id: string;
+}
+
+export interface SkillPublishBlockedBody {
+  code: "skill_publish_blocked";
+  reasons: string[];
+  findings: SkillGateFinding[] | null;
+  warnings: string[] | null;
+}
+
+export interface SubmitSkillAppealRequest {
+  /** The appeal id the publish gate returned with the finding. */
+  appeal_id: string;
+  file: string;
+  line: number;
+  pattern_id: string;
+}
+
+export interface DecideSkillAppealRequest {
+  appeal_id: string;
+  approve: boolean;
 }
 
 export interface SetAgentSkillsRequest {
