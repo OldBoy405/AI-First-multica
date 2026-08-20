@@ -97,6 +97,8 @@ fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全�
 | `internal/daemonws` 13 项、`internal/daemon`（`TestRefreshHealedVersion_*` 等）、`dingtalk`/`wecom`/`metrics`/`cmd/multica` 各 1–2 项 | 时序/网络敏感 | 全量并行跑失败，单独/整包复跑即过（daemonws 已复验）；daemon 包在本机会挂起，待上游基线单独复验归因 |
 | `views/rich-content/rich-content-boundary.test.ts` 1 项（fence-language 例外排除） | 环境性 | 测试用正斜杠常量排除 `editor/extensions/code-block-view.tsx`，Windows 扫描路径为反斜杠导致误报；Linux/CI 不会失败（上游既有，非合并引入） |
 | `views/autopilots/components/autopilot-dialog.validation.test.tsx` | 资源性 flake | 全量并行跑偶发失败，单独复跑稳定通过（2026-08-07 已复验） |
+| `internal/integrations/ghsnapshot` `TestInFlightOldHeadKeepsTrailingRefresh` | 时序 flaky | 上游 refresh 并发竞态（日志 `closed pool`/`stop after fetch`）；本机复现 2 次，文件属上游 `ecce58986`（MUL-5265），与 fork 改动无关（CR-2026-049 全量时观察，已缩测试集） |
+| `views/projects/components/project-detail.test.tsx` 「project deletion」2 项 | fork 测试 mock 缺口 | CR-2026-004/007 新增 `projectQueueStatusOptions` 未补进该测试的 `vi.mock`，报 `No "projectQueueStatusOptions" export`；属早前 CR 夹具收尾，非本 CR 引入 |
 
 ## 代码改动
 
