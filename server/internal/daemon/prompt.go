@@ -670,6 +670,11 @@ func buildAutopilotPrompt(task Task) string {
 	if task.AutopilotSource != "" {
 		fmt.Fprintf(&b, "Trigger source: %s\n", task.AutopilotSource)
 	}
+	// AIFIRST: CR-2026-047 report envelopes bind to their task/chat IDs.
+	if task.ChatSessionID != "" {
+		fmt.Fprintf(&b, "Chat session ID: %s\n", task.ChatSessionID)
+	}
+	fmt.Fprintf(&b, "Task ID: %s\n", task.ID)
 	if strings.TrimSpace(string(task.AutopilotTriggerPayload)) != "" {
 		fmt.Fprintf(&b, "Trigger payload:\n%s\n", strings.TrimSpace(string(task.AutopilotTriggerPayload)))
 	}

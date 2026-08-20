@@ -949,6 +949,9 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 	if ap.AssigneeType == "squad" && !s.autopilotAdmitInvoke(ctx, ap, agent, actorUserID) {
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "not allowed to invoke private squad leader"), code: dispatch.ReasonInvocationNotAllowed}
 	}
+	if err := s.requireMaturityReportLocalDirectory(ctx, ap, agent); err != nil {
+		return err
+	}
 
 	// Attribution splits on the trigger. A MANUAL trigger is a direct human action:
 	// the triggering member is direct_human and becomes BOTH originator (so the run
@@ -974,6 +977,27 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "workspace fail-closed: no accountable human for autopilot run"), code: dispatch.ReasonAttributionBlocked}
 	}
 	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
+
+	// AIFIRST: the CR-2026-047 weekly report reuses one project chat session,
+	// so every report and follow-up stays in the same Team Agent message flow.
+	var reportChatID pgtype.UUID
+	if ap.Title == orgAdminAutopilotTitle && ap.ProjectID.Valid && autopilotAttr.AccountableUserID.Valid {
+		chat, chatErr := s.Queries.GetProjectChatSessionForCreator(ctx, db.GetProjectChatSessionForCreatorParams{
+			ProjectID: ap.ProjectID, CreatorID: autopilotAttr.AccountableUserID,
+		})
+		if errors.Is(chatErr, pgx.ErrNoRows) {
+			chat, chatErr = s.Queries.CreateChatSession(ctx, db.CreateChatSessionParams{
+				WorkspaceID: ap.WorkspaceID, AgentID: agent.ID,
+				CreatorID: autopilotAttr.AccountableUserID, Title: orgAdminAutopilotTitle,
+				ProjectID: ap.ProjectID,
+			})
+		}
+		if chatErr != nil {
+			return fmt.Errorf("prepare maturity report chat: %w", chatErr)
+		}
+		reportChatID = chat.ID
+	}
+
 	task, err := s.Queries.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
 		AgentID:        agent.ID,
 		RuntimeID:      agent.RuntimeID,
@@ -992,6 +1016,8 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		OriginatorSource:     apSource,
 		TriggerEvidenceKind:  apEvidenceKind,
 		TriggerEvidenceRefID: apEvidenceRef,
+		ChatSessionID:        reportChatID,
+		ProjectID:            ap.ProjectID,
 	})
 	if err != nil {
 		return fmt.Errorf("create autopilot task: %w", err)
@@ -1024,6 +1050,66 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 }
 
 // SyncRunFromIssue updates the autopilot run when its linked issue reaches a terminal status.
+// AIFIRST: requireMaturityReportLocalDirectory prevents the canonical weekly report
+// from creating a task that cannot atomically publish its Markdown artifact.
+// Other run-only Autopilots, including same-title rows outside the canonical
+// Org Admin project, keep their existing dispatch behavior.
+func (s *AutopilotService) requireMaturityReportLocalDirectory(ctx context.Context, ap db.Autopilot, agent db.Agent) error {
+	if !ap.ProjectID.Valid {
+		return nil
+	}
+	canonical, err := s.Queries.MaturityOrgAdminAutopilot(ctx, db.MaturityOrgAdminAutopilotParams{
+		WorkspaceID: ap.WorkspaceID,
+		ProjectID:   ap.ProjectID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && canonical.ID.Bytes != ap.ID.Bytes) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load canonical maturity report Autopilot: %w", err)
+	}
+	resources, err := s.Queries.ListProjectResources(ctx, ap.ProjectID)
+	if err != nil {
+		return fmt.Errorf("list Org Admin project resources: %w", err)
+	}
+	for _, resource := range resources {
+		if resource.ResourceType != "local_directory" {
+			continue
+		}
+		var ref struct {
+			LocalPath string `json:"local_path"`
+		}
+		if json.Unmarshal(resource.ResourceRef, &ref) == nil && strings.TrimSpace(ref.LocalPath) != "" {
+			return nil
+		}
+	}
+
+	details, err := json.Marshal(map[string]string{
+		"project_id": util.UUIDToString(ap.ProjectID),
+		"action":     "bind_local_directory",
+	})
+	if err != nil {
+		return fmt.Errorf("encode maturity report setup guidance: %w", err)
+	}
+	if _, err := s.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		WorkspaceID: ap.WorkspaceID, RecipientType: "member", RecipientID: agent.OwnerID,
+		Type: "maturity_report_setup_required", Severity: "action_required",
+		Title: "AI maturity report needs a local directory",
+		Body: pgtype.Text{
+			String: "Open the Org Admin project, add a local directory resource, then retry the weekly report.",
+			Valid:  true,
+		},
+		ActorType: pgtype.Text{String: "agent", Valid: true}, ActorID: agent.ID,
+		Details: details,
+	}); err != nil {
+		return fmt.Errorf("create maturity report setup guidance: %w", err)
+	}
+	return &errDispatchSkipped{
+		reason: formatAdmissionReason(ap, "Org Admin project has no local_directory; bind one before retrying the weekly report"),
+		code:   dispatch.ReasonTargetUnavailable,
+	}
+}
+
 func (s *AutopilotService) SyncRunFromIssue(ctx context.Context, issue db.Issue) {
 	if !issue.OriginType.Valid || issue.OriginType.String != "autopilot" {
 		return

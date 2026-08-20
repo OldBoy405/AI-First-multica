@@ -3865,9 +3865,21 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 		if err := lockChatSessionForTaskWrite(ctx, qtx, taskID); err != nil {
 			return err
 		}
+		// AIFIRST: CR-2026-047 scheduled Org Admin completions are validated,
+		// canonicalized, and notify the Owner atomically with the task status
+		// transition. Identification comes from persisted task metadata, never
+		// from trusting the daemon's result payload.
+		candidate, err := qtx.GetAgentTask(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		storedResult, err := persistMaturityReportCompletion(ctx, qtx, candidate, result)
+		if err != nil {
+			return err
+		}
 		t, err := qtx.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
 			ID:                    taskID,
-			Result:                result,
+			Result:                storedResult,
 			SessionID:             pgtype.Text{String: sessionID, Valid: sessionID != ""},
 			WorkDir:               pgtype.Text{String: workDir, Valid: workDir != ""},
 			BranchName:            pgtype.Text{String: branchName, Valid: branchName != ""},

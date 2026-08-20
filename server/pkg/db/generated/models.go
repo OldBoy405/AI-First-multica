@@ -147,9 +147,6 @@ type AgentTaskQueue struct {
 	CoalescedCommentIds    []pgtype.UUID      `json:"coalesced_comment_ids"`
 	DeliveredCommentIds    []pgtype.UUID      `json:"delivered_comment_ids"`
 	ChatInputTaskID        pgtype.UUID        `json:"chat_input_task_id"`
-	CrID                   pgtype.Text        `json:"cr_id"`
-	PipelineNodeRunID      pgtype.UUID        `json:"pipeline_node_run_id"`
-	ProjectID              pgtype.UUID        `json:"project_id"`
 	ChatFinalizeDeferredAt pgtype.Timestamptz `json:"chat_finalize_deferred_at"`
 	// Waterfall level that resolved originator_user_id for this run: direct_human | delegation | comment_source | rule_owner | owner_fallback | backfill | unattributed. Audit/visibility metadata only — never consulted for authorization. TEXT with no CHECK so new trigger paths can add a source without a migration (MUL-4302 §7). NULL on pre-migration rows.
 	OriginatorSource pgtype.Text `json:"originator_source"`
@@ -172,6 +169,9 @@ type AgentTaskQueue struct {
 	QuickActionsDisabled      bool        `json:"quick_actions_disabled"`
 	RegenerateQuickActionsFor pgtype.UUID `json:"regenerate_quick_actions_for"`
 	BranchName                pgtype.Text `json:"branch_name"`
+	CrID                      pgtype.Text `json:"cr_id"`
+	PipelineNodeRunID         pgtype.UUID `json:"pipeline_node_run_id"`
+	ProjectID                 pgtype.UUID `json:"project_id"`
 }
 
 type AgentToLabel struct {
@@ -948,6 +948,17 @@ type LarkUserBinding struct {
 	BoundAt        pgtype.Timestamptz `json:"bound_at"`
 }
 
+type MaturitySnapshot struct {
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	BucketDate  pgtype.Date        `json:"bucket_date"`
+	Scope       string             `json:"scope"`
+	ScopeID     string             `json:"scope_id"`
+	Metrics     []byte             `json:"metrics"`
+	Scores      []byte             `json:"scores"`
+	ConfigRev   string             `json:"config_rev"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Member struct {
 	ID          pgtype.UUID        `json:"id"`
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
@@ -1063,9 +1074,9 @@ type Project struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	Priority    string             `json:"priority"`
-	Settings    []byte             `json:"settings"`
 	StartDate   pgtype.Date        `json:"start_date"`
 	DueDate     pgtype.Date        `json:"due_date"`
+	Settings    []byte             `json:"settings"`
 }
 
 type ProjectPresenterGrant struct {

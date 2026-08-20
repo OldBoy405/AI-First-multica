@@ -36,17 +36,63 @@ const LEADERBOARD_LIMIT = 10;
 const LEADERBOARD_GRID =
   "grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_5rem_5rem_5rem_4rem] items-center gap-3";
 
-export function Leaderboard({
-  rows,
-  agents,
-  deletedAgentCount,
-  lessThanMinuteLabel,
-}: {
+type UsageLeaderboardProps = {
   rows: AgentDashboardRow[];
   agents: { id: string; name: string }[];
   deletedAgentCount: number;
   lessThanMinuteLabel: string;
-}) {
+};
+
+// AIFIRST: generic ranking variant reused by the maturity dashboard (CR-2026-047).
+type SimpleLeaderboardProps = {
+  title: string;
+  valueLabel: string;
+  emptyLabel: string;
+  rows: Array<{
+    id: string;
+    rank: number;
+    label: string;
+    value: number | null;
+    status: string;
+  }>;
+};
+
+export function Leaderboard(props: UsageLeaderboardProps | SimpleLeaderboardProps) {
+  return "valueLabel" in props ? <SimpleLeaderboard {...props} /> : <UsageLeaderboard {...props} />;
+}
+
+function SimpleLeaderboard({ title, valueLabel, emptyLabel, rows }: SimpleLeaderboardProps) {
+  return (
+    <div className="rounded-lg border bg-card">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <h3 className="text-body font-semibold">{title}</h3>
+        <span className="text-caption text-muted-foreground">{valueLabel}</span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="px-4 py-8 text-center text-caption text-muted-foreground">{emptyLabel}</p>
+      ) : (
+        <ol aria-label={title} className="divide-y">
+          {rows.map((row) => (
+            <li key={row.id} className="grid grid-cols-[2rem_1fr_auto] items-center gap-3 px-4 py-2 text-body">
+              <span className="text-muted-foreground">{row.rank}</span>
+              <span className="truncate font-medium">{row.label}</span>
+              <span className="tabular-nums" data-testid={`rank-${row.rank}`}>
+                {row.value == null ? row.status : row.value.toFixed(3)}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function UsageLeaderboard({
+  rows,
+  agents,
+  deletedAgentCount,
+  lessThanMinuteLabel,
+}: UsageLeaderboardProps) {
   const { t } = useT("usage");
   const [sortBy, setSortBy] = useState<LeaderboardSort>("tokens");
   const [showAll, setShowAll] = useState(false);

@@ -207,6 +207,13 @@ var concurrentIndexCleanups = map[string]string{
 	"357_webhook_delivery_replay_idempotency_index":             "uq_webhook_delivery_replay_idempotency",
 	"358_autopilot_quota_reservation_state_index":               "idx_autopilot_quota_reservation_state",
 	"361_issue_last_activity_index":                             "idx_issue_workspace_last_activity",
+	// AIFIRST: CR-2026-047 TASK-02 concurrent-index retry cleanup.
+	"369_atq_project_active_index":                "idx_atq_project_active",
+	"371_pipeline_run_architecture_active_unique": "idx_pipeline_run_architecture_active_cr",
+	"372_agent_task_pipeline_node_active_unique":  "idx_agent_task_queue_pipeline_node_active",
+	"376_maturity_snapshot_identity":              "maturity_snapshot_identity_uidx",
+	"378_maturity_snapshot_scope_date":            "maturity_snapshot_scope_date_idx",
+	"379_maturity_report_history":                 "idx_atq_maturity_report_history",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction

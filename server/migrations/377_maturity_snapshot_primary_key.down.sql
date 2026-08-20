@@ -1,0 +1,1 @@
+ALTER TABLE maturity_snapshot DROP CONSTRAINT maturity_snapshot_pkey;
