@@ -117,6 +117,31 @@ func TestTraceIngestIdempotentReplayAndConflictReject(t *testing.T) {
 	if third.Rejected[0].File != "trace-2.json" {
 		t.Fatalf("rejected file id = %q", third.Rejected[0].File)
 	}
+
+	// A row left unprocessed by an interrupted first transaction still owns its
+	// payload; a different retry must not claim it or mark it processed.
+	pendingPayload := validTracePayload(crID)
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, evidence, actor, occurred_at)
+		VALUES ($1::uuid, $2, 'trace-sha-pending', 'trace', $3, '{}', 'tester', now())`,
+		testWorkspaceID, crID, pendingPayload); err != nil {
+		t.Fatal(err)
+	}
+	pendingConflict := json.RawMessage(strings.Replace(string(pendingPayload), `"M3"`, `"M3-pending-conflict"`, 1))
+	pending := postEventsRaw(t, svc, testWorkspaceID, []OutboxEvent{traceEvent(crID, "trace-sha-pending", "pending.json", pendingConflict)})
+	if len(pending.Accepted) != 0 || len(pending.Rejected) != 1 || pending.Rejected[0].Code != "EVENT_IDEMPOTENCY_CONFLICT" {
+		t.Fatalf("unprocessed conflict must be rejected: %+v", pending)
+	}
+	var processedAt *time.Time
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT processed_at FROM cr_sync_event
+		WHERE workspace_id = $1::uuid AND cr_id = $2 AND commit_sha = 'trace-sha-pending'`,
+		testWorkspaceID, crID).Scan(&processedAt); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt != nil {
+		t.Fatalf("conflicting retry must not mark pending row processed: %v", processedAt)
+	}
 }
 
 func TestTraceIngestRejectsBadAndOversizedPayload(t *testing.T) {

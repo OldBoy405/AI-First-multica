@@ -194,8 +194,13 @@ func validateEvent(ev OutboxEvent) string {
 	if ev.OccurredAt.IsZero() {
 		return "BAD_EVENT"
 	}
-	if ev.EventKind == "trace" && len(ev.Payload) > MaxTracePayloadBytes {
-		return "TRACE_PAYLOAD_TOO_LARGE"
+	if ev.EventKind == "trace" {
+		if strings.TrimSpace(ev.CommitSHA) == "" {
+			return "BAD_EVENT"
+		}
+		if len(ev.Payload) > MaxTracePayloadBytes {
+			return "TRACE_PAYLOAD_TOO_LARGE"
+		}
 	}
 	return ""
 }
@@ -276,9 +281,10 @@ func validateTracePayload(ev OutboxEvent, payload json.RawMessage) error {
 	mine := 0
 	for _, m := range t.Milestones {
 		var seg struct {
-			CR string `json:"cr"`
+			CR        string `json:"cr"`
+			Milestone string `json:"milestone"`
 		}
-		if err := json.Unmarshal(m, &seg); err != nil {
+		if err := json.Unmarshal(m, &seg); err != nil || seg.CR == "" || seg.Milestone == "" {
 			return errBadTracePayload
 		}
 		if seg.CR == ev.CRID {
@@ -335,19 +341,20 @@ func (s *SyncService) ingestTrace(ctx context.Context, workspaceID string, ev Ou
 	if err != nil {
 		return err
 	}
-	// 3. already processed: JSONB semantic equality → idempotent success;
-	// conflicting payload → reject without touching the row.
-	if processedAt != nil {
-		var stored, incoming any
-		if json.Unmarshal(existing, &stored) != nil || json.Unmarshal(payload, &incoming) != nil {
-			return errEventIdempotencyConflict
-		}
-		canonStored, err1 := json.Marshal(stored)
-		canonIncoming, err2 := json.Marshal(incoming)
-		if err1 == nil && err2 == nil && string(canonStored) == string(canonIncoming) {
-			return tx.Commit(ctx)
-		}
+	// 3. The idempotency key owns one immutable payload, whether or not the
+	// first transaction finished processing it. A retry with different content
+	// must never acknowledge or overwrite that row.
+	var stored, incoming any
+	if json.Unmarshal(existing, &stored) != nil || json.Unmarshal(payload, &incoming) != nil {
 		return errEventIdempotencyConflict
+	}
+	canonStored, err1 := json.Marshal(stored)
+	canonIncoming, err2 := json.Marshal(incoming)
+	if err1 != nil || err2 != nil || string(canonStored) != string(canonIncoming) {
+		return errEventIdempotencyConflict
+	}
+	if processedAt != nil {
+		return tx.Commit(ctx)
 	}
 	// 4. first sighting: mark processed in the same transaction and commit
 	// (workspace-scoped predicate per the TASK-05 static contract).

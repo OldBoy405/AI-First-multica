@@ -29,10 +29,18 @@ function firstCommitLink(milestone: TraceMilestoneView): { repo: string; trunk: 
   return null;
 }
 
-function commitHref(repo: string, trunk: string, sha: string): string {
-  // One-hop navigation built only from the DTO fields (SDD §3.5): the caller
-  // substitutes its own repository URL template.
-  return `https://github.com/OldBoy405/${repo}/commit/${sha}`;
+function commitHref(repo: string, _trunk: string, sha: string): string | null {
+  const value = repo.trim().replace(/\.git$/, "").replace(/\/$/, "");
+  if (/^https?:\/\/github\.com\/[^/]+\/[^/]+$/.test(value)) return `${value}/commit/${sha}`;
+  if (/^[^/]+\/[^/]+$/.test(value)) return `https://github.com/${value}/commit/${sha}`;
+  return null;
+}
+
+function evidenceLinks(evidence: unknown): Array<{ label: string; href: string }> {
+  if (typeof evidence !== "object" || evidence === null || Array.isArray(evidence)) return [];
+  return Object.entries(evidence as Record<string, unknown>)
+    .filter(([, value]) => typeof value === "string" && /^https?:\/\//.test(value))
+    .map(([label, value]) => ({ label, href: value as string }));
 }
 
 export function MilestoneRow({ milestone, event }: { milestone: TraceMilestoneView; event?: TraceEventItem }) {
@@ -63,10 +71,15 @@ export function MilestoneRow({ milestone, event }: { milestone: TraceMilestoneVi
       ) : (
         <span data-testid="evidence-present" className="text-caption text-muted-foreground">
           {evidencePresentLabel}
+          {evidenceLinks(milestone.evidence).map(({ label, href }) => (
+            <a key={label} data-testid={`evidence-link-${label}`} href={href} className="ml-2 underline">
+              {label}
+            </a>
+          ))}
         </span>
       )}
-      {link && (
-        <a data-testid="commit-link" href={commitHref(link.repo, link.trunk, link.sha)} className="text-caption underline">
+      {link && commitHref(link.repo, link.trunk, link.sha) && (
+        <a data-testid="commit-link" href={commitHref(link.repo, link.trunk, link.sha)!} className="text-caption underline">
           {link.repo}@{link.sha.slice(0, 8)}
         </a>
       )}

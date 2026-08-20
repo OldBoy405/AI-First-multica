@@ -87,6 +87,38 @@ func TestProjectTimelineConflictAndMalformed(t *testing.T) {
 	}
 }
 
+func TestProjectTimelineMalformedRowDoesNotHideValidEventAndEventsStayOrdered(t *testing.T) {
+	base := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	valid := func(cr string, milestones string) json.RawMessage {
+		return json.RawMessage(`{"spec_id":"s","traceability":{"spec-id":"s","cr-ref":"` + cr + `","milestones":` + milestones + `}}`)
+	}
+	rows := []traceRow{
+		{ID: 1, CRID: "CR-2026-001", CommitSHA: "c1", OccurredAt: base, Payload: valid("CR-2026-001", `[{"cr":"CR-2026-001","milestone":"M0","frs":[]}]`)},
+		{ID: 2, CRID: "CR-2026-002", CommitSHA: "c2", OccurredAt: base.Add(time.Minute), Payload: valid("CR-2026-002", `[{"cr":"CR-2026-001","milestone":"M0","frs":[]},{"cr":"CR-2026-002","milestone":"M1","frs":[]}]`)},
+		{ID: 3, CRID: "CR-2026-001", CommitSHA: "bad", OccurredAt: base.Add(2 * time.Minute), Payload: json.RawMessage(`{"spec_id":"s","traceability":"bad"}`)},
+	}
+	out := ProjectTimeline(rows)
+	var event *TraceEventDTO
+	for i := range out {
+		if out[i].CRID == "CR-2026-001" && out[i].State == "ok" {
+			event = &out[i]
+			break
+		}
+	}
+	if event == nil || event.EventID != 1 || event.CommitSHA != "c1" {
+		t.Fatalf("malformed later row hid valid event: %+v", out)
+	}
+	foundMalformed := false
+	for _, item := range out {
+		if item.State == "malformed" && item.EventID == 3 {
+			foundMalformed = true
+		}
+	}
+	if !foundMalformed {
+		t.Fatalf("malformed event should remain an event row: %+v", out)
+	}
+}
+
 func TestProjectTimelineEvidenceMissingIsExplicitNull(t *testing.T) {
 	base := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	payload := json.RawMessage(`{"spec_id":"s","traceability":{"spec-id":"s","cr-ref":"CR-2026-001","milestones":[{"cr":"CR-2026-001","milestone":"M0","frs":[{"fr":"FR-1"}]}]}}`)

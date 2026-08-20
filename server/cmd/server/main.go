@@ -615,24 +615,32 @@ func main() {
 			slog.Info("aifirst cr reconcile job registered", "interval", reconcileCfg.Interval, "remote", reconcileCfg.RemoteURL)
 		}
 	}
-	// AIFIRST: commit-prefix drift scan (CR-2026-049 TASK-10). Registered only
-	// when the GitHub App is configured; otherwise the workspace plans would
-	// FAILED hourly with repository_access_missing noise and the governance page
-	// reports uninitialized instead (no SUCCESS plan exists).
-	if scanGH, err := ghsnapshot.NewClientFromEnv(); err != nil {
-		slog.Warn("github: commit_prefix_scan disabled (invalid App private key)", "error", err)
-	} else if scanGH != nil && scanGH.Enabled() {
-		if err := schedulerMgr.Register(*scheduler.CommitPrefixScanJob(scheduler.CommitPrefixScanDeps{
-			Pool:     pool,
-			Queries:  queries,
-			Resolver: drift.NewResolver(scanGH),
-			GH:       scanGH,
-			Findings: drift.NewFindingRepo(pool),
-		})); err != nil {
-			slog.Warn("scheduler: failed to register commit_prefix_scan job", "error", err)
-		} else {
-			slog.Info("commit_prefix_scan job registered")
-		}
+	// AIFIRST: commit-prefix drift scan (CR-2026-049 TASK-10). Keep the job
+	// registered even when GitHub App configuration is unavailable so eligible
+	// workspaces record FAILED plans instead of being reported uninitialized.
+	scanGH, scanErr := ghsnapshot.NewClientFromEnv()
+	var scanAccess drift.AccessResolver
+	var scanSource ghsnapshot.CommitSource
+	if scanErr != nil {
+		slog.Warn("github: commit_prefix_scan will report configuration failures", "error", scanErr)
+		unavailable := ghsnapshot.NewUnavailableClient(scanErr)
+		scanAccess, scanSource = unavailable, unavailable
+	} else if scanGH == nil || !scanGH.Enabled() {
+		unavailable := ghsnapshot.NewUnavailableClient(nil)
+		scanAccess, scanSource = unavailable, unavailable
+	} else {
+		scanAccess, scanSource = scanGH, scanGH
+	}
+	if err := schedulerMgr.Register(*scheduler.CommitPrefixScanJob(scheduler.CommitPrefixScanDeps{
+		Pool:     pool,
+		Queries:  queries,
+		Resolver: drift.NewResolver(scanAccess),
+		GH:       scanSource,
+		Findings: drift.NewFindingRepo(pool),
+	})); err != nil {
+		slog.Warn("scheduler: failed to register commit_prefix_scan job", "error", err)
+	} else {
+		slog.Info("commit_prefix_scan job registered")
 	}
 	go func() {
 		_ = schedulerMgr.Run(sweepCtx)

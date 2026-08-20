@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,7 +149,6 @@ func ProjectTimeline(rows []traceRow) []TraceEventDTO {
 	type eventMeta struct {
 		occurredAt time.Time
 		id         int64
-		commitSHA  string
 	}
 	eventByCR := map[string]eventMeta{}
 	var events []TraceEventDTO
@@ -189,8 +189,6 @@ func ProjectTimeline(rows []traceRow) []TraceEventDTO {
 	}
 
 	for _, row := range rows {
-		meta := eventMeta{occurredAt: row.OccurredAt, id: row.ID, commitSHA: row.CommitSHA}
-		eventByCR[row.CRID] = meta
 		var snap parsedSnapshot
 		if err := json.Unmarshal(row.Payload, &snap); err != nil || snap.SpecID == "" || snap.Traceability.Milestones == nil {
 			events = append(events, TraceEventDTO{
@@ -199,6 +197,8 @@ func ProjectTimeline(rows []traceRow) []TraceEventDTO {
 			})
 			continue
 		}
+		// Malformed rows never replace the last valid event for their CR.
+		eventByCR[row.CRID] = eventMeta{occurredAt: row.OccurredAt, id: row.ID}
 		// Valid complete snapshot: becomes the latest display set and feeds
 		// the conflict hash table.
 		latest = &snap
@@ -215,26 +215,25 @@ func ProjectTimeline(rows []traceRow) []TraceEventDTO {
 		// baseline-imported first (document order), then event-backed entries
 		// sorted by (occurred_at, id).
 		eventEntries := map[string]TraceEventDTO{}
-		var eventOrder []string
 		for _, e := range events {
 			if e.State == "ok" {
 				eventEntries[e.CRID] = e
-				eventOrder = append(eventOrder, e.CRID)
 			} else {
 				out = append(out, e)
 			}
 		}
 		var eventBacked []TraceEventDTO
-		_ = eventOrder
 		for _, d := range displayed {
 			view := d.view
 			view.Conflict = conflictKeys[d.key]
-			if meta, ok := eventByCR[d.view.CR]; ok {
+			if _, ok := eventByCR[d.view.CR]; ok {
 				view.Source = "event"
-				e := eventEntries[d.view.CR]
+				e, exists := eventEntries[d.view.CR]
+				if !exists {
+					continue
+				}
 				e.Milestone = &view
 				eventBacked = append(eventBacked, e)
-				_ = meta
 			} else {
 				view.Source = "baseline-imported"
 				out = append(out, TraceEventDTO{
@@ -242,6 +241,13 @@ func ProjectTimeline(rows []traceRow) []TraceEventDTO {
 				})
 			}
 		}
+		sort.SliceStable(eventBacked, func(i, j int) bool {
+			left, right := eventByCR[eventBacked[i].CRID], eventByCR[eventBacked[j].CRID]
+			if left.occurredAt.Equal(right.occurredAt) {
+				return left.id < right.id
+			}
+			return left.occurredAt.Before(right.occurredAt)
+		})
 		out = append(out, eventBacked...)
 	} else {
 		out = append(out, events...)
@@ -312,12 +318,24 @@ func (s *TraceService) SpecSearch(ctx context.Context, workspaceID, q, owner str
 		WHERE r.rn = 1
 		  AND ($5::text = '' OR r.spec_id > $5)
 		  AND ($3::text = '' OR EXISTS (
-		        SELECT 1 FROM jsonb_each(COALESCE(c.owners, '{}'::jsonb)) o
-		        WHERE lower(o.value->>'id') = lower($3)))
+		        SELECT 1
+		        FROM cr_sync_event oe
+		        JOIN cr oc ON oc.workspace_id = $1::uuid AND oc.cr_id = oe.cr_id
+		        CROSS JOIN LATERAL jsonb_each(COALESCE(oc.owners, '{}'::jsonb)) o
+		        WHERE oe.workspace_id = $1::uuid
+		          AND oe.event_kind = 'trace'
+		          AND oe.payload->>'spec_id' = r.spec_id
+		          AND lower(o.value->>'id') = lower($3)))
 		  AND ($4::text = '' OR r.spec_id ILIKE $4 ESCAPE '\'
 		        OR EXISTS (
-		        SELECT 1 FROM jsonb_each(COALESCE(c.owners, '{}'::jsonb)) o
-		        WHERE o.value->>'id' ILIKE $4 ESCAPE '\'))
+		        SELECT 1
+		        FROM cr_sync_event oe
+		        JOIN cr oc ON oc.workspace_id = $1::uuid AND oc.cr_id = oe.cr_id
+		        CROSS JOIN LATERAL jsonb_each(COALESCE(oc.owners, '{}'::jsonb)) o
+		        WHERE oe.workspace_id = $1::uuid
+		          AND oe.event_kind = 'trace'
+		          AND oe.payload->>'spec_id' = r.spec_id
+		          AND o.value->>'id' ILIKE $4 ESCAPE '\'))
 		ORDER BY r.spec_id
 		LIMIT $2 + 1`, workspaceID, limit, owner, like, cursorVal)
 	if err != nil {

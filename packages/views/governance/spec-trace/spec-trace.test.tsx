@@ -49,7 +49,7 @@ describe("MilestoneRow", () => {
           cr: "CR-2026-001",
           milestone: "M0",
           frs: [],
-          mergeCommits: [{ repo: "tools", trunk: "custom/main", sha: "abc12345" }],
+          mergeCommits: [{ repo: "OldBoy405/tools", trunk: "custom/main", sha: "abc12345" }],
           evidence: {},
           source: "event",
         }}
