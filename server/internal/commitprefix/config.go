@@ -17,3 +17,10 @@ type RepoPrefixDecl struct {
 	Trunk        string
 	Prefixes     []string
 }
+
+// GeneratedPrefixes returns the committed copy of the per-repository prefix
+// declaration, keyed by repository id (ai-first-platform-docs/multica/tools).
+func GeneratedPrefixes() map[string]RepoPrefixDecl { return generatedPrefixes }
+
+// GeneratedConfigRev returns the source commit SHA recorded in config_gen.go.
+func GeneratedConfigRev() string { return generatedConfigRev }
