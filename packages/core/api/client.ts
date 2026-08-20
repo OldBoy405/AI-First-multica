@@ -58,6 +58,9 @@ import type {
   CreateSkillRequest,
   UpdateSkillRequest,
   SetAgentSkillsRequest,
+  SkillMarketResponse,
+  SubmitSkillAppealRequest,
+  DecideSkillAppealRequest,
   SetAgentRuntimeSkillEnabledRequest,
   PersonalAccessToken,
   CreatePersonalAccessTokenRequest,
@@ -2684,6 +2687,25 @@ export class ApiClient {
 
   async deleteSkill(id: string): Promise<void> {
     await this.fetch(`/api/skills/${id}`, { method: "DELETE" });
+  }
+
+  // AIFIRST: CR-2026-048 TASK-09: skill market + appeal endpoints.
+  async getSkillMarket(): Promise<SkillMarketResponse> {
+    return this.fetch("/api/skills/market");
+  }
+
+  async submitSkillAppeal(skillId: string, data: SubmitSkillAppealRequest): Promise<{ appeal_id: string; duplicate?: boolean }> {
+    return this.fetch(`/api/skills/${skillId}/appeals`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async decideSkillAppeal(skillId: string, data: DecideSkillAppealRequest): Promise<{ appeal_id: string; action: string }> {
+    return this.fetch(`/api/skills/${skillId}/appeals/decide`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
   }
 
   async importSkill(data: { url: string }): Promise<Skill> {

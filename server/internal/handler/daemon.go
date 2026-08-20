@@ -2068,6 +2068,23 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		_, skillRefs := h.TaskService.LoadAgentSkillBundles(r.Context(), task.AgentID)
 		agentSkillCount = len(skillRefs)
 		resp.Agent.SkillRefs = skillRefs
+		// AIFIRST: CR-2026-048 TASK-06: best-effort usage telemetry per claim.
+		// used_at records dispatch-time materialization, not completion-time
+		// use (PRD FR-7); claim retries legitimately write more rows and the
+		// ranking query deduplicates on completed tasks. A telemetry failure
+		// must never gate or delay the claim itself.
+		if wsUUID, err := util.ParseUUID(runtimeWorkspaceID); err != nil {
+			slog.Warn("daemon claim: skill usage telemetry skipped, workspace id unparsable",
+				"task_id", uuidToString(task.ID), "error", err)
+		} else {
+			for _, ref := range skillRefs {
+				params := db.InsertSkillUsageEventParams{WorkspaceID: wsUUID, SkillRef: ref.ID, TaskID: task.ID, ProjectID: task.ProjectID}
+				if _, err := h.Queries.InsertSkillUsageEvent(r.Context(), params); err != nil {
+					slog.Error("daemon claim: skill usage telemetry insert failed (non-fatal)",
+						"task_id", uuidToString(task.ID), "skill_ref", ref.ID, "error", err)
+				}
+			}
+		}
 	} else {
 		skills := h.TaskService.LoadAgentSkills(r.Context(), task.AgentID)
 		agentSkillCount = len(skills)

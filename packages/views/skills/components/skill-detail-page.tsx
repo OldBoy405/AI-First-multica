@@ -19,6 +19,7 @@ import {
   Users,
 } from "lucide-react";
 import { SkillIcon } from "../lib/skill-icon";
+import { SkillMarketCard } from "./skill-market-card";
 import type {
   Agent,
   AgentRuntime,
@@ -1244,6 +1245,15 @@ export function SkillDetailPage({ skillId }: { skillId: string }) {
         agentCount={skillAgents.length}
         creator={creator}
       />
+
+      {/* AIFIRST: CR-2026-048 TASK-09: org publish / appeal surface. */}
+      <div className="shrink-0 border-b px-4 py-2 sm:px-6">
+        <SkillMarketCard
+          skill={skill}
+          canEdit={canEdit}
+          isAdmin={myRole === "owner" || myRole === "admin"}
+        />
+      </div>
 
       <div
         className="shrink-0 overflow-x-auto border-b px-4 sm:px-6"

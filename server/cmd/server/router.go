@@ -1943,11 +1943,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/", h.CreateSkill)
 				r.Get("/search", h.SearchSkills)
 				r.Post("/import", h.ImportSkill)
+				// AIFIRST: CR-2026-048 TASK-08 (market) + TASK-07 (appeals).
+				r.Get("/market", h.GetSkillMarket)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetSkill)
 					r.Put("/", h.UpdateSkill)
 					r.Delete("/", h.DeleteSkill)
 					r.Post("/refresh", h.RefreshSkill)
+					r.Post("/appeals", h.SubmitSkillAppeal)
+					r.Post("/appeals/decide", h.DecideSkillAppeal)
 					r.Get("/labels", h.ListLabelsForSkill)
 					r.Post("/labels", h.AttachLabelToSkill)
 					r.Delete("/labels/{labelId}", h.DetachLabelFromSkill)

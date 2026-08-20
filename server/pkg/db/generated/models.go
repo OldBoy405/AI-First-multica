@@ -1146,6 +1146,9 @@ type Skill struct {
 	CreatedBy   pgtype.UUID        `json:"created_by"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Visibility  string             `json:"visibility"`
+	Version     string             `json:"version"`
+	OwnerActor  pgtype.Text        `json:"owner_actor"`
 }
 
 type SkillFile struct {
@@ -1161,6 +1164,15 @@ type SkillToLabel struct {
 	SkillID   pgtype.UUID        `json:"skill_id"`
 	LabelID   pgtype.UUID        `json:"label_id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type SkillUsageEvent struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	SkillRef    string             `json:"skill_ref"`
+	TaskID      pgtype.UUID        `json:"task_id"`
+	ProjectID   pgtype.UUID        `json:"project_id"`
+	UsedAt      pgtype.Timestamptz `json:"used_at"`
 }
 
 type Squad struct {

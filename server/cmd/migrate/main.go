@@ -214,6 +214,10 @@ var concurrentIndexCleanups = map[string]string{
 	"376_maturity_snapshot_identity":              "maturity_snapshot_identity_uidx",
 	"378_maturity_snapshot_scope_date":            "maturity_snapshot_scope_date_idx",
 	"379_maturity_report_history":                 "idx_atq_maturity_report_history",
+	// AIFIRST: CR-2026-048 TASK-01 (Skill Market telemetry + appeal lookup).
+	"382_skill_usage_event_task_id":    "skill_usage_event_task_id_idx",
+	"383_skill_usage_event_scope":      "skill_usage_event_scope_idx",
+	"384_skill_appeal_activity_index":  "skill_appeal_activity_idx",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction

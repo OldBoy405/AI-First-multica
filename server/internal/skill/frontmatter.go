@@ -19,23 +19,43 @@ var frontmatterPattern = regexp.MustCompile(`(?s)\A---\r?\n(.*?\r?\n)---`)
 // absent or malformed so callers can keep treating missing metadata as a
 // non-fatal condition, matching the behaviour of the legacy line-based parser.
 //
-// Values are decoded into a generic map and coerced per key (scalars via their
-// literal form, sequences/mappings via JSON) rather than unmarshalled into a
-// string struct. This means a structured value in one field never discards a
-// valid sibling key, and the coercion mirrors the TS parseFrontmatter in
-// packages/core/skills/frontmatter.ts so both sides agree on the same input.
+// Thin wrapper over ParseSkillMetadata; kept for source compatibility.
 func ParseSkillFrontmatter(content string) (name, description string) {
+	meta := ParseSkillMetadata(content)
+	return meta.Name, meta.Description
+}
+
+// SkillMetadata is the full scalar frontmatter surface of a SKILL.md file:
+// name/description plus every other scalar key (the market metadata card
+// fields, `source: session-export` markers, requirement lists, ...).
+// Structured values are JSON-encoded by coerceFrontmatterValue, mirroring
+// the TS parseFrontmatter behaviour.
+type SkillMetadata struct {
+	Name        string
+	Description string
+	Fields      map[string]string
+}
+
+// ParseSkillMetadata decodes the whole YAML frontmatter block. Absent or
+// malformed frontmatter yields empty Name/Description and an empty Fields
+// map, never an error: the publish gate reports the specific missing field
+// as a structured reason instead of failing the parse.
+func ParseSkillMetadata(content string) SkillMetadata {
+	out := SkillMetadata{Fields: map[string]string{}}
 	if !strings.HasPrefix(content, "---") {
-		return "", ""
+		return out
 	}
 	match := frontmatterPattern.FindStringSubmatch(content)
 	if match == nil {
-		return "", ""
+		return out
 	}
 
 	var fm map[string]any
 	if err := yaml.Unmarshal([]byte(match[1]), &fm); err != nil {
-		return "", ""
+		return out
+	}
+	for k, v := range fm {
+		out.Fields[k] = coerceFrontmatterValue(v)
 	}
 	// Trimmed because both fields are single-line labels wherever they are
 	// consumed, while YAML block scalars (`description: |`, `description: >`)
@@ -43,8 +63,9 @@ func ParseSkillFrontmatter(content string) (name, description string) {
 	// imported skill differ from its own trimmed form, which the skill detail
 	// page read as an unsaved edit (MUL-5645). Normalize at the parse seam so
 	// no import path has to remember to.
-	return strings.TrimSpace(coerceFrontmatterValue(fm["name"])),
-		strings.TrimSpace(coerceFrontmatterValue(fm["description"]))
+	out.Name = strings.TrimSpace(out.Fields["name"])
+	out.Description = strings.TrimSpace(out.Fields["description"])
+	return out
 }
 
 // coerceFrontmatterValue renders a decoded YAML value as a string, mirroring the

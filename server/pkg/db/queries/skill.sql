@@ -40,6 +40,9 @@ UPDATE skill SET
     description = COALESCE(sqlc.narg('description'), description),
     content = COALESCE(sqlc.narg('content'), content),
     config = COALESCE(sqlc.narg('config'), config),
+    visibility = COALESCE(sqlc.narg('visibility'), visibility),
+    version = COALESCE(sqlc.narg('version'), version),
+    owner_actor = COALESCE(sqlc.narg('owner_actor'), owner_actor),
     updated_at = now()
 WHERE id = $1
 RETURNING *;

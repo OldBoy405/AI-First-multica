@@ -10,7 +10,10 @@ import (
 )
 
 // secretPattern pairs a compiled regex with its replacement text.
+// name is a stable identifier used by Findings to tell callers which
+// pattern matched, and by the skill publish appeal id hash.
 type secretPattern struct {
+	name        string
 	re          *regexp.Regexp
 	replacement string
 }
@@ -18,60 +21,65 @@ type secretPattern struct {
 // Patterns are checked in order; first match wins per position.
 var patterns = []secretPattern{
 	// AWS access key IDs (always start with AKIA)
-	{regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), "[REDACTED AWS KEY]"},
+	{"aws_access_key_id", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), "[REDACTED AWS KEY]"},
 
 	// AWS secret access keys (40 char base64-ish, preceded by a common separator)
-	{regexp.MustCompile(`(?i)(?:aws_secret_access_key|secret_?access_?key)\s*[=:]\s*[A-Za-z0-9/+=]{40}`), "[REDACTED AWS SECRET]"},
+	{"aws_secret", regexp.MustCompile(`(?i)(?:aws_secret_access_key|secret_?access_?key)\s*[=:]\s*[A-Za-z0-9/+=]{40}`), "[REDACTED AWS SECRET]"},
 
 	// PEM private keys (multi-line)
-	{regexp.MustCompile(`(?s)-----BEGIN[A-Z\s]*PRIVATE KEY-----.*?-----END[A-Z\s]*PRIVATE KEY-----`), "[REDACTED PRIVATE KEY]"},
+	{"pem_private_key", regexp.MustCompile(`(?s)-----BEGIN[A-Z\s]*PRIVATE KEY-----.*?-----END[A-Z\s]*PRIVATE KEY-----`), "[REDACTED PRIVATE KEY]"},
 
 	// GitHub tokens (classic PAT, OAuth, user-to-server, server-to-server, refresh)
-	{regexp.MustCompile(`\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b`), "[REDACTED GITHUB TOKEN]"},
+	{"github_token", regexp.MustCompile(`\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b`), "[REDACTED GITHUB TOKEN]"},
 
 	// GitHub fine-grained personal access tokens use the github_pat_ prefix,
 	// which the classic ghp_/gho_/... pattern above does not cover. Without
 	// this line a fine-grained PAT emitted in agent output leaks unredacted
 	// to the database and WebSocket broadcast.
-	{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,255}\b`), "[REDACTED GITHUB TOKEN]"},
+	{"github_fine_grained_pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,255}\b`), "[REDACTED GITHUB TOKEN]"},
 
 	// OpenAI / Anthropic API keys
-	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`), "[REDACTED API KEY]"},
+	{"llm_api_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`), "[REDACTED API KEY]"},
 
 	// Slack bot/user/legacy tokens. The char class includes 'e' so the
 	// newer xoxe- config/refresh tokens are covered alongside xoxb/p/o/r/a/s.
-	{regexp.MustCompile(`\bxox[bporase]-[A-Za-z0-9\-]{10,}\b`), "[REDACTED SLACK TOKEN]"},
+	{"slack_token", regexp.MustCompile(`\bxox[bporase]-[A-Za-z0-9\-]{10,}\b`), "[REDACTED SLACK TOKEN]"},
 
 	// Slack app-level tokens use the xapp- prefix, which the xox*- rule above
 	// does not match. Without this an app-level token echoed in agent output
 	// leaks unredacted to the DB / WebSocket broadcast.
-	{regexp.MustCompile(`\bxapp-[A-Za-z0-9-]{10,}\b`), "[REDACTED SLACK TOKEN]"},
+	{"slack_app_token", regexp.MustCompile(`\bxapp-[A-Za-z0-9-]{10,}\b`), "[REDACTED SLACK TOKEN]"},
 
 	// GitLab personal access tokens
-	{regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`), "[REDACTED GITLAB TOKEN]"},
+	{"gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`), "[REDACTED GITLAB TOKEN]"},
 
 	// Google API keys always start with the AIza prefix and are 39 chars total
 	// (AIza + 35). Capture and restore the trailing delimiter so keys ending in
 	// a non-word character such as '-' are still redacted.
-	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}([^0-9A-Za-z_-]|$)`), "[REDACTED GOOGLE API KEY]$1"},
+	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}([^0-9A-Za-z_-]|$)`), "[REDACTED GOOGLE API KEY]$1"},
 
 	// Stripe secret / restricted live keys (sk_live_ / rk_live_). The sk-
 	// rule above only matches the hyphen form used by OpenAI/Anthropic; Stripe
 	// uses an underscore, so live keys are not covered without this. Publishable
 	// keys (pk_live_) are intentionally excluded — they are not secret.
-	{regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`), "[REDACTED STRIPE KEY]"},
+	{"stripe_key", regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`), "[REDACTED STRIPE KEY]"},
 
 	// JWT tokens (three base64url segments)
-	{regexp.MustCompile(`\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), "[REDACTED JWT]"},
+	{"jwt", regexp.MustCompile(`\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), "[REDACTED JWT]"},
 
 	// Generic "Bearer <token>" in output
-	{regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b`), "Bearer [REDACTED]"},
+	{"bearer_token", regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b`), "Bearer [REDACTED]"},
 
 	// Connection strings with embedded passwords
-	{regexp.MustCompile(`(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://[^:\s]+:[^@\s]+@`), "[REDACTED CONNECTION STRING]@"},
+	{"connection_string", regexp.MustCompile(`(?i)(?:postgres|mysql|mongodb|redis|amqp)(?:ql)?://[^:\s]+:[^@\s]+@`), "[REDACTED CONNECTION STRING]@"},
 
 	// Generic key=value patterns for common secret env var names
-	{regexp.MustCompile(`(?i)(?:API_KEY|API_SECRET|SECRET_KEY|SECRET|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|DATABASE_URL|DB_PASSWORD|DB_URL|REDIS_URL|PASSWORD|TOKEN)\s*[=:]\s*\S+`), "[REDACTED CREDENTIAL]"},
+	{"generic_credential", regexp.MustCompile(`(?i)(?:API_KEY|API_SECRET|SECRET_KEY|SECRET|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY|DATABASE_URL|DB_PASSWORD|DB_URL|REDIS_URL|PASSWORD|TOKEN)\s*[=:]\s*\S+`), "[REDACTED CREDENTIAL]"},
+
+	// Personal paths: local user directories leaking a username into an
+	// org-visible asset. The local-user home dir in Text() only masks the
+	// machine's own user; this covers other people's paths inside content.
+	{"personal_path", regexp.MustCompile(`(?i)(?:/Users/|C:\\Users\\|/home/)[A-Za-z0-9._-]+`), "[REDACTED PATH]"},
 }
 
 // maxRedactDepth bounds the walk in redactValue. Tool inputs are decoded from
@@ -167,15 +175,50 @@ func init() {
 // matches with safe placeholders. It also masks the local user's home
 // directory path to prevent leaking the username.
 func Text(s string) string {
-	for _, p := range patterns {
-		s = p.re.ReplaceAllString(s, p.replacement)
-	}
-
-	// Redact home directory paths (e.g. /Users/john/ → /Users/****/).
+	// Mask the local user's home directory FIRST (e.g. /Users/john/ →
+	// /Users/****/): the masked form no longer matches the personal_path
+	// pattern below, so the local user's own paths keep the legacy silent
+	// masking while other people's paths are flagged as findings.
 	if homeDir != "" && username != "" {
 		masked := strings.Replace(homeDir, username, "****", 1)
 		s = strings.ReplaceAll(s, homeDir, masked)
 	}
 
+	for _, p := range patterns {
+		s = p.re.ReplaceAllString(s, p.replacement)
+	}
+
 	return s
+}
+
+// Finding locates one secret hit for callers that must tell an author
+// "line N matched pattern X" (the skill publish gate), instead of only
+// getting a scrubbed copy of the text.
+type Finding struct {
+	PatternID string // stable pattern name, e.g. "github_token"
+	Line      int    // 1-based line number
+	Excerpt   string // Text()-redacted snippet, never plaintext
+}
+
+const maxFindingExcerptLen = 120
+
+// Findings scans s line by line against the SAME patterns table Text uses.
+// The excerpt is passed through Text before returning, so a finding can
+// never carry the matched secret in plaintext back to a caller.
+func Findings(s string) []Finding {
+	var out []Finding
+	for i, line := range strings.Split(s, "\n") {
+		for _, p := range patterns {
+			if p.re.FindStringIndex(line) == nil {
+				continue
+			}
+			excerpt := Text(line)
+			if len(excerpt) > maxFindingExcerptLen {
+				excerpt = excerpt[:maxFindingExcerptLen]
+			}
+			out = append(out, Finding{PatternID: p.name, Line: i + 1, Excerpt: excerpt})
+			break // one finding per line: first pattern wins, same as Text
+		}
+	}
+	return out
 }
