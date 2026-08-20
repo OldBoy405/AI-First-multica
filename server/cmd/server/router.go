@@ -1993,6 +1993,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/specs/{specID}/trace", h.HandleSpecTrace)
 			})
 
+			// AIFIRST: CR-2026-049 TASK-11 — drift governance reads + CAS.
+			r.Route("/api/drift", func(r chi.Router) {
+				r.Get("/overview", h.HandleDriftOverview)
+				r.Get("/findings", h.HandleDriftFindings)
+				r.Patch("/findings/{findingID}", h.HandleDriftPatchFinding)
+			})
+
 			// Runtimes
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)

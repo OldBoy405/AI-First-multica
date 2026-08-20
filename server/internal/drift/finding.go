@@ -9,8 +9,17 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// Querier is the narrow pgx surface the drift repos need; *pgxpool.Pool and
+// handler.dbExecutor both satisfy it.
+type Querier interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // FindingInput is one classified scan row.
 type FindingInput struct {
@@ -24,10 +33,10 @@ type FindingInput struct {
 
 // FindingRepo persists findings through the dedup index.
 type FindingRepo struct {
-	pool *pgxpool.Pool
+	pool Querier
 }
 
-func NewFindingRepo(pool *pgxpool.Pool) *FindingRepo { return &FindingRepo{pool: pool} }
+func NewFindingRepo(pool Querier) *FindingRepo { return &FindingRepo{pool: pool} }
 
 // UpsertFindings inserts all rows with ON CONFLICT DO NOTHING; the returned
 // count is the number of rows actually inserted this round. spec_id/cr_id are
