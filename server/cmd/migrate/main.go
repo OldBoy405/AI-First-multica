@@ -218,6 +218,10 @@ var concurrentIndexCleanups = map[string]string{
 	"382_skill_usage_event_task_id":    "skill_usage_event_task_id_idx",
 	"383_skill_usage_event_scope":      "skill_usage_event_scope_idx",
 	"384_skill_appeal_activity_index":  "skill_appeal_activity_idx",
+	// AIFIRST: CR-2026-049 TASK-04 (drift_finding PK/dedup/keyset).
+	"386_drift_finding_id_uidx":  "drift_finding_id_uidx",
+	"388_drift_finding_dedup_idx": "drift_finding_dedup_idx",
+	"389_drift_finding_keyset":   "drift_finding_keyset_idx",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
