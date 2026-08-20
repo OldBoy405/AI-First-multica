@@ -349,8 +349,12 @@ func (s *SyncService) ingestTrace(ctx context.Context, workspaceID string, ev Ou
 		}
 		return errEventIdempotencyConflict
 	}
-	// 4. first sighting: mark processed in the same transaction and commit.
-	if _, err := tx.Exec(ctx, `UPDATE cr_sync_event SET processed_at = now() WHERE id = $1`, id); err != nil {
+	// 4. first sighting: mark processed in the same transaction and commit
+	// (workspace-scoped predicate per the TASK-05 static contract).
+	if _, err := tx.Exec(ctx, `
+		UPDATE cr_sync_event SET processed_at = now()
+		WHERE workspace_id = $1 AND cr_id = $2 AND commit_sha = $3 AND event_kind = 'trace' AND id = $4`,
+		workspaceID, ev.CRID, ev.CommitSHA, id); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
