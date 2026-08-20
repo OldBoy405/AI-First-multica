@@ -536,6 +536,11 @@ func (q *Queries) DeleteWorkspaceRuntimesAndProjects(ctx context.Context, worksp
 const deleteWorkspaceSquadsAndSkills = `-- name: DeleteWorkspaceSquadsAndSkills :exec
 WITH deleted_squads AS (
     DELETE FROM squad WHERE squad.workspace_id = $1
+),
+deleted_usage AS (
+    -- AIFIRST: CR-2026-048 TASK-10: skill_usage_event carries no FK (repo
+    -- hard rule), so workspace teardown must clean the telemetry explicitly.
+    DELETE FROM skill_usage_event WHERE skill_usage_event.workspace_id = $1
 )
 DELETE FROM skill WHERE skill.workspace_id = $1
 `
