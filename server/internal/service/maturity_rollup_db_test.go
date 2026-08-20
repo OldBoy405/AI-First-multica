@@ -76,6 +76,33 @@ func TestRollupMaturityWorkspaceIntegration(t *testing.T) {
 	if err := ValidateSnapshotMetrics(metrics); err != nil {
 		t.Fatalf("stored metrics invalid: %v", err)
 	}
+	penetration := metrics.MetricValues[maturity.MetricAIPenetration]
+	if penetration.Value == nil || *penetration.Value != 1 || penetration.Numerator == nil || *penetration.Numerator != 2 {
+		t.Fatalf("ai penetration = %+v, want two task initiators including the no-usage task", penetration)
+	}
+
+	var userMetricsJSON, userScoresJSON []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT metrics, scores FROM maturity_snapshot
+		WHERE workspace_id = $1 AND bucket_date = $2 AND scope = 'user'
+		ORDER BY scope_id LIMIT 1`, wsID, target).Scan(&userMetricsJSON, &userScoresJSON); err != nil {
+		t.Fatalf("read user row: %v", err)
+	}
+	var userMetrics maturity.SnapshotMetricsV1
+	if err := json.Unmarshal(userMetricsJSON, &userMetrics); err != nil {
+		t.Fatalf("user metrics JSON: %v", err)
+	}
+	for _, key := range maturity.AllMetricKeys {
+		if key == maturity.MetricTokenIntensity || key == maturity.MetricTeamAgentDepth {
+			continue
+		}
+		if got := userMetrics.MetricValues[key].DataStatus; got != maturity.StatusNotApplicable {
+			t.Fatalf("user metric %s status = %s, want not_applicable", key, got)
+		}
+	}
+	if string(userScoresJSON) != "{}" {
+		t.Fatalf("user scores = %s, want {}", userScoresJSON)
+	}
 	var scores map[string]any
 	if err := json.Unmarshal(scoresJSON, &scores); err != nil {
 		t.Fatalf("scores JSON: %v", err)
@@ -83,6 +110,41 @@ func TestRollupMaturityWorkspaceIntegration(t *testing.T) {
 	// Observing seed config -> scores must stay the empty object.
 	if len(scores) != 0 {
 		t.Fatalf("observing period must store empty scores, got %v", scores)
+	}
+}
+
+func TestRollupMaturityWorkspaceFillsOlderMissingBucket(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("database unavailable: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Skipf("database unreachable: %v", err)
+	}
+	defer pool.Close()
+
+	wsID := seedMaturityFixture(t, ctx, pool)
+	newer := time.Date(2026, 8, 21, 0, 30, 0, 0, shanghaiLoc) // target Aug 20
+	older := time.Date(2026, 8, 20, 0, 30, 0, 0, shanghaiLoc) // target Aug 19
+	if rows, err := RollupMaturityWorkspace(ctx, pool, wsID, newer); err != nil || rows == 0 {
+		t.Fatalf("newer rollup = rows %d, err %v", rows, err)
+	}
+	if rows, err := RollupMaturityWorkspace(ctx, pool, wsID, older); err != nil || rows == 0 {
+		t.Fatalf("older retry = rows %d, err %v; an exact-bucket check must fill the hole", rows, err)
+	}
+	var dates int
+	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT bucket_date) FROM maturity_snapshot WHERE workspace_id=$1 AND scope='org'`, wsID).Scan(&dates); err != nil {
+		t.Fatal(err)
+	}
+	if dates != 2 {
+		t.Fatalf("org buckets = %d, want 2", dates)
 	}
 }
 
@@ -94,6 +156,8 @@ func seedMaturityFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	t.Helper()
 	wsID := uuid.New()
 	userID := uuid.New()
+	noUsageUserID := uuid.New()
+	noUsageTaskID := uuid.New()
 	agentID := uuid.New()
 	projectID := uuid.New()
 	issueID := uuid.New()
@@ -112,12 +176,16 @@ func seedMaturityFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	}
 	exec(`INSERT INTO workspace (id, name, slug) VALUES ($1, $2, $3)`, wsID, "maturity-fixture", "maturity-fixture-"+wsID.String()[:8])
 	exec(`INSERT INTO "user" (id, name, email) VALUES ($1, $2, $3)`, userID, "fixture-user", "fixture-"+userID.String()+"@example.test")
+	exec(`INSERT INTO "user" (id, name, email) VALUES ($1, $2, $3)`, noUsageUserID, "no-usage-user", "fixture-"+noUsageUserID.String()+"@example.test")
 	exec(`INSERT INTO member (id, workspace_id, user_id, role) VALUES ($1, $2, $3, 'admin')`, uuid.New(), wsID, userID)
+	exec(`INSERT INTO member (id, workspace_id, user_id, role) VALUES ($1, $2, $3, 'member')`, uuid.New(), wsID, noUsageUserID)
 	exec(`INSERT INTO project (id, workspace_id, title, status) VALUES ($1, $2, 'p1', 'in_progress')`, projectID, wsID)
 	exec(`INSERT INTO issue (id, workspace_id, project_id, title, creator_type, creator_id) VALUES ($1, $2, $3, 'shell', 'member', $4)`, issueID, wsID, projectID, userID)
 	exec(`INSERT INTO agent (id, workspace_id, name, runtime_mode) VALUES ($1, $2, 'a1', 'local')`, agentID, wsID)
 	exec(`INSERT INTO agent_task_queue (id, agent_id, initiator_user_id, project_id, issue_id, status, created_at, completed_at)
 	      VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7)`, taskID, agentID, userID, projectID, issueID, dayFrom, dayTo)
+	exec(`INSERT INTO agent_task_queue (id, agent_id, initiator_user_id, project_id, issue_id, status, created_at, completed_at)
+	      VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7)`, noUsageTaskID, agentID, noUsageUserID, projectID, issueID, dayFrom, dayTo)
 	exec(`INSERT INTO task_usage (id, task_id, provider, model, input_tokens, output_tokens, cost_usd_ticks, created_at)
 	      VALUES ($1, $2, 'openai', 'gpt-5.6', 100, 50, 1500, $3)`, usageID, taskID, dayFrom)
 	exec(`INSERT INTO cr (id, workspace_id, cr_id, title, status, owners, shell_issue_id)

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,20 +46,9 @@ func (s *MaturityService) Overall(ctx context.Context, workspaceID pgtype.UUID, 
 			ScopeID:     orgSentinel,
 		})
 	} else {
-		rows, listErr := s.queries.ListMaturitySnapshots(ctx, db.ListMaturitySnapshotsParams{
+		row, err = s.queries.LatestMaturitySnapshot(ctx, db.LatestMaturitySnapshotParams{
 			WorkspaceID: workspaceID, Scope: scopeOrg, ScopeID: orgSentinel,
-			BucketDate:   pgtype.Date{Time: time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true},
-			BucketDate_2: pgtype.Date{Time: time.Now().Add(24 * time.Hour), Valid: true},
-			Limit:        1,
 		})
-		if listErr != nil {
-			return nil, listErr
-		}
-		if len(rows) == 0 {
-			err = pgx.ErrNoRows
-		} else {
-			row = rows[len(rows)-1]
-		}
 	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -139,26 +127,37 @@ func (s *MaturityService) TokenTrend(ctx context.Context, workspaceID pgtype.UUI
 		rows, err := s.queries.MaturityModelCostRows(ctx, db.MaturityModelCostRowsParams{
 			WorkspaceID: workspaceID,
 			FromUtc:     pgtype.Timestamptz{Time: req.From, Valid: true},
-			ToUtc:       pgtype.Timestamptz{Time: req.To, Valid: true},
+			ToUtc:       pgtype.Timestamptz{Time: req.To.AddDate(0, 0, 1), Valid: true},
 		})
 		if err != nil {
 			return nil, err
 		}
+		series := map[string]*maturity.TokenTrendSeries{}
 		for _, r := range rows {
 			key := r.Provider + ":" + r.Model
 			if req.DimensionID != "" && r.Model != req.DimensionID && key != req.DimensionID {
 				continue
 			}
-			cost, status := costFromModelRow(r)
-			resp.Series = append(resp.Series, maturity.TokenTrendSeries{
-				ID: key, Label: r.Model,
-				Points: []maturity.TokenTrendPoint{{
-					Date:       from.Time.Format("2006-01-02"),
-					Tokens:     r.InputTokens + r.OutputTokens + r.CacheReadTokens + r.CacheWriteTokens,
-					CostUSD:    cost, CostStatus: status,
-				}},
+			ser := series[key]
+			if ser == nil {
+				ser = &maturity.TokenTrendSeries{ID: key, Label: r.Model, Points: []maturity.TokenTrendPoint{}}
+				series[key] = ser
+			}
+			var cost *float64
+			status := "unavailable"
+			if req.IncludeCost {
+				cost, status = costFromModelRow(r)
+			}
+			ser.Points = append(ser.Points, maturity.TokenTrendPoint{
+				Date:    r.BucketDate.Time.Format("2006-01-02"),
+				Tokens:  r.InputTokens + r.OutputTokens + r.CacheReadTokens + r.CacheWriteTokens,
+				CostUSD: cost, CostStatus: status,
 			})
 		}
+		for _, ser := range series {
+			resp.Series = append(resp.Series, *ser)
+		}
+		sort.Slice(resp.Series, func(i, j int) bool { return resp.Series[i].ID < resp.Series[j].ID })
 	case "user", "project":
 		scope := scopeProject
 		scopeID := req.DimensionID
@@ -208,9 +207,14 @@ func (s *MaturityService) TokenTrend(ctx context.Context, workspaceID pgtype.UUI
 				ser = &maturity.TokenTrendSeries{ID: key, Label: label, Points: []maturity.TokenTrendPoint{}}
 				series[key] = ser
 			}
-			pt := maturity.TokenTrendPoint{Date: r.BucketDate.Time.Format("2006-01-02"), Tokens: m.Headline.TotalTokens}
-			pt.CostUSD = m.Headline.CostUSD
-			pt.CostStatus = m.Headline.CostStatus
+			pt := maturity.TokenTrendPoint{
+				Date: r.BucketDate.Time.Format("2006-01-02"), Tokens: m.Headline.TotalTokens,
+				CostStatus: "unavailable", ConfigRev: r.ConfigRev,
+			}
+			if req.IncludeCost {
+				pt.CostUSD = m.Headline.CostUSD
+				pt.CostStatus = m.Headline.CostStatus
+			}
 			ser.Points = append(ser.Points, pt)
 		}
 		for _, ser := range series {
@@ -384,11 +388,12 @@ func dataStatusOf(items []maturity.MaturityReport) string {
 // Config returns the generated config declaration (all members can read).
 func (s *MaturityService) Config(ctx context.Context, workspaceID pgtype.UUID) (*maturity.MaturityConfigResponse, error) {
 	resp := &maturity.MaturityConfigResponse{
-		ConfigRev:         maturity.GeneratedConfigRev(),
-		ObservationWeeks:  s.cfg.ObservationWeeks,
-		CalibrationStatus: s.cfg.CalibrationStatus,
-		Dimensions:        []maturity.MaturityConfigDimension{},
-		Metrics:           []maturity.MaturityConfigMetric{},
+		ConfigRev:           maturity.GeneratedConfigRev(),
+		ObservationWeeks:    s.cfg.ObservationWeeks,
+		CalibrationStatus:   s.cfg.CalibrationStatus,
+		Dimensions:          []maturity.MaturityConfigDimension{},
+		Metrics:             []maturity.MaturityConfigMetric{},
+		BaselineSuggestions: []maturity.MaturityBaselineSuggestion{},
 	}
 	if _, ok := maturity.GeneratedPriceMap(); ok {
 		rev := maturity.GeneratedConfigRev()
@@ -400,10 +405,34 @@ func (s *MaturityService) Config(ctx context.Context, workspaceID pgtype.UUID) (
 	for _, k := range maturity.AllMetricKeys {
 		mc := s.cfg.Metrics[k]
 		resp.Metrics = append(resp.Metrics, maturity.MaturityConfigMetric{
-			Key: k, Weight: mc.Weight, Floor: mc.Floor, Target: mc.Target, Unit: unitForRead(k), KnownGameability: "",
+			Key: k, Weight: mc.Weight, Floor: mc.Floor, Target: mc.Target,
+			Unit: unitForRead(k), KnownGameability: knownGameability(k),
+		})
+	}
+	baseline, err := s.queries.MaturityBaselinePercentiles(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range baseline {
+		resp.BaselineSuggestions = append(resp.BaselineSuggestions, maturity.MaturityBaselineSuggestion{
+			MetricKey: maturity.MetricKey(row.MetricKey), SampleCount: row.SampleCount,
+			FloorP10: row.P10, TargetP75: row.P75,
 		})
 	}
 	return resp, nil
+}
+
+func knownGameability(k maturity.MetricKey) string {
+	return map[maturity.MetricKey]string{
+		maturity.MetricTokenIntensity:        "Can be inflated by verbose prompts or unnecessary generations.",
+		maturity.MetricAIPenetration:         "Can be inflated by trivial one-off Agent tasks.",
+		maturity.MetricCRThroughputPerCapita: "Can be inflated by splitting changes into undersized CRs.",
+		maturity.MetricProjectCollabScale:    "Can be inflated by adding nominal participants without substantive work.",
+		maturity.MetricProjectActiveRate:     "Any qualifying task or status change can mark a project active.",
+		maturity.MetricPrototypeDirectRate:   "Can be inflated by pre-reviewing outside the recorded gate flow.",
+		maturity.MetricTeamAgentDepth:        "Can be inflated by attaching shallow tasks to issues or CRs.",
+		maturity.MetricProcessCompletionRate: "Can be inflated by mechanically completing pipelines without outcome quality.",
+	}[k]
 }
 
 func unitForRead(k maturity.MetricKey) string {
@@ -425,7 +454,7 @@ func decodeReport(result []byte) (maturity.MaturityReport, bool) {
 	if err := json.Unmarshal(result, &r); err != nil {
 		return r, false
 	}
-	if r.ReportKey == "" || r.ContentSha256 == "" {
+	if r.Schema != maturityReportSchema || r.ReportKey == "" || r.ContentSha256 == "" {
 		return r, false
 	}
 	sum := sha256.Sum256([]byte(r.Markdown))
@@ -441,7 +470,7 @@ func costFromModelRow(r db.MaturityModelCostRowsRow) (*float64, string) {
 	prices, priceMapOK := maturity.GeneratedPriceMap()
 	uncostedTokens := r.UncostedInputTokens + r.UncostedOutputTokens + r.UncostedCacheReadTokens + r.UncostedCacheWriteTokens
 	usd := float64(r.CostUsdTicks) * 1e-10
-	price, known := prices.Models[strings.ToLower(r.Model)]
+	price, known := modelPrice(prices, r.Provider, r.Model)
 	unpriced := uncostedTokens > 0 && (!priceMapOK || !known)
 	if unpriced {
 		return nil, "unavailable"

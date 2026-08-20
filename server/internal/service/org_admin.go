@@ -19,8 +19,8 @@ import (
 // autopilot title+project), never on editable display names.
 
 const (
-	orgAdminSystemKey    = "org-admin-workspace"
-	orgAdminAgentKey     = "org-admin"
+	orgAdminSystemKey      = "org-admin-workspace"
+	orgAdminAgentKey       = "org-admin"
 	orgAdminAutopilotTitle = "AI Maturity Weekly Report"
 )
 
@@ -62,12 +62,6 @@ func EnsureOrgAdminWorkspace(
 	}
 	qtx := db.New(tx)
 
-	// Project: logical idempotency key in settings.system_key.
-	project, err := findOrCreateOrgAdminProject(ctx, qtx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-
 	// Agent: stable system_key; re-check inside the lock before creating.
 	agent, err := qtx.GetAgentBySystemKey(ctx, db.GetAgentBySystemKeyParams{
 		WorkspaceID: workspaceID, SystemKey: pgtype.Text{String: orgAdminAgentKey, Valid: true},
@@ -96,6 +90,13 @@ func EnsureOrgAdminWorkspace(
 		agent = created
 	}
 
+	// Project: logical idempotency key in settings.system_key. New projects use
+	// the system agent as their explicit lead (FR-19).
+	project, err := findOrCreateOrgAdminProject(ctx, qtx, workspaceID, agent.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Autopilot + weekly schedule trigger.
 	autopilot, err := qtx.MaturityOrgAdminAutopilot(ctx, db.MaturityOrgAdminAutopilotParams{
 		WorkspaceID: workspaceID, ProjectID: project.ID,
@@ -107,7 +108,7 @@ func EnsureOrgAdminWorkspace(
 		created, err := qtx.CreateAutopilot(ctx, db.CreateAutopilotParams{
 			WorkspaceID:        workspaceID,
 			Title:              orgAdminAutopilotTitle,
-			Description:        pgtype.Text{String: "Weekly AI maturity report for the workspace.", Valid: true},
+			Description:        pgtype.Text{String: "Invoke the built-in multica-maturity-weekly-report skill. Read frozen maturity APIs, atomically write the ISO-week report, and return only the ai-first.maturity-report/v1 JSON envelope.", Valid: true},
 			AssigneeType:       "agent",
 			AssigneeID:         agent.ID,
 			Status:             "active",
@@ -121,6 +122,18 @@ func EnsureOrgAdminWorkspace(
 			return nil, fmt.Errorf("create org admin autopilot: %w", err)
 		}
 		autopilot = created
+	}
+
+	// Scheduled run_only attribution requires one published immutable rule
+	// version. The bootstrap is idempotent: only backfill it when absent.
+	if _, err := qtx.GetActiveAutopilotRuleVersion(ctx, db.GetActiveAutopilotRuleVersionParams{
+		WorkspaceID: workspaceID, AutopilotID: autopilot.ID,
+	}); errors.Is(err, pgx.ErrNoRows) {
+		if err := RecordAutopilotRuleVersion(ctx, qtx, autopilot, "member", ownerID); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
 	}
 
 	trigger, err := qtx.MaturityOrgAdminScheduleTrigger(ctx, autopilot.ID)
@@ -153,7 +166,7 @@ func EnsureOrgAdminWorkspace(
 	}, nil
 }
 
-func findOrCreateOrgAdminProject(ctx context.Context, qtx *db.Queries, workspaceID pgtype.UUID) (db.Project, error) {
+func findOrCreateOrgAdminProject(ctx context.Context, qtx *db.Queries, workspaceID, agentID pgtype.UUID) (db.Project, error) {
 	projects, err := qtx.ListProjects(ctx, db.ListProjectsParams{WorkspaceID: workspaceID})
 	if err != nil {
 		return db.Project{}, err
@@ -161,7 +174,9 @@ func findOrCreateOrgAdminProject(ctx context.Context, qtx *db.Queries, workspace
 	for _, p := range projects {
 		var settings map[string]any
 		if len(p.Settings) > 0 {
-			_ = json.Unmarshal(p.Settings, &settings)
+			if err := json.Unmarshal(p.Settings, &settings); err != nil {
+				return db.Project{}, fmt.Errorf("decode project settings: %w", err)
+			}
 		}
 		if settings["system_key"] == orgAdminSystemKey {
 			return p, nil
@@ -174,7 +189,7 @@ func findOrCreateOrgAdminProject(ctx context.Context, qtx *db.Queries, workspace
 		Icon:        pgtype.Text{},
 		Status:      "in_progress",
 		LeadType:    pgtype.Text{String: "agent", Valid: true},
-		LeadID:      pgtype.UUID{},
+		LeadID:      agentID,
 		Priority:    "none",
 		StartDate:   pgtype.Date{},
 		DueDate:     pgtype.Date{},
@@ -183,7 +198,10 @@ func findOrCreateOrgAdminProject(ctx context.Context, qtx *db.Queries, workspace
 		return db.Project{}, fmt.Errorf("create org admin project: %w", err)
 	}
 	// Stamp the logical idempotency key.
-	patch, _ := json.Marshal(map[string]any{"system_key": orgAdminSystemKey})
+	patch, err := json.Marshal(map[string]any{"system_key": orgAdminSystemKey})
+	if err != nil {
+		return db.Project{}, fmt.Errorf("encode org admin settings: %w", err)
+	}
 	updated, err := qtx.UpdateProjectSettings(ctx, db.UpdateProjectSettingsParams{
 		ID: created.ID, WorkspaceID: workspaceID, Patch: patch,
 	})

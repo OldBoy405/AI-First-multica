@@ -8,15 +8,16 @@ import "time"
 // MaturityReport is the E3 weekly-report envelope stored in
 // agent_task_queue.result (schema ai-first.maturity-report/v1).
 type MaturityReport struct {
-	ReportKey      string   `json:"report_key"`
-	Week           string   `json:"week"`
-	GeneratedAt    string   `json:"generated_at"`
-	RelativePath   string   `json:"relative_path"`
-	Markdown       string   `json:"markdown"`
-	ContentSha256  string   `json:"content_sha256"`
-	SourceTaskID   string   `json:"source_task_id"`
-	ChatSessionID  string   `json:"chat_session_id"`
-	ConfigRevs     []string `json:"config_revs"`
+	Schema        string   `json:"schema"`
+	ReportKey     string   `json:"report_key"`
+	Week          string   `json:"week"`
+	GeneratedAt   string   `json:"generated_at"`
+	RelativePath  string   `json:"relative_path"`
+	Markdown      string   `json:"markdown"`
+	ContentSha256 string   `json:"content_sha256"`
+	SourceTaskID  string   `json:"source_task_id"`
+	ChatSessionID string   `json:"chat_session_id"`
+	ConfigRevs    []string `json:"config_revs"`
 }
 
 // Observation is the calibration/observation status block.
@@ -37,22 +38,22 @@ type ApiError struct {
 
 // MaturityOverallResponse mirrors GET /api/maturity/overall.
 type MaturityOverallResponse struct {
-	BucketDate   string       `json:"bucket_date"`
-	ConfigRev    string       `json:"config_rev"`
-	Observation  *Observation `json:"observation"`
-	Headline     *Headline    `json:"headline"`
-	TotalScore   *float64     `json:"total_score"`
-	Dimensions   []MaturityDimension `json:"dimensions"`
-	Governance   []MaturityGovernanceDatum `json:"governance"`
-	DataStatus   string       `json:"data_status"`
+	BucketDate  string                    `json:"bucket_date"`
+	ConfigRev   string                    `json:"config_rev"`
+	Observation *Observation              `json:"observation"`
+	Headline    *Headline                 `json:"headline"`
+	TotalScore  *float64                  `json:"total_score"`
+	Dimensions  []MaturityDimension       `json:"dimensions"`
+	Governance  []MaturityGovernanceDatum `json:"governance"`
+	DataStatus  string                    `json:"data_status"`
 }
 
 // MaturityDimension groups metrics under one dimension key.
 type MaturityDimension struct {
-	Key       DimensionKey            `json:"key"`
-	Score     *float64                `json:"score"`
-	DataStatus DataStatus             `json:"data_status"`
-	Metrics   []MaturityDimensionMetric `json:"metrics"`
+	Key        DimensionKey              `json:"key"`
+	Score      *float64                  `json:"score"`
+	DataStatus DataStatus                `json:"data_status"`
+	Metrics    []MaturityDimensionMetric `json:"metrics"`
 }
 
 // MaturityDimensionMetric is one raw+score pair inside a dimension.
@@ -83,6 +84,7 @@ type TokenTrendPoint struct {
 	Tokens     int64    `json:"tokens"`
 	CostUSD    *float64 `json:"cost_usd"`
 	CostStatus string   `json:"cost_status"`
+	ConfigRev  string   `json:"config_rev,omitempty"`
 }
 
 // TokenTrendSeries is one series (project, self user, or model).
@@ -94,11 +96,11 @@ type TokenTrendSeries struct {
 
 // TokenTrendResponse mirrors GET /api/maturity/token-trend.
 type TokenTrendResponse struct {
-	Dimension  string              `json:"dimension"`
-	From       string              `json:"from"`
-	To         string              `json:"to"`
-	Series     []TokenTrendSeries  `json:"series"`
-	DataStatus string              `json:"data_status"`
+	Dimension  string             `json:"dimension"`
+	From       string             `json:"from"`
+	To         string             `json:"to"`
+	Series     []TokenTrendSeries `json:"series"`
+	DataStatus string             `json:"data_status"`
 }
 
 // ProjectRankingsItem is one row of the project ranking.
@@ -135,12 +137,12 @@ type SuggestionHistoryResponse struct {
 
 // MaturityConfigMetric is one metric row of GET /api/maturity/config.
 type MaturityConfigMetric struct {
-	Key             MetricKey `json:"key"`
-	Weight          float64   `json:"weight"`
-	Floor           float64   `json:"floor"`
-	Target          float64   `json:"target"`
-	Unit            string    `json:"unit"`
-	KnownGameability string   `json:"known_gameability"`
+	Key              MetricKey `json:"key"`
+	Weight           float64   `json:"weight"`
+	Floor            float64   `json:"floor"`
+	Target           float64   `json:"target"`
+	Unit             string    `json:"unit"`
+	KnownGameability string    `json:"known_gameability"`
 }
 
 // MaturityConfigDimension is one dimension row of the config response.
@@ -149,12 +151,21 @@ type MaturityConfigDimension struct {
 	Metrics []MetricKey  `json:"metrics"`
 }
 
+// MaturityBaselineSuggestion is a read-only week-four P10/P75 proposal.
+type MaturityBaselineSuggestion struct {
+	MetricKey   MetricKey `json:"metric_key"`
+	SampleCount int64     `json:"sample_count"`
+	FloorP10    float64   `json:"floor_p10"`
+	TargetP75   float64   `json:"target_p75"`
+}
+
 // MaturityConfigResponse mirrors GET /api/maturity/config.
 type MaturityConfigResponse struct {
-	ConfigRev         string                   `json:"config_rev"`
-	ObservationWeeks  int                      `json:"observation_weeks"`
-	CalibrationStatus string                   `json:"calibration_status"`
-	Dimensions        []MaturityConfigDimension `json:"dimensions"`
-	Metrics           []MaturityConfigMetric   `json:"metrics"`
-	PriceConfigRev    *string                  `json:"price_config_rev"`
+	ConfigRev           string                       `json:"config_rev"`
+	ObservationWeeks    int                          `json:"observation_weeks"`
+	CalibrationStatus   string                       `json:"calibration_status"`
+	Dimensions          []MaturityConfigDimension    `json:"dimensions"`
+	Metrics             []MaturityConfigMetric       `json:"metrics"`
+	BaselineSuggestions []MaturityBaselineSuggestion `json:"baseline_suggestions"`
+	PriceConfigRev      *string                      `json:"price_config_rev"`
 }

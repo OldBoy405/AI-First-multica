@@ -41,6 +41,7 @@ func BuildReportEnvelope(
 	}
 	sum := sha256.Sum256(markdown)
 	return maturity.MaturityReport{
+		Schema:        "ai-first.maturity-report/v1",
 		ReportKey:     uuid.UUID(workspaceID.Bytes).String() + ":" + week,
 		Week:          week,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),

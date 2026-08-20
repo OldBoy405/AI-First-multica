@@ -23,6 +23,7 @@ export interface MaturityMetricValue {
 }
 
 export interface MaturityReport {
+  schema: "ai-first.maturity-report/v1";
   report_key: string;
   week: string;
   generated_at: string;
@@ -81,6 +82,7 @@ export interface MaturityTokenTrendResponse {
       tokens: number;
       cost_usd: number | null;
       cost_status: string;
+      config_rev?: string;
     }>;
   }>;
   data_status: "ready" | "empty";
@@ -124,6 +126,12 @@ export interface MaturityConfigResponse {
     target: number;
     unit: string;
     known_gameability: string;
+  }>;
+  baseline_suggestions: Array<{
+    metric_key: string;
+    sample_count: number;
+    floor_p10: number;
+    target_p75: number;
   }>;
   price_config_rev: string | null;
 }

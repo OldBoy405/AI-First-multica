@@ -71,7 +71,7 @@ describe("maturity schemas parseWithFallback leniency", () => {
     expect(rankings.items).toEqual([]); // malformed item -> whole list falls back
 
     const sugg = parseWithFallback<MaturitySuggestionResponse>(
-      { latest: { report_key: "k" } },
+      { latest: { schema: "ai-first.maturity-report/v1", report_key: "k" } },
       MaturitySuggestionResponseSchema,
       EMPTY_MATURITY_SUGGESTIONS,
       { endpoint: "test" },
@@ -79,7 +79,7 @@ describe("maturity schemas parseWithFallback leniency", () => {
     expect(sugg.latest?.report_key).toBe("k");
 
     const hist = parseWithFallback<MaturitySuggestionHistoryResponse>(
-      { items: [{}] },
+      { items: [{ schema: "ai-first.maturity-report/v1" }] },
       MaturitySuggestionHistoryResponseSchema,
       EMPTY_MATURITY_SUGGESTION_HISTORY,
       { endpoint: "test" },

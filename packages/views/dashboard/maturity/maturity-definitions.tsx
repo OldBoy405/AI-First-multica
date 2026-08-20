@@ -22,13 +22,10 @@ export function MaturityDefinitions({
           </span>
           {" · "}
           <span>weight {m.weight}</span>
+          {" · "}
+          <span>Known gameability: {m.known_gameability}</span>
         </li>
       ))}
-      <li>
-        Known gameability: tokens can be inflated by long prompts; gate
-        first-pass can be gamed by pre-reviewing offline; project activity
-        counts any task or status event.
-      </li>
     </ul>
   );
 }

@@ -974,6 +974,27 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "workspace fail-closed: no accountable human for autopilot run"), code: dispatch.ReasonAttributionBlocked}
 	}
 	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
+
+	// AIFIRST: the CR-2026-047 weekly report reuses one project chat session,
+	// so every report and follow-up stays in the same Team Agent message flow.
+	var reportChatID pgtype.UUID
+	if ap.Title == orgAdminAutopilotTitle && ap.ProjectID.Valid && autopilotAttr.AccountableUserID.Valid {
+		chat, chatErr := s.Queries.GetProjectChatSessionForCreator(ctx, db.GetProjectChatSessionForCreatorParams{
+			ProjectID: ap.ProjectID, CreatorID: autopilotAttr.AccountableUserID,
+		})
+		if errors.Is(chatErr, pgx.ErrNoRows) {
+			chat, chatErr = s.Queries.CreateChatSession(ctx, db.CreateChatSessionParams{
+				WorkspaceID: ap.WorkspaceID, AgentID: agent.ID,
+				CreatorID: autopilotAttr.AccountableUserID, Title: orgAdminAutopilotTitle,
+				ProjectID: ap.ProjectID,
+			})
+		}
+		if chatErr != nil {
+			return fmt.Errorf("prepare maturity report chat: %w", chatErr)
+		}
+		reportChatID = chat.ID
+	}
+
 	task, err := s.Queries.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
 		AgentID:        agent.ID,
 		RuntimeID:      agent.RuntimeID,
@@ -992,6 +1013,8 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		OriginatorSource:     apSource,
 		TriggerEvidenceKind:  apEvidenceKind,
 		TriggerEvidenceRefID: apEvidenceRef,
+		ChatSessionID:        reportChatID,
+		ProjectID:            ap.ProjectID,
 	})
 	if err != nil {
 		return fmt.Errorf("create autopilot task: %w", err)

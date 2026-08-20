@@ -154,8 +154,34 @@ func TestTaskCoverage(t *testing.T) {
 	}
 }
 
-func TestNormalizeModel(t *testing.T) {
-	if got := normalizeModel("OpenAI", "GPT-5.6"); got != "gpt-5.6" {
-		t.Fatalf("normalizeModel = %q", got)
+func TestScoringInputsReady(t *testing.T) {
+	values := make(map[maturity.MetricKey]maturity.MetricValue, len(maturity.AllMetricKeys))
+	for _, key := range maturity.AllMetricKeys {
+		value := 1.0
+		values[key] = maturity.MetricValue{Value: &value, DataStatus: maturity.StatusReady}
+	}
+	if !scoringInputsReady(values) {
+		t.Fatal("all ready metrics must be scoreable")
+	}
+	values[maturity.MetricProjectCollabScale] = metricUnavailable(reasonOwnerUnresolved, "members_per_cr")
+	if scoringInputsReady(values) {
+		t.Fatal("one unavailable metric must suppress the full score payload")
+	}
+}
+
+func TestModelPrice(t *testing.T) {
+	bare := maturity.ModelPrice{InputUSDPer1M: 1}
+	prefixed := maturity.ModelPrice{InputUSDPer1M: 2}
+	prices := maturity.PriceMap{Models: map[string]maturity.ModelPrice{
+		"gpt-5.6": bare, "anthropic/claude": prefixed, "anthropic/gpt-5.6": prefixed,
+	}}
+	if got, ok := modelPrice(prices, "OpenAI", "GPT-5.6"); !ok || got.InputUSDPer1M != 1 {
+		t.Fatalf("bare modelPrice = (%+v, %v)", got, ok)
+	}
+	if got, ok := modelPrice(prices, "Anthropic", "Claude"); !ok || got.InputUSDPer1M != 2 {
+		t.Fatalf("prefixed modelPrice = (%+v, %v)", got, ok)
+	}
+	if got, ok := modelPrice(prices, "Anthropic", "GPT-5.6"); !ok || got.InputUSDPer1M != 2 {
+		t.Fatalf("provider override modelPrice = (%+v, %v)", got, ok)
 	}
 }

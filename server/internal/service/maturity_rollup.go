@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -83,8 +84,8 @@ func dayWindowUTC(d time.Time) (time.Time, time.Time) {
 }
 
 func toPgTs(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
-func toPgDate(d time.Time) pgtype.Date       { return pgtype.Date{Time: d, Valid: true} }
-func f64(v float64) *float64                 { return &v }
+func toPgDate(d time.Time) pgtype.Date      { return pgtype.Date{Time: d, Valid: true} }
+func f64(v float64) *float64                { return &v }
 
 // RollupMaturitySnapshot rolls up the previous local day for every workspace
 // (stable ID order). Each workspace commits independently; a later failure
@@ -108,7 +109,7 @@ func RollupMaturitySnapshot(ctx context.Context, pool *pgxpool.Pool, planTime ti
 }
 
 // RollupMaturityWorkspace writes all scope rows for one workspace and one
-// bucket. Lock miss returns errMaturityBusy; watermark reached is a no-op.
+// bucket. Lock miss returns errMaturityBusy; an existing exact bucket is a no-op.
 func RollupMaturityWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceID pgtype.UUID, planTime time.Time) (int64, error) {
 	if !workspaceID.Valid {
 		return 0, errors.New("maturity rollup: workspace id required")
@@ -133,15 +134,20 @@ func RollupMaturityWorkspace(ctx context.Context, pool *pgxpool.Pool, workspaceI
 	}
 
 	qtx := db.New(tx)
-	maxBucket, err := qtx.MaturitySnapshotMaxBucket(ctx, workspaceID)
-	if err != nil {
-		return 0, err
-	}
-	if maxBucket.Valid && !maxBucket.Time.Before(target) {
+	_, err = qtx.GetMaturitySnapshot(ctx, db.GetMaturitySnapshotParams{
+		WorkspaceID: workspaceID,
+		BucketDate:  toPgDate(target),
+		Scope:       scopeOrg,
+		ScopeID:     orgSentinel,
+	})
+	if err == nil {
 		if err := tx.Commit(ctx); err != nil {
 			return 0, err
 		}
 		return 0, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
 	}
 
 	rows, err := rollupWorkspaceRows(ctx, qtx, workspaceID, target)
@@ -226,14 +232,14 @@ func rollupWorkspaceRows(ctx context.Context, qtx *db.Queries, workspaceID pgtyp
 		scopes = append(scopes, scopeRow{scopeProject, uuid.UUID(pid.Bytes).String(), m})
 	}
 
-	tokenRows, err := qtx.MaturityTaskTokenRows(ctx, db.MaturityTaskTokenRowsParams{
+	depthRows, err := qtx.MaturityTaskDepthRows(ctx, db.MaturityTaskDepthRowsParams{
 		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
 	})
 	if err != nil {
 		return 0, err
 	}
 	userSet := map[[16]byte]bool{}
-	for _, r := range tokenRows {
+	for _, r := range depthRows {
 		if r.InitiatorUserID.Valid {
 			userSet[r.InitiatorUserID.Bytes] = true
 		}
@@ -261,7 +267,7 @@ func rollupWorkspaceRows(ctx context.Context, qtx *db.Queries, workspaceID pgtyp
 	if !firstBucket.Valid {
 		firstBucket = toPgDate(target)
 	}
-	observation := maturity.ObservationActive(firstBucket.Time, time.Now(), cfg)
+	observation := maturity.ObservationActive(firstBucket.Time, target, cfg)
 
 	configRev := maturity.GeneratedConfigRev()
 	bucket := toPgDate(target)
@@ -275,11 +281,14 @@ func rollupWorkspaceRows(ctx context.Context, qtx *db.Queries, workspaceID pgtyp
 			return rows, err
 		}
 		scoresJSON := []byte("{}")
-		if !observation {
-			if s, err := maturity.BuildScores(s.m.MetricValues, cfg); err == nil {
-				if b, err := json.Marshal(s); err == nil {
-					scoresJSON = b
-				}
+		if !observation && s.scope != scopeUser && scoringInputsReady(s.m.MetricValues) {
+			scores, err := maturity.BuildScores(s.m.MetricValues, cfg)
+			if err != nil {
+				return rows, fmt.Errorf("score %s/%s: %w", s.scope, s.scopeID, err)
+			}
+			scoresJSON, err = json.Marshal(scores)
+			if err != nil {
+				return rows, fmt.Errorf("marshal scores %s/%s: %w", s.scope, s.scopeID, err)
 			}
 		}
 		n, err := qtx.MaturitySnapshotInsert(ctx, db.MaturitySnapshotInsertParams{
@@ -333,6 +342,23 @@ func computeScope(
 	}
 	tokenRows = filterTokenRows(tokenRows, projectID, userID)
 
+	allDepthRows, err := qtx.MaturityTaskDepthRows(ctx, db.MaturityTaskDepthRowsParams{
+		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
+	})
+	if err != nil {
+		return m, err
+	}
+	depthRows := make([]db.MaturityTaskDepthRowsRow, 0, len(allDepthRows))
+	for _, d := range allDepthRows {
+		if projectID != nil && (!d.ProjectID.Valid || d.ProjectID.Bytes != projectID.Bytes) {
+			continue
+		}
+		if userID != nil && (!d.InitiatorUserID.Valid || d.InitiatorUserID.Bytes != userID.Bytes) {
+			continue
+		}
+		depthRows = append(depthRows, d)
+	}
+
 	var totalTokens int64
 	for _, r := range tokenRows {
 		totalTokens += r.InputTokens + r.OutputTokens + r.CacheReadTokens + r.CacheWriteTokens
@@ -377,7 +403,7 @@ func computeScope(
 
 	// --- ai_penetration ---
 	initiators := map[[16]byte]bool{}
-	for _, r := range tokenRows {
+	for _, r := range depthRows {
 		if r.InitiatorUserID.Valid {
 			initiators[r.InitiatorUserID.Bytes] = true
 		}
@@ -554,24 +580,8 @@ func computeScope(
 	}
 
 	// --- team_agent_depth (task-level deep/total) ---
-	depthRows, err := qtx.MaturityTaskDepthRows(ctx, db.MaturityTaskDepthRowsParams{
-		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
-	})
-	if err != nil {
-		return m, err
-	}
 	var deep, total int64
 	for _, d := range depthRows {
-		if projectID != nil {
-			if !d.ProjectID.Valid || d.ProjectID.Bytes != projectID.Bytes {
-				continue
-			}
-		}
-		if userID != nil {
-			if !d.InitiatorUserID.Valid || d.InitiatorUserID.Bytes != userID.Bytes {
-				continue
-			}
-		}
 		total++
 		if d.Deep {
 			deep++
@@ -657,241 +667,9 @@ func computeScope(
 			case maturity.MetricTokenIntensity, maturity.MetricTeamAgentDepth:
 				// computed above
 			default:
-				if _, done := m.MetricValues[k]; !done {
-					m.MetricValues[k] = metricNA(unitFor(k))
-				}
+				m.MetricValues[k] = metricNA(unitFor(k))
 			}
 		}
 	}
 	return m, nil
-}
-
-func unitFor(k maturity.MetricKey) string {
-	switch k {
-	case maturity.MetricTokenIntensity:
-		return "tokens_per_member_day"
-	case maturity.MetricCRThroughputPerCapita:
-		return "cr_per_member"
-	case maturity.MetricProjectCollabScale:
-		return "members_per_cr"
-	default:
-		return "ratio"
-	}
-}
-
-func metricEmpty(unit string) maturity.MetricValue {
-	return maturity.MetricValue{Unit: unit, DataStatus: maturity.StatusEmpty}
-}
-
-func metricNA(unit string) maturity.MetricValue {
-	return maturity.MetricValue{Unit: unit, DataStatus: maturity.StatusNotApplicable}
-}
-
-func metricUnavailable(reason, unit string) maturity.MetricValue {
-	return maturity.MetricValue{Unit: unit, DataStatus: maturity.StatusUnavailable, Reason: &reason}
-}
-
-func attributionOf(attributed, unattributed int64) *maturity.Attribution {
-	a := maturity.Attribution{AttributedCount: attributed, UnattributedCount: unattributed}
-	if attributed+unattributed > 0 {
-		c := float64(attributed) / float64(attributed+unattributed)
-		a.Coverage = &c
-	}
-	return &a
-}
-
-// taskCoverage computes task-level attribution coverage from usage rows:
-// distinct task ids with/without an initiator. Tasks with no usage rows are
-// invisible to this window, which is acceptable for per-scope attribution
-// (org-level coverage uses the dedicated task-level query where available).
-func taskCoverage(rows []db.MaturityTaskTokenRowsRow) (*float64, int64, int64) {
-	withInitiator, without := map[[16]byte]bool{}, map[[16]byte]bool{}
-	for _, r := range rows {
-		if r.InitiatorUserID.Valid {
-			withInitiator[r.TaskID.Bytes] = true
-		} else {
-			without[r.TaskID.Bytes] = true
-		}
-	}
-	a, u := int64(len(withInitiator)), int64(len(without))
-	if a+u == 0 {
-		return nil, a, u
-	}
-	c := float64(a) / float64(a+u)
-	return &c, a, u
-}
-
-func filterTokenRows(rows []db.MaturityTaskTokenRowsRow, projectID, userID *pgtype.UUID) []db.MaturityTaskTokenRowsRow {
-	out := rows[:0]
-	for _, r := range rows {
-		if projectID != nil && (!r.ProjectKey.Valid || r.ProjectKey.Bytes != projectID.Bytes) {
-			continue
-		}
-		if userID != nil && (!r.InitiatorUserID.Valid || r.InitiatorUserID.Bytes != userID.Bytes) {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-func filterArchivedByProject(rows []db.MaturityArchivedCRsRow, projectID pgtype.UUID) []db.MaturityArchivedCRsRow {
-	out := rows[:0]
-	for _, r := range rows {
-		if r.ProjectID.Valid && r.ProjectID.Bytes == projectID.Bytes {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// costFromTokenRows prices a scope's usage rows: authoritative ticks first,
-// generated price map only for uncosted tokens (never double-counting). Any
-// unknown-model uncosted token makes the whole scope cost unavailable.
-func costFromTokenRows(rows []db.MaturityTaskTokenRowsRow) (*float64, string) {
-	prices, priceMapOK := maturity.GeneratedPriceMap()
-	var ticks int64
-	var uncostedUnpriced bool
-	var authoritativeRows, uncostedRows, pricedUncostedRows int64
-	usd := 0.0
-	for _, r := range rows {
-		if r.CostUsdTicks.Valid {
-			authoritativeRows++
-			ticks += r.CostUsdTicks.Int64
-		}
-	}
-	usd += float64(ticks) * 1e-10
-	for _, r := range rows {
-		if r.CostUsdTicks.Valid {
-			continue
-		}
-		uncostedRows++
-		price, known := prices.Models[normalizeModel(r.Provider, r.Model)]
-		if !priceMapOK || !known {
-			if r.InputTokens+r.OutputTokens+r.CacheReadTokens+r.CacheWriteTokens > 0 {
-				uncostedUnpriced = true
-			}
-			continue
-		}
-		pricedUncostedRows++
-		usd += float64(r.InputTokens)*price.InputUSDPer1M/1e6 +
-			float64(r.OutputTokens)*price.OutputUSDPer1M/1e6 +
-			float64(r.CacheReadTokens)*price.CacheReadUSDPer1M/1e6 +
-			float64(r.CacheWriteTokens)*price.CacheWriteUSDPer1M/1e6
-	}
-	status := "authoritative"
-	switch {
-	case uncostedUnpriced:
-		status = "unavailable"
-	case authoritativeRows > 0 && uncostedRows > 0:
-		status = "mixed"
-	case authoritativeRows == 0 && pricedUncostedRows > 0:
-		status = "estimated"
-	}
-	if uncostedUnpriced {
-		return nil, status
-	}
-	return &usd, status
-}
-
-// normalizeModel maps a provider/model pair onto the price-map key: bare
-// lowercased model name first, then provider-prefixed form as a fallback.
-func normalizeModel(provider, model string) string {
-	key := ""
-	for _, r := range model {
-		if r >= 'A' && r <= 'Z' {
-			key += string(r + 32)
-		} else {
-			key += string(r)
-		}
-	}
-	return key
-}
-
-func fillGovernance(ctx context.Context, qtx *db.Queries, m maturity.SnapshotMetricsV1, workspaceID pgtype.UUID, from, to time.Time) error {
-	gate, err := qtx.MaturityGateFirstPass(ctx, db.MaturityGateFirstPassParams{
-		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
-		ReviewNodeIds: maturityReviewNodeUUIDs,
-	})
-	if err != nil {
-		return err
-	}
-	if gate.Completed == 0 {
-		m.Governance[maturity.GovGateFirstPassRate] = metricEmpty("ratio")
-	} else {
-		v := float64(gate.FirstPass) / float64(gate.Completed)
-		m.Governance[maturity.GovGateFirstPassRate] = maturity.MetricValue{
-			Value: &v, Numerator: f64(float64(gate.FirstPass)), Denominator: f64(float64(gate.Completed)),
-			Unit: "ratio", DataStatus: maturity.StatusReady,
-		}
-	}
-
-	drift, err := qtx.MaturityEvidenceDriftCount(ctx, db.MaturityEvidenceDriftCountParams{
-		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
-	})
-	if err != nil {
-		return err
-	}
-	m.Governance[maturity.GovEvidenceDriftCount] = countMetric(drift, "count")
-
-	forbidden, err := qtx.MaturityForbiddenAttemptCount(ctx, db.MaturityForbiddenAttemptCountParams{
-		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
-	})
-	if err != nil {
-		return err
-	}
-	m.Governance[maturity.GovForbiddenAttemptCount] = countMetric(forbidden, "count")
-
-	// traceability_complete_rate stays unavailable until the CR-C trace
-	// channel ships; CR-A never scans git or the daemon (SDD §4.3).
-	m.Governance[maturity.GovTraceabilityCompleteRate] = metricUnavailable(reasonTracePending, "ratio")
-
-	latencies, err := qtx.MaturityApprovalLatencies(ctx, db.MaturityApprovalLatenciesParams{
-		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
-		ReviewNodeIds: maturityReviewNodeUUIDs,
-	})
-	if err != nil {
-		return err
-	}
-	samples := make([]float64, 0, len(latencies))
-	for _, l := range latencies {
-		samples = append(samples, float64(l.LatencyMs))
-	}
-	sort.Float64s(samples)
-	for _, kv := range []struct {
-		key  maturity.GovernanceMetricKey
-		pctl float64
-	}{
-		{maturity.GovApprovalLatencyP50, 0.50},
-		{maturity.GovApprovalLatencyP90, 0.90},
-	} {
-		if len(samples) == 0 {
-			m.Governance[kv.key] = metricEmpty("milliseconds")
-			continue
-		}
-		v := percentileCont(samples, kv.pctl)
-		m.Governance[kv.key] = maturity.MetricValue{Value: &v, Unit: "milliseconds", DataStatus: maturity.StatusReady}
-	}
-	return nil
-}
-
-func countMetric(n int64, unit string) maturity.MetricValue {
-	v := float64(n)
-	return maturity.MetricValue{Value: &v, Numerator: f64(v), Unit: unit, DataStatus: maturity.StatusReady}
-}
-
-// percentileCont mirrors PostgreSQL percentile_cont (linear interpolation)
-// for the sorted in-memory latency samples.
-func percentileCont(sorted []float64, p float64) float64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	pos := p * float64(len(sorted)-1)
-	lo := int(pos)
-	hi := lo + 1
-	if hi >= len(sorted) {
-		return sorted[len(sorted)-1]
-	}
-	frac := pos - float64(lo)
-	return sorted[lo]*(1-frac) + sorted[hi]*frac
 }

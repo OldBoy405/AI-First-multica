@@ -47,6 +47,36 @@ func (q *Queries) GetMaturitySnapshot(ctx context.Context, arg GetMaturitySnapsh
 	return i, err
 }
 
+const latestMaturitySnapshot = `-- name: LatestMaturitySnapshot :one
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2 AND scope_id = $3
+ORDER BY bucket_date DESC
+LIMIT 1
+`
+
+type LatestMaturitySnapshotParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Scope       string      `json:"scope"`
+	ScopeID     string      `json:"scope_id"`
+}
+
+func (q *Queries) LatestMaturitySnapshot(ctx context.Context, arg LatestMaturitySnapshotParams) (MaturitySnapshot, error) {
+	row := q.db.QueryRow(ctx, latestMaturitySnapshot, arg.WorkspaceID, arg.Scope, arg.ScopeID)
+	var i MaturitySnapshot
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.BucketDate,
+		&i.Scope,
+		&i.ScopeID,
+		&i.Metrics,
+		&i.Scores,
+		&i.ConfigRev,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listMaturitySnapshots = `-- name: ListMaturitySnapshots :many
 SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
 FROM maturity_snapshot
@@ -686,6 +716,7 @@ func (q *Queries) MaturityMemberCount(ctx context.Context, workspaceID pgtype.UU
 
 const maturityModelCostRows = `-- name: MaturityModelCostRows :many
 SELECT
+    (tu.created_at AT TIME ZONE 'Asia/Shanghai')::date AS bucket_date,
     LOWER(tu.provider) AS provider,
     tu.model,
     SUM(tu.input_tokens)::bigint       AS input_tokens,
@@ -704,8 +735,8 @@ JOIN agent_task_queue q ON q.id = tu.task_id
 JOIN agent a ON a.id = q.agent_id AND a.workspace_id = $1::uuid
 WHERE tu.created_at >= $2::timestamptz
   AND tu.created_at <  $3::timestamptz
-GROUP BY LOWER(tu.provider), tu.model
-ORDER BY LOWER(tu.provider), tu.model
+GROUP BY (tu.created_at AT TIME ZONE 'Asia/Shanghai')::date, LOWER(tu.provider), tu.model
+ORDER BY bucket_date, LOWER(tu.provider), tu.model
 `
 
 type MaturityModelCostRowsParams struct {
@@ -715,19 +746,20 @@ type MaturityModelCostRowsParams struct {
 }
 
 type MaturityModelCostRowsRow struct {
-	Provider                 string `json:"provider"`
-	Model                    string `json:"model"`
-	InputTokens              int64  `json:"input_tokens"`
-	OutputTokens             int64  `json:"output_tokens"`
-	CacheReadTokens          int64  `json:"cache_read_tokens"`
-	CacheWriteTokens         int64  `json:"cache_write_tokens"`
-	CostUsdTicks             int64  `json:"cost_usd_ticks"`
-	UncostedInputTokens      int64  `json:"uncosted_input_tokens"`
-	UncostedOutputTokens     int64  `json:"uncosted_output_tokens"`
-	UncostedCacheReadTokens  int64  `json:"uncosted_cache_read_tokens"`
-	UncostedCacheWriteTokens int64  `json:"uncosted_cache_write_tokens"`
-	UsageRows                int64  `json:"usage_rows"`
-	AuthoritativeRows        int64  `json:"authoritative_rows"`
+	BucketDate               pgtype.Date `json:"bucket_date"`
+	Provider                 string      `json:"provider"`
+	Model                    string      `json:"model"`
+	InputTokens              int64       `json:"input_tokens"`
+	OutputTokens             int64       `json:"output_tokens"`
+	CacheReadTokens          int64       `json:"cache_read_tokens"`
+	CacheWriteTokens         int64       `json:"cache_write_tokens"`
+	CostUsdTicks             int64       `json:"cost_usd_ticks"`
+	UncostedInputTokens      int64       `json:"uncosted_input_tokens"`
+	UncostedOutputTokens     int64       `json:"uncosted_output_tokens"`
+	UncostedCacheReadTokens  int64       `json:"uncosted_cache_read_tokens"`
+	UncostedCacheWriteTokens int64       `json:"uncosted_cache_write_tokens"`
+	UsageRows                int64       `json:"usage_rows"`
+	AuthoritativeRows        int64       `json:"authoritative_rows"`
 }
 
 // Per-provider/model token totals for the model-detail trend (SDD §3.3).
@@ -743,6 +775,7 @@ func (q *Queries) MaturityModelCostRows(ctx context.Context, arg MaturityModelCo
 	for rows.Next() {
 		var i MaturityModelCostRowsRow
 		if err := rows.Scan(
+			&i.BucketDate,
 			&i.Provider,
 			&i.Model,
 			&i.InputTokens,
@@ -1020,6 +1053,37 @@ func (q *Queries) MaturityReportHistory(ctx context.Context, arg MaturityReportH
 		return nil, err
 	}
 	return items, nil
+}
+
+const maturityReportInboxExistsLocked = `-- name: MaturityReportInboxExistsLocked :one
+SELECT EXISTS (
+    SELECT 1
+    FROM inbox_item
+    WHERE workspace_id = $1::uuid
+      AND recipient_type = 'member'
+      AND recipient_id = $2::uuid
+      AND type = 'maturity_report_ready'
+      AND details->>'report_key' = $3::text
+) AS exists
+FROM (
+    SELECT pg_advisory_xact_lock(hashtextextended(
+        'maturity-report-inbox:' || $3::text, 0
+    ))
+) AS locked
+`
+
+type MaturityReportInboxExistsLockedParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	RecipientID pgtype.UUID `json:"recipient_id"`
+	ReportKey   string      `json:"report_key"`
+}
+
+// Serialize same-week retries without adding a CR-A-only inbox constraint.
+func (q *Queries) MaturityReportInboxExistsLocked(ctx context.Context, arg MaturityReportInboxExistsLockedParams) (bool, error) {
+	row := q.db.QueryRow(ctx, maturityReportInboxExistsLocked, arg.WorkspaceID, arg.RecipientID, arg.ReportKey)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const maturityReportLatest = `-- name: MaturityReportLatest :one

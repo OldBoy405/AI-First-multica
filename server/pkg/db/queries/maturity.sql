@@ -72,6 +72,7 @@ WHERE q.created_at >= sqlc.arg('from_utc')::timestamptz
 -- Uncosted* tokens are the NULL-cost subset only; callers price those from the
 -- generated price map and never re-price authoritative ticks (no double count).
 SELECT
+    (tu.created_at AT TIME ZONE 'Asia/Shanghai')::date AS bucket_date,
     LOWER(tu.provider) AS provider,
     tu.model,
     SUM(tu.input_tokens)::bigint       AS input_tokens,
@@ -90,8 +91,8 @@ JOIN agent_task_queue q ON q.id = tu.task_id
 JOIN agent a ON a.id = q.agent_id AND a.workspace_id = sqlc.arg('workspace_id')::uuid
 WHERE tu.created_at >= sqlc.arg('from_utc')::timestamptz
   AND tu.created_at <  sqlc.arg('to_utc')::timestamptz
-GROUP BY LOWER(tu.provider), tu.model
-ORDER BY LOWER(tu.provider), tu.model;
+GROUP BY (tu.created_at AT TIME ZONE 'Asia/Shanghai')::date, LOWER(tu.provider), tu.model
+ORDER BY bucket_date, LOWER(tu.provider), tu.model;
 -- Section 2: CR/pipeline metrics and governance guardrails (TASK-05)
 
 -- name: MaturityArchivedCRs :many
@@ -387,6 +388,30 @@ WHERE workspace_id = $1 AND scope = $2 AND scope_id = $3
   AND bucket_date >= $4 AND bucket_date <= $5
 ORDER BY bucket_date ASC
 LIMIT $6;
+
+-- name: LatestMaturitySnapshot :one
+SELECT workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev, created_at
+FROM maturity_snapshot
+WHERE workspace_id = $1 AND scope = $2 AND scope_id = $3
+ORDER BY bucket_date DESC
+LIMIT 1;
+
+-- name: MaturityReportInboxExistsLocked :one
+-- Serialize same-week retries without adding a CR-A-only inbox constraint.
+SELECT EXISTS (
+    SELECT 1
+    FROM inbox_item
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND recipient_type = 'member'
+      AND recipient_id = sqlc.arg('recipient_id')::uuid
+      AND type = 'maturity_report_ready'
+      AND details->>'report_key' = sqlc.arg('report_key')::text
+) AS exists
+FROM (
+    SELECT pg_advisory_xact_lock(hashtextextended(
+        'maturity-report-inbox:' || sqlc.arg('report_key')::text, 0
+    ))
+) AS locked;
 
 -- name: MaturityOrgAdminProjectID :one
 SELECT id

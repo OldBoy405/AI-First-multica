@@ -26,6 +26,11 @@ vi.mock("@multica/core/maturity", async () => {
       queryFn: () => Promise.resolve(RANKINGS),
       staleTime: 0,
     }),
+    maturityTokenTrendOptions: (wsId: string) => ({
+      queryKey: ["maturity", wsId, "trend"],
+      queryFn: () => Promise.resolve(TREND),
+      staleTime: 0,
+    }),
     maturityConfigOptions: (wsId: string) => ({
       queryKey: ["maturity", wsId, "config"],
       queryFn: () => Promise.resolve(CONFIG),
@@ -104,6 +109,18 @@ const OVERALL: MaturityOverallResponse = {
   ],
   governance: [
     {
+      key: "gate_first_pass_rate",
+      datum: {
+        value: 0.8,
+        numerator: 4,
+        denominator: 5,
+        unit: "ratio",
+        data_status: "ready",
+        reason: null,
+        attribution: null,
+      },
+    },
+    {
       key: "traceability_complete_rate",
       datum: {
         value: null,
@@ -118,6 +135,21 @@ const OVERALL: MaturityOverallResponse = {
   ],
   data_status: "ready",
 };
+
+const TREND = {
+  dimension: "project",
+  from: "2026-08-18",
+  to: "2026-08-19",
+  series: [{
+    id: "p1",
+    label: "Alpha",
+    points: [
+      { date: "2026-08-18", tokens: 100, cost_usd: null, cost_status: "unavailable", config_rev: "old" },
+      { date: "2026-08-19", tokens: 150, cost_usd: null, cost_status: "unavailable", config_rev: "new" },
+    ],
+  }],
+  data_status: "ready",
+} as const;
 
 const RANKINGS: MaturityProjectRankingsResponse = {
   scope: "project",
@@ -148,9 +180,10 @@ const CONFIG = {
       floor: 0,
       target: 1,
       unit: "tokens_per_member_day",
-      known_gameability: "",
+      known_gameability: "Can be inflated by verbose prompts.",
     },
   ],
+  baseline_suggestions: [],
   price_config_rev: null,
 };
 
@@ -179,6 +212,15 @@ describe("MaturityPage", () => {
     expect(screen.getByTestId("maturity-observing")).toBeTruthy();
     // no radar: the page has no radar test id at all
     expect(screen.queryByTestId("maturity-radar")).toBeNull();
+  });
+
+  it("renders date controls, Owner marker, daily trend and config break", async () => {
+    renderPage();
+    expect(await screen.findByTestId("maturity-owner-mode")).toBeTruthy();
+    expect(screen.getByRole("group", { name: "maturity date range" })).toBeTruthy();
+    expect(await screen.findByTestId("maturity-trend")).toBeTruthy();
+    expect(screen.getByTestId("config-revision-break")).toBeTruthy();
+    expect(screen.getByTestId("maturity-token-quality-pair")).toBeTruthy();
   });
 
   it("renders governance with unavailable copy, not zero", async () => {

@@ -6,6 +6,7 @@ import { useWorkspaceId } from "@multica/core";
 import {
   maturityOverallOptions,
   maturityRankingsOptions,
+  maturityTokenTrendOptions,
   maturityConfigOptions,
 } from "@multica/core/maturity";
 import type { MaturityOverallResponse } from "@multica/core/types";
@@ -44,11 +45,22 @@ function costLabel(status: string): string {
 
 export function MaturityPage() {
   const wsId = useWorkspaceId();
-  const overall = useQuery(maturityOverallOptions(wsId));
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [dimension, setDimension] = useState<"project" | "user" | "model">("project");
+  const [metric, setMetric] = useState<string>("token_intensity");
+  const overall = useQuery(maturityOverallOptions(wsId, to || undefined));
   const cfg = useQuery(maturityConfigOptions(wsId));
-  const [metric, setMetric] = useState<string>("total");
+  const trend = useQuery(
+    maturityTokenTrendOptions(wsId, {
+      dimension,
+      dimension_id: dimension === "user" ? "self" : undefined,
+      from: from || undefined,
+      to: to || undefined,
+    }),
+  );
   const rankings = useQuery(
-    maturityRankingsOptions(wsId, { metric, limit: 20 }),
+    maturityRankingsOptions(wsId, { date: to || undefined, metric, limit: 20 }),
   );
 
   if (overall.isLoading) {
@@ -73,12 +85,23 @@ export function MaturityPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6" data-testid="maturity-page">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">AI Maturity</h1>
+      <header className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">AI Maturity</h1>
+            <p className="text-sm text-muted-foreground" data-testid="maturity-owner-mode">
+              Owner mode · workspace aggregates only · updated daily at 00:30 Asia/Shanghai
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-sm" role="group" aria-label="maturity date range">
+            <label htmlFor="maturity-from">From</label>
+            <input id="maturity-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-md border bg-background px-2 py-1" />
+            <label htmlFor="maturity-to">To</label>
+            <input id="maturity-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-md border bg-background px-2 py-1" />
+          </div>
+        </div>
         <p className="text-sm text-muted-foreground">
-          Bucket {data?.bucket_date ?? "—"} · config{" "}
-          {data?.config_rev?.slice(0, 8) ?? "—"} · updated daily at 00:30
-          Asia/Shanghai (previous local day)
+          Bucket {data?.bucket_date ?? "—"} · config {data?.config_rev?.slice(0, 8) ?? "—"} · previous local day
         </p>
         {observation?.active && (
           <p
@@ -140,6 +163,17 @@ export function MaturityPage() {
             ))}
           </section>
 
+          <section className="grid gap-3 md:grid-cols-2" data-testid="maturity-token-quality-pair">
+            <StatCard
+              label="Token intensity"
+              value={String(data.dimensions.flatMap((d) => d.metrics).find((m) => m.key === "token_intensity")?.raw.value ?? "—")}
+            />
+            <StatCard
+              label="Gate first-pass rate"
+              value={String(data.governance.find((g) => g.key === "gate_first_pass_rate")?.datum.value ?? "—")}
+            />
+          </section>
+
           <section data-testid="maturity-governance" className="space-y-3">
             <h2 className="text-lg font-medium">Governance</h2>
             <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
@@ -156,6 +190,45 @@ export function MaturityPage() {
                 </div>
               ))}
             </div>
+          </section>
+
+          <section data-testid="maturity-trend" className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-medium">Daily token trend</h2>
+              <select aria-label="trend dimension" value={dimension} onChange={(e) => setDimension(e.target.value as "project" | "user" | "model")} className="rounded-md border bg-background px-2 py-1 text-sm">
+                <option value="project">project</option>
+                <option value="user">self</option>
+                <option value="model">model</option>
+              </select>
+            </div>
+            {trend.isLoading ? (
+              <Skeleton className="h-24 w-full" />
+            ) : trend.isError ? (
+              <div className="rounded-md border p-4 text-muted-foreground">Failed to load trend.</div>
+            ) : trend.data?.series.length ? (
+              <div className="space-y-3">
+                {trend.data.series.map((series) => (
+                  <div key={series.id} className="rounded-md border p-3">
+                    <div className="font-medium">{series.label}</div>
+                    <div className="mt-2 grid gap-1 text-sm">
+                      {series.points.map((point, index) => (
+                        <div key={`${point.date}-${index}`} className="flex justify-between gap-3">
+                          <span>
+                            {point.date}
+                            {point.config_rev && index > 0 && point.config_rev !== series.points[index - 1]?.config_rev ? (
+                              <span className="ml-2 rounded bg-muted px-1 text-xs" data-testid="config-revision-break">config revision</span>
+                            ) : null}
+                          </span>
+                          <span>{point.tokens.toLocaleString()} tokens</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border p-4 text-muted-foreground">No trend data for this range.</div>
+            )}
           </section>
 
           <section data-testid="maturity-rankings" className="space-y-3">
@@ -175,7 +248,11 @@ export function MaturityPage() {
                 ))}
               </select>
             </div>
-            {rankings.data?.items.length ? (
+            {rankings.isLoading ? (
+              <Skeleton className="h-24 w-full" />
+            ) : rankings.isError ? (
+              <div className="rounded-md border p-4 text-muted-foreground">Failed to load rankings.</div>
+            ) : rankings.data?.items.length ? (
               <table className="w-full text-sm">
                 <tbody>
                   {rankings.data.items.map((item) => (

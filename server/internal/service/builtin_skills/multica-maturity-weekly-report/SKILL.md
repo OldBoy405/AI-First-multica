@@ -19,10 +19,11 @@ workspace:
 - `GET /api/maturity/overall` — latest bucket: headline, dimensions,
   governance.
 - `GET /api/maturity/config` — the active metric config (weights/floors/
-  targets).
-- In week 4 only: the baseline suggestions prepared from the first 28
-  org snapshots (P10/P75 per metric). Metrics without 21+ ready samples stay
-  "unavailable" — say so, never invent a number.
+  targets) and `baseline_suggestions`. The server exposes suggestions only
+  after the first 28 consecutive org buckets and at least 21 ready samples
+  for that metric.
+- In week 4, include every returned P10/P75 baseline suggestion. Metrics with
+  no returned suggestion stay "unavailable" — say so, never invent a number.
 
 ## Output
 
@@ -39,8 +40,32 @@ rename):
 5. **Cost** — headline cost and its status (authoritative/mixed/estimated/
    unavailable). Never double-price provider-reported ticks.
 
-Every section must cite the metric keys it uses. End with the anti-Goodhart
-note: tokens are behavioural data, not individual performance metrics.
+Use the exact H2 headings `## Individual efficiency`, `## Team delivery`,
+`## Knowledge compounding`, `## Risk & yield`, and `## Cost`. Every section
+must cite the metric keys it uses. End with the anti-Goodhart note: tokens are
+behavioural data, not individual performance metrics.
 
-The report body must also be returned as the task result envelope with
-schema `ai-first.maturity-report/v1` (report_key = workspaceId:YYYY-Www).
+Write with an atomic temp-file + rename in the project local directory; never
+run `git add` or `git commit` for the report.
+
+Return **only JSON** as the final task output. The server validates it and
+stores this direct envelope in `agent_task_queue.result` before notifying the
+Owner inbox:
+
+```json
+{
+  "schema": "ai-first.maturity-report/v1",
+  "report_key": "<workspace-id>:<YYYY-Www>",
+  "week": "<YYYY-Www>",
+  "generated_at": "<RFC3339>",
+  "relative_path": "docs/org-admin/maturity-review-<YYYY-Www>.md",
+  "markdown": "<exact bytes written to the file>",
+  "content_sha256": "<lowercase SHA-256 of markdown UTF-8 bytes>",
+  "source_task_id": "<Task ID from the Autopilot prompt>",
+  "chat_session_id": "<Chat session ID from the Autopilot prompt>",
+  "config_revs": ["<every config revision cited>"]
+}
+```
+
+Do not wrap the envelope in prose or Markdown fences. The server rejects a
+wrong task/chat binding, path, missing five-section heading, or SHA mismatch.

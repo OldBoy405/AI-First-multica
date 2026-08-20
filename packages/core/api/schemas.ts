@@ -3100,6 +3100,7 @@ const MaturityMetricValueSchema = z.object({
 }).loose();
 
 const MaturityReportSchema = z.object({
+  schema: z.literal("ai-first.maturity-report/v1"),
   report_key: z.string().default(""),
   week: z.string().default(""),
   generated_at: z.string().default(""),
@@ -3159,6 +3160,7 @@ const MaturityTrendPointSchema = z.object({
   tokens: z.number().default(0),
   cost_usd: z.number().nullable().default(null),
   cost_status: z.string().default("unavailable"),
+  config_rev: z.string().optional(),
 }).loose();
 
 export const MaturityTokenTrendResponseSchema = z.object({
@@ -3226,6 +3228,16 @@ export const MaturityConfigResponseSchema = z.object({
       }).loose(),
     )
     .default([]),
+  baseline_suggestions: z
+    .array(
+      z.object({
+        metric_key: z.string(),
+        sample_count: z.number(),
+        floor_p10: z.number(),
+        target_p75: z.number(),
+      }).loose(),
+    )
+    .default([]),
   price_config_rev: z.string().nullable().default(null),
 }).loose();
 
@@ -3280,5 +3292,6 @@ export const EMPTY_MATURITY_CONFIG: MaturityConfigResponse = {
   calibration_status: "observing",
   dimensions: [],
   metrics: [],
+  baseline_suggestions: [],
   price_config_rev: null,
 };

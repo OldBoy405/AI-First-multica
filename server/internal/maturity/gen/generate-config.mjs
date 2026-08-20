@@ -4,7 +4,8 @@
 // Reads the knowledge-base authority files maturity-config.yaml and optional
 // model-prices.yaml and emits a committed read-only Go copy used at runtime:
 // server/internal/maturity/config_gen.go. The generated file records the
-// source repo HEAD SHA so every snapshot row can cite its config_rev.
+// last commit that changed maturity-config.yaml so unrelated KB commits never
+// drift config_rev.
 //
 // The parser is line-based and zero-dependency: any line that is not a
 // comment/blank or an exact expected pattern is a hard error (SDD §2.4
@@ -154,7 +155,7 @@ function emitGo(config, prices, sourceSha) {
     '// Consistency is guarded by the gen script --check mode: regenerate != this file -> non-zero exit.',
     'package maturity',
     '',
-    '// GeneratedConfigRev returns the source repo HEAD SHA recorded at generation time.',
+    '// GeneratedConfigRev returns the commit that last changed maturity-config.yaml.',
     `func GeneratedConfigRev() string { return ${JSON.stringify(sourceSha)} }`,
     '',
     '// GeneratedConfig returns the committed copy of maturity-config.yaml.',
@@ -201,9 +202,12 @@ function main() {
   });
   if (dirty.status !== 0) fail(`git status failed in ${sourceDir}: ${dirty.stderr}`);
   if (dirty.stdout.trim() !== '') fail(`source files are dirty/untracked relative to HEAD in ${sourceDir}; commit first`);
-  const shaR = spawnSync('git', ['-C', sourceDir, 'rev-parse', 'HEAD'], { encoding: 'utf8', shell: false });
-  const sourceSha = shaR.status === 0 ? shaR.stdout.trim() : fail('git rev-parse HEAD failed in source dir');
-  if (!/^[0-9a-f]{40}$/.test(sourceSha)) fail(`source HEAD SHA is not 40-hex: ${sourceSha}`);
+  const shaR = spawnSync('git', ['-C', sourceDir, 'log', '-1', '--format=%H', '--', 'maturity-config.yaml'], {
+    encoding: 'utf8',
+    shell: false,
+  });
+  const sourceSha = shaR.status === 0 ? shaR.stdout.trim() : fail('git log failed for maturity-config.yaml');
+  if (!/^[0-9a-f]{40}$/.test(sourceSha)) fail(`source commit SHA is not 40-hex: ${sourceSha}`);
 
   const config = parseConfig(fs.readFileSync(path.join(sourceDir, 'maturity-config.yaml'), 'utf8').replaceAll('\r\n', '\n'));
   let prices = null;

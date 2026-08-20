@@ -5,7 +5,7 @@
 // Consistency is guarded by the gen script --check mode: regenerate != this file -> non-zero exit.
 package maturity
 
-// GeneratedConfigRev returns the source repo HEAD SHA recorded at generation time.
+// GeneratedConfigRev returns the commit that last changed maturity-config.yaml.
 func GeneratedConfigRev() string { return "bcd42b41f1dd5261f21439b066417fe9e99f0cb6" }
 
 // GeneratedConfig returns the committed copy of maturity-config.yaml.
