@@ -125,6 +125,13 @@ func (c *Client) signAppJWT(now time.Time) (string, error) {
 	return signed, nil
 }
 
+// InstallationToken returns the cached installation access token (minting on
+// demand). CR-2026-049 TASK-09: the drift binding resolver uses this to bind a
+// token per resolved repo; the token stays in-memory and is never logged.
+func (c *Client) InstallationToken(ctx context.Context, installationID int64) (string, error) {
+	return c.installationToken(ctx, installationID)
+}
+
 // installationToken returns a cached installation access token, minting a new
 // one via POST /app/installations/{id}/access_tokens when the cache is empty or
 // within the renew skew of expiry. Concurrent callers for the same installation
