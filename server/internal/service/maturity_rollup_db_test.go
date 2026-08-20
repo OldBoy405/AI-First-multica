@@ -229,8 +229,8 @@ func seedMaturityFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	exec(`INSERT INTO cr (id, workspace_id, cr_id, title, status, owners, shell_issue_id)
 	      VALUES ($1, $2, $3, 'fixture cr', 'archived', $4, $5)`,
 		crRowID, wsID, crID, json.RawMessage(`{"requirement":{"id":"Ray","assigned-at":"2026-08-20T00:00:00+08:00"}}`), issueID)
-	exec(`INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, occurred_at)
-	      VALUES ($1, $2, 'status', $3, $4)`,
-		crID, "seed-"+crID, json.RawMessage(`{"to_status":"archived"}`), dayFrom)
+	exec(`INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, occurred_at)
+	      VALUES ($1::uuid, $2, $3, 'status', $4, $5)`,
+		wsID, crID, "seed-"+crID, json.RawMessage(`{"to_status":"archived"}`), dayFrom)
 	return pgtype.UUID{Bytes: wsID, Valid: true}
 }

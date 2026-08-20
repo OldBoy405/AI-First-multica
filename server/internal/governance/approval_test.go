@@ -154,9 +154,9 @@ func seedEvidenceEvent(t *testing.T, crID string, evidence map[string]string) {
 		t.Fatal(err)
 	}
 	_, err := testPool.Exec(context.Background(), `
-		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
-		VALUES ($1, $2, 'status', '{}', $3, now())
-		ON CONFLICT DO NOTHING`, crID, "ev-"+crID, evidence)
+		INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
+		VALUES ($1::uuid, $2, $3, 'status', '{}', $4, now())
+		ON CONFLICT DO NOTHING`, testWorkspaceID, crID, "ev-"+crID, evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,8 +399,8 @@ func TestApprovalCardDoesNotLeakEvidenceAcrossWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := testPool.Exec(context.Background(), `
-		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
-		VALUES ($1, $2, 'status', '{}', $3, now())`, crID, "ev-other-"+crID, secretEvidence); err != nil {
+		INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, evidence, occurred_at)
+		VALUES ($1::uuid, $2, $3, 'status', '{}', $4, now())`, otherWorkspaceID, crID, "ev-other-"+crID, secretEvidence); err != nil {
 		t.Fatal(err)
 	}
 

@@ -570,6 +570,7 @@ type CrSyncEvent struct {
 	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
 	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
 	ProcessedAt pgtype.Timestamptz `json:"processed_at"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
 }
 
 type DaemonConnection struct {
@@ -602,6 +603,21 @@ type DingtalkGroupRoute struct {
 	Revision          int64              `json:"revision"`
 	DiscoveredAt      pgtype.Timestamptz `json:"discovered_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DriftFinding struct {
+	ID           pgtype.UUID        `json:"id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	RepositoryID string             `json:"repository_id"`
+	SpecID       pgtype.Text        `json:"spec_id"`
+	CrID         pgtype.Text        `json:"cr_id"`
+	Kind         string             `json:"kind"`
+	Severity     string             `json:"severity"`
+	Summary      string             `json:"summary"`
+	Evidence     []byte             `json:"evidence"`
+	Status       string             `json:"status"`
+	FoundAt      pgtype.Timestamptz `json:"found_at"`
+	ResolvedAt   pgtype.Timestamptz `json:"resolved_at"`
 }
 
 type Feedback struct {

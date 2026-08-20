@@ -194,7 +194,7 @@ WHERE q.created_at >= $2::timestamptz
 UNION
 SELECT DISTINCT issue.project_id
 FROM cr
-JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
     AND e.event_kind = 'status'
     AND e.occurred_at >= $2::timestamptz
     AND e.occurred_at <  $3::timestamptz
@@ -296,7 +296,7 @@ SELECT DISTINCT ON (cr.cr_id)
     e.occurred_at AS archived_at,
     issue.project_id
 FROM cr
-JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
     AND e.event_kind = 'status'
     AND e.payload->>'to_status' = 'archived'
     AND e.occurred_at >= $1::timestamptz
@@ -471,7 +471,7 @@ WITH archived AS (
     SELECT DISTINCT ON (cr.cr_id)
         cr.cr_id, cr.workspace_id, cr.shell_issue_id, cr.owners
     FROM cr
-    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
         AND e.event_kind = 'status'
         AND e.payload->>'to_status' = 'archived'
         AND e.occurred_at >= $1::timestamptz
@@ -530,7 +530,7 @@ const maturityCRUsers = `-- name: MaturityCRUsers :many
 SELECT u.cr_id, u.user_id FROM (
     SELECT cr.cr_id AS cr_id, c.author_id AS user_id
     FROM cr
-    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
         AND e.event_kind = 'status'
         AND e.payload->>'to_status' = 'archived'
         AND e.occurred_at >= $1::timestamptz
@@ -541,7 +541,7 @@ SELECT u.cr_id, u.user_id FROM (
     UNION
     SELECT cr.cr_id AS cr_id, q.initiator_user_id AS user_id
     FROM cr
-    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
         AND e.event_kind = 'status'
         AND e.payload->>'to_status' = 'archived'
         AND e.occurred_at >= $1::timestamptz
@@ -889,7 +889,7 @@ WITH archived AS (
     SELECT DISTINCT ON (cr.cr_id)
         cr.cr_id, cr.workspace_id
     FROM cr
-    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
         AND e.event_kind = 'status'
         AND e.payload->>'to_status' = 'archived'
         AND e.occurred_at >= $1::timestamptz
@@ -942,7 +942,7 @@ WITH archived AS (
     SELECT DISTINCT ON (cr.cr_id)
         cr.cr_id, cr.workspace_id
     FROM cr
-    JOIN cr_sync_event e ON e.cr_id = cr.cr_id
+    JOIN cr_sync_event e ON e.cr_id = cr.cr_id AND e.workspace_id = cr.workspace_id
         AND e.event_kind = 'status'
         AND e.payload->>'to_status' = 'archived'
         AND e.occurred_at >= $2::timestamptz

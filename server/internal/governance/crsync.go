@@ -111,8 +111,11 @@ func NewSyncService(pool *pgxpool.Pool, bus *events.Bus) *SyncService {
 	return &SyncService{pool: pool, bus: bus}
 }
 
-func (s *SyncService) lockCR(crID string) func() {
-	v, _ := s.crMu.LoadOrStore(crID, &sync.Mutex{})
+func (s *SyncService) lockCR(workspaceID, crID string) func() {
+	// CR-2026-049 TASK-05: mutex key includes the workspace so same-named CRs
+	// in two tenants never serialize against each other or interleave applies.
+	key := workspaceID + "\x00" + crID
+	v, _ := s.crMu.LoadOrStore(key, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
@@ -191,25 +194,25 @@ func (s *SyncService) ingest(ctx context.Context, workspaceID string, ev OutboxE
 		evidence = map[string]string{}
 	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO cr_sync_event (cr_id, commit_sha, event_kind, payload, evidence, actor, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (cr_id, commit_sha, event_kind) DO NOTHING`,
-		ev.CRID, ev.CommitSHA, ev.EventKind, payload, evidence, ev.Actor, ev.OccurredAt)
+		INSERT INTO cr_sync_event (workspace_id, cr_id, commit_sha, event_kind, payload, evidence, actor, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (workspace_id, cr_id, commit_sha, event_kind) DO NOTHING`,
+		workspaceID, ev.CRID, ev.CommitSHA, ev.EventKind, payload, evidence, ev.Actor, ev.OccurredAt)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil // already ingested via the other channel
 	}
-	unlock := s.lockCR(ev.CRID)
+	unlock := s.lockCR(workspaceID, ev.CRID)
 	defer unlock()
 	if err := s.apply(ctx, workspaceID, ev); err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `
 		UPDATE cr_sync_event SET processed_at = now()
-		WHERE cr_id = $1 AND commit_sha = $2 AND event_kind = $3`,
-		ev.CRID, ev.CommitSHA, ev.EventKind)
+		WHERE workspace_id = $1 AND cr_id = $2 AND commit_sha = $3 AND event_kind = $4`,
+		workspaceID, ev.CRID, ev.CommitSHA, ev.EventKind)
 	return err
 }
 

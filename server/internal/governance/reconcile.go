@@ -208,7 +208,7 @@ func (s *SyncService) ApplySnapshot(ctx context.Context, workspaceID string, sna
 				return healed, err
 			}
 		case cur.status != authStatus || cur.needsReconcile:
-			unlock := s.lockCR(crID)
+			unlock := s.lockCR(workspaceID, crID)
 			if _, err := s.pool.Exec(ctx, `
 				UPDATE cr SET status = $3, needs_reconcile = FALSE,
 				              projected_commit = CASE WHEN $4 <> '' THEN $4 ELSE projected_commit END,

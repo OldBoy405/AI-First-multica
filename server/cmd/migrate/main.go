@@ -222,6 +222,11 @@ var concurrentIndexCleanups = map[string]string{
 	"386_drift_finding_id_uidx":  "drift_finding_id_uidx",
 	"388_drift_finding_dedup_idx": "drift_finding_dedup_idx",
 	"389_drift_finding_keyset":   "drift_finding_keyset_idx",
+	// AIFIRST: CR-2026-049 TASK-05 (cr_sync_event workspace scoping + approval idempotency).
+	"391_cr_sync_event_workspace_uniq":    "cr_sync_event_workspace_dedup_idx",
+	"392_cr_sync_event_trace_spec_idx":    "cr_sync_event_trace_spec_idx",
+	"393_cr_sync_event_ws_unprocessed_idx": "cr_sync_event_ws_unprocessed_idx",
+	"396_approval_workspace_approve_uniq":  "approval_record_approve_ws_uniq",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
@@ -240,6 +245,9 @@ var concurrentDownIndexCleanups = map[string]string{
 	"302_drop_redundant_channel_chat_session_binding_index": "idx_channel_chat_session_binding_session",
 	"303_drop_redundant_lark_chat_session_binding_index":    "idx_lark_chat_session_binding_session",
 	"312_drop_global_plugin_identity_key_index":             "idx_plugin_identity_key",
+	// AIFIRST: CR-2026-049 TASK-05 (down migrations rebuild pre-workspace indexes).
+	"395_drop_cr_sync_event_unprocessed_idx":    "idx_cr_sync_event_unprocessed",
+	"397_drop_approval_record_approve_uniq":     "approval_record_approve_uniq",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {

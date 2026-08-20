@@ -693,7 +693,7 @@ func (r *Runner) checkpointProjected(ctx context.Context, runID pgtype.UUID, pus
 	err := r.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 		  SELECT 1 FROM pipeline_node_run n JOIN pipeline_run r ON r.id=n.run_id
-		  JOIN cr_sync_event e ON e.cr_id=r.cr_id AND e.event_kind='checkpoint' AND e.commit_sha<>'' AND e.occurred_at>=n.started_at
+		  JOIN cr_sync_event e ON e.cr_id=r.cr_id AND e.workspace_id=r.workspace_id AND e.event_kind='checkpoint' AND e.commit_sha<>'' AND e.occurred_at>=n.started_at
 		  WHERE n.run_id=$1 AND n.node_id=$2 AND n.attempt=1
 		)`, runID, pushNodeID).Scan(&ok)
 	return ok, err

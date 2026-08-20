@@ -196,7 +196,7 @@ func TestRunnerArchitectureHappyPathWaitsForAuthority(t *testing.T) {
 	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil || runStatus != "running" {
 		t.Fatalf("task success without checkpoint must not complete: %q err=%v", runStatus, err)
 	}
-	if _, err := testPool.Exec(ctx, `INSERT INTO cr_sync_event(cr_id,commit_sha,event_kind,payload,occurred_at) VALUES($1,'checkpoint-sha','checkpoint','{}',now()+interval '1 second')`, crID); err != nil {
+	if _, err := testPool.Exec(ctx, `INSERT INTO cr_sync_event(workspace_id,cr_id,commit_sha,event_kind,payload,occurred_at) VALUES($1::uuid,$2,'checkpoint-sha','checkpoint','{}',now()+interval '1 second')`, testWorkspaceID, crID); err != nil {
 		t.Fatal(err)
 	}
 	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
@@ -269,7 +269,7 @@ func TestRunnerCheckpointFailureRetriesOnlyCheckpoint(t *testing.T) {
 	if err := testPool.QueryRow(ctx, `SELECT status FROM pipeline_run WHERE id=$1::uuid`, runID).Scan(&runStatus); err != nil || runStatus != "running" {
 		t.Fatalf("retry task success bypassed checkpoint authority: status=%s err=%v", runStatus, err)
 	}
-	if _, err := testPool.Exec(ctx, `INSERT INTO cr_sync_event(cr_id,commit_sha,event_kind,payload,occurred_at) VALUES($1,'checkpoint-retry-sha','checkpoint','{}',now()+interval '1 second')`, crID); err != nil {
+	if _, err := testPool.Exec(ctx, `INSERT INTO cr_sync_event(workspace_id,cr_id,commit_sha,event_kind,payload,occurred_at) VALUES($1::uuid,$2,'checkpoint-retry-sha','checkpoint','{}',now()+interval '1 second')`, testWorkspaceID, crID); err != nil {
 		t.Fatal(err)
 	}
 	if err := runner.Reconcile(ctx, runnerID(testWorkspaceID), crID); err != nil {
