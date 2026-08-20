@@ -107,8 +107,13 @@ func TestResolveBindingsMissingWorkspaceRepo(t *testing.T) {
 func TestResolveBindingsProviderUnsupported(t *testing.T) {
 	access := &fakeAccess{accessByRepo: map[string][]int64{}, tokens: map[int64]string{}}
 	r := NewResolver(access)
-	_, err := r.ResolveBindings(context.Background(), "ws-1", decls(), []RepoData{
-		{URL: "https://gitlab.com/OldBoy405/AI-First-tools.git"},
+	d := decls()
+	// Non-GitHub canonical URL in the declaration itself → provider rejection.
+	m := d["multica"]
+	m.CanonicalURL = "https://gitlab.com/OldBoy405/AI-First-multica.git"
+	d["multica"] = m
+	_, err := r.ResolveBindings(context.Background(), "ws-1", d, []RepoData{
+		{URL: "https://github.com/OldBoy405/AI-First-tools.git"},
 		{URL: "https://github.com/OldBoy405/AI-First-multica.git"},
 	}, []GitHubInstallation{{InstallationID: 7}})
 	if !strings.Contains(err.Error(), ErrProviderUnsupported.Error()) {
