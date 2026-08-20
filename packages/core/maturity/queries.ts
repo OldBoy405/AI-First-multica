@@ -33,10 +33,10 @@ export const maturityOverallOptions = (wsId: string, date?: string) =>
 
 export const maturityTokenTrendOptions = (
   wsId: string,
-  params: { dimension: "project" | "user" | "model"; dimension_id?: string; from?: string; to?: string },
+  params: { dimension: "project" | "user" | "model"; dimensionId?: string; from?: string; to?: string },
 ) =>
   queryOptions({
-    queryKey: maturityKeys.tokenTrend(wsId, params.dimension, params.dimension_id ?? "", params.from, params.to),
+    queryKey: maturityKeys.tokenTrend(wsId, params.dimension, params.dimensionId ?? "", params.from, params.to),
     queryFn: () => api.getMaturityTokenTrend(wsId, params),
     staleTime: STALE_TIME,
     refetchInterval: REFETCH_INTERVAL,

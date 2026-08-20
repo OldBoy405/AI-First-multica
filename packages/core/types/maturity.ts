@@ -1,6 +1,6 @@
-// AIFIRST: AI maturity dashboard wire types (CR-2026-047 TASK-08).
-// Mirrors server/internal/maturity/api.go. Enum-typed fields stay lenient
-// strings at the zod layer; these TS types are the strict view.
+// AIFIRST: AI maturity dashboard domain types (CR-2026-047 TASK-08).
+// API schemas translate the server's snake_case JSON at the boundary; views
+// and query code use these camelCase names exclusively.
 
 export type MaturityDataStatus =
   | "ready"
@@ -13,53 +13,53 @@ export interface MaturityMetricValue {
   numerator: number | null;
   denominator: number | null;
   unit: string;
-  data_status: MaturityDataStatus;
+  dataStatus: MaturityDataStatus;
   reason: string | null;
   attribution: {
-    attributed_count: number;
-    unattributed_count: number;
+    attributedCount: number;
+    unattributedCount: number;
     coverage: number | null;
   } | null;
 }
 
 export interface MaturityReport {
   schema: "ai-first.maturity-report/v1";
-  report_key: string;
+  reportKey: string;
   week: string;
-  generated_at: string;
-  relative_path: string;
+  generatedAt: string;
+  relativePath: string;
   markdown: string;
-  content_sha256: string;
-  source_task_id: string;
-  chat_session_id: string;
-  config_revs: string[];
+  contentSha256: string;
+  sourceTaskId: string;
+  chatSessionId: string;
+  configRevs: string[];
 }
 
 export interface MaturityObservation {
   active: boolean;
-  calibration_status: string;
-  observation_weeks: number;
-  first_bucket_date: string;
-  elapsed_days: number;
+  calibrationStatus: string;
+  observationWeeks: number;
+  firstBucketDate: string;
+  elapsedDays: number;
 }
 
 export interface MaturityHeadline {
-  active_members: number;
-  total_tokens: number;
-  cost_usd: number | null;
-  cost_status: string;
+  activeMembers: number;
+  totalTokens: number;
+  costUsd: number | null;
+  costStatus: string;
 }
 
 export interface MaturityOverallResponse {
-  bucket_date: string | null;
-  config_rev: string | null;
+  bucketDate: string | null;
+  configRev: string | null;
   observation: MaturityObservation | null;
   headline: MaturityHeadline | null;
-  total_score: number | null;
+  totalScore: number | null;
   dimensions: Array<{
     key: string;
     score: number | null;
-    data_status: MaturityDataStatus;
+    dataStatus: MaturityDataStatus;
     metrics: Array<{
       key: string;
       raw: MaturityMetricValue;
@@ -67,7 +67,7 @@ export interface MaturityOverallResponse {
     }>;
   }>;
   governance: Array<{ key: string; datum: MaturityMetricValue }>;
-  data_status: "ready" | "empty";
+  dataStatus: "ready" | "empty";
 }
 
 export interface MaturityTokenTrendResponse {
@@ -80,44 +80,44 @@ export interface MaturityTokenTrendResponse {
     points: Array<{
       date: string;
       tokens: number;
-      cost_usd: number | null;
-      cost_status: string;
-      config_rev?: string;
+      costUsd: number | null;
+      costStatus: string;
+      configRev?: string;
     }>;
   }>;
-  data_status: "ready" | "empty";
+  dataStatus: "ready" | "empty";
 }
 
 export interface MaturityProjectRankingsResponse {
   scope: "project";
-  bucket_date: string | null;
+  bucketDate: string | null;
   metric: string;
   items: Array<{
     rank: number;
-    project_id: string;
-    project_name: string;
+    projectId: string;
+    projectName: string;
     value: number | null;
-    data_status: MaturityDataStatus;
+    dataStatus: MaturityDataStatus;
   }>;
-  next_cursor: string | null;
-  data_status: "ready" | "empty";
+  nextCursor: string | null;
+  dataStatus: "ready" | "empty";
 }
 
 export interface MaturitySuggestionResponse {
   latest: MaturityReport | null;
-  data_status: "ready" | "empty";
+  dataStatus: "ready" | "empty";
 }
 
 export interface MaturitySuggestionHistoryResponse {
   items: MaturityReport[];
-  next_cursor: string | null;
-  data_status: "ready" | "empty";
+  nextCursor: string | null;
+  dataStatus: "ready" | "empty";
 }
 
 export interface MaturityConfigResponse {
-  config_rev: string;
-  observation_weeks: number;
-  calibration_status: string;
+  configRev: string;
+  observationWeeks: number;
+  calibrationStatus: string;
   dimensions: Array<{ key: string; metrics: string[] }>;
   metrics: Array<{
     key: string;
@@ -125,13 +125,13 @@ export interface MaturityConfigResponse {
     floor: number;
     target: number;
     unit: string;
-    known_gameability: string;
+    knownGameability: string;
   }>;
-  baseline_suggestions: Array<{
-    metric_key: string;
-    sample_count: number;
-    floor_p10: number;
-    target_p75: number;
+  baselineSuggestions: Array<{
+    metricKey: string;
+    sampleCount: number;
+    floorP10: number;
+    targetP75: number;
   }>;
-  price_config_rev: string | null;
+  priceConfigRev: string | null;
 }

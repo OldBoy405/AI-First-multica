@@ -2,7 +2,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { api } from "@multica/core/api";
 import { MaturityPage } from "./maturity-page";
 import { MaturitySuggestionsPanel } from "./maturity-suggestions";
 import type {
@@ -12,6 +13,31 @@ import type {
 } from "@multica/core/types";
 
 vi.mock("@multica/core", () => ({ useWorkspaceId: () => "ws-1" }));
+vi.mock("@multica/core/auth", () => ({
+  useAuthStore: (selector: (state: { user: { id: string } }) => unknown) =>
+    selector({ user: { id: "user-1" } }),
+}));
+vi.mock("@multica/core/api", () => ({
+  api: { ensureOrgAdminWorkspace: vi.fn().mockResolvedValue({ projectId: "p1" }) },
+}));
+vi.mock("@multica/core/workspace/queries", () => ({
+  memberListOptions: () => ({
+    queryKey: ["members"],
+    queryFn: () => Promise.resolve([{ user_id: "user-1", role: "owner" }]),
+  }),
+}));
+vi.mock("@multica/core/runtimes", () => ({
+  runtimeDisplayLabel: (runtime: { name: string }) => runtime.name,
+  runtimeListOptions: () => ({
+    queryKey: ["runtimes"],
+    queryFn: () => Promise.resolve([{ id: "runtime-1", name: "Local", status: "online" }]),
+  }),
+}));
+vi.mock("../../navigation", () => ({
+  AppLink: ({ href, children, ...props }: React.ComponentProps<"a">) => (
+    <a href={href} {...props}>{children}</a>
+  ),
+}));
 vi.mock("@multica/core/maturity", async () => {
   const actual = await vi.importActual("@multica/core/maturity");
   return {
@@ -56,27 +82,27 @@ vi.mock("@multica/ui/components/ui/skeleton", () => ({
 }));
 
 const OVERALL: MaturityOverallResponse = {
-  bucket_date: "2026-08-19",
-  config_rev: "abcdef0123456789",
+  bucketDate: "2026-08-19",
+  configRev: "abcdef0123456789",
   observation: {
     active: true,
-    calibration_status: "observing",
-    observation_weeks: 4,
-    first_bucket_date: "2026-08-19",
-    elapsed_days: 0,
+    calibrationStatus: "observing",
+    observationWeeks: 4,
+    firstBucketDate: "2026-08-19",
+    elapsedDays: 0,
   },
   headline: {
-    active_members: 3,
-    total_tokens: 150,
-    cost_usd: null,
-    cost_status: "unavailable",
+    activeMembers: 3,
+    totalTokens: 150,
+    costUsd: null,
+    costStatus: "unavailable",
   },
-  total_score: null,
+  totalScore: null,
   dimensions: [
     {
       key: "AIF",
       score: null,
-      data_status: "empty",
+      dataStatus: "empty",
       metrics: [
         {
           key: "token_intensity",
@@ -85,7 +111,7 @@ const OVERALL: MaturityOverallResponse = {
             numerator: 150,
             denominator: 3,
             unit: "tokens_per_member_day",
-            data_status: "ready",
+            dataStatus: "ready",
             reason: null,
             attribution: null,
           },
@@ -98,7 +124,7 @@ const OVERALL: MaturityOverallResponse = {
             numerator: 1,
             denominator: 3,
             unit: "ratio",
-            data_status: "ready",
+            dataStatus: "ready",
             reason: null,
             attribution: null,
           },
@@ -115,7 +141,7 @@ const OVERALL: MaturityOverallResponse = {
         numerator: 4,
         denominator: 5,
         unit: "ratio",
-        data_status: "ready",
+        dataStatus: "ready",
         reason: null,
         attribution: null,
       },
@@ -127,13 +153,13 @@ const OVERALL: MaturityOverallResponse = {
         numerator: null,
         denominator: null,
         unit: "ratio",
-        data_status: "unavailable",
+        dataStatus: "unavailable",
         reason: "trace_channel_pending_cr_c",
         attribution: null,
       },
     },
   ],
-  data_status: "ready",
+  dataStatus: "ready",
 };
 
 const TREND = {
@@ -144,34 +170,34 @@ const TREND = {
     id: "p1",
     label: "Alpha",
     points: [
-      { date: "2026-08-18", tokens: 100, cost_usd: null, cost_status: "unavailable", config_rev: "old" },
-      { date: "2026-08-19", tokens: 150, cost_usd: null, cost_status: "unavailable", config_rev: "new" },
+      { date: "2026-08-18", tokens: 100, costUsd: null, costStatus: "unavailable", configRev: "old" },
+      { date: "2026-08-19", tokens: 150, costUsd: null, costStatus: "unavailable", configRev: "new" },
     ],
   }],
-  data_status: "ready",
+  dataStatus: "ready",
 } as const;
 
 const RANKINGS: MaturityProjectRankingsResponse = {
   scope: "project",
-  bucket_date: "2026-08-19",
+  bucketDate: "2026-08-19",
   metric: "total",
   items: [
     {
       rank: 1,
-      project_id: "p1",
-      project_name: "Alpha",
+      projectId: "p1",
+      projectName: "Alpha",
       value: null,
-      data_status: "unavailable",
+      dataStatus: "unavailable",
     },
   ],
-  next_cursor: null,
-  data_status: "ready",
+  nextCursor: null,
+  dataStatus: "ready",
 };
 
 const CONFIG = {
-  config_rev: "abcdef0123456789",
-  observation_weeks: 4,
-  calibration_status: "observing",
+  configRev: "abcdef0123456789",
+  observationWeeks: 4,
+  calibrationStatus: "observing",
   dimensions: [{ key: "AIF", metrics: ["token_intensity", "ai_penetration"] }],
   metrics: [
     {
@@ -180,19 +206,19 @@ const CONFIG = {
       floor: 0,
       target: 1,
       unit: "tokens_per_member_day",
-      known_gameability: "Can be inflated by verbose prompts.",
+      knownGameability: "Can be inflated by verbose prompts.",
     },
   ],
-  baseline_suggestions: [],
-  price_config_rev: null,
+  baselineSuggestions: [],
+  priceConfigRev: null,
 };
 
 const SUGGESTIONS: MaturitySuggestionResponse = {
   latest: null,
-  data_status: "empty",
+  dataStatus: "empty",
 };
 
-const HISTORY = { items: [], next_cursor: null, data_status: "empty" };
+const HISTORY = { items: [], nextCursor: null, dataStatus: "empty" };
 
 function renderPage() {
   const qc = new QueryClient({
@@ -253,5 +279,9 @@ describe("MaturitySuggestionsPanel", () => {
       </QueryClientProvider>,
     );
     expect(await screen.findByTestId("suggestions-empty")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Initialise Org Admin" }));
+    await waitFor(() =>
+      expect(api.ensureOrgAdminWorkspace).toHaveBeenCalledWith("ws-1", "runtime-1"),
+    );
   });
 });

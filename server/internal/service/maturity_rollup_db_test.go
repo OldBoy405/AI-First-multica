@@ -39,6 +39,28 @@ func TestRollupMaturityWorkspaceIntegration(t *testing.T) {
 	planTime := time.Date(2026, 8, 20, 0, 30, 0, 0, shanghaiLoc)
 	target := previousLocalDate(planTime)
 
+	// This user has no task created in the target bucket. Their older task emits
+	// usage on the target day and must still produce a user snapshot.
+	usageOnlyUserID := uuid.New()
+	usageOnlyTaskID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO "user" (id,name,email) VALUES ($1,'usage-only',$2)`, usageOnlyUserID, "usage-only-"+usageOnlyUserID.String()+"@example.test"); err != nil {
+		t.Fatalf("seed usage-only user: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO member (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, uuid.New(), wsID, usageOnlyUserID); err != nil {
+		t.Fatalf("seed usage-only member: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO agent_task_queue (id,agent_id,initiator_user_id,status,created_at,completed_at)
+		SELECT $1,id,$2,'completed','2026-08-18 01:00:00+08','2026-08-19 02:00:00+08'
+		FROM agent WHERE workspace_id=$3 LIMIT 1`, usageOnlyTaskID, usageOnlyUserID, wsID); err != nil {
+		t.Fatalf("seed usage-only task: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO task_usage (id,task_id,provider,model,input_tokens,output_tokens,created_at)
+		VALUES ($1,$2,'openai','gpt-5.6',25,5,'2026-08-19 02:00:00+08')`, uuid.New(), usageOnlyTaskID); err != nil {
+		t.Fatalf("seed usage-only tokens: %v", err)
+	}
+
 	rows, err := RollupMaturityWorkspace(ctx, pool, wsID, planTime)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
@@ -77,8 +99,24 @@ func TestRollupMaturityWorkspaceIntegration(t *testing.T) {
 		t.Fatalf("stored metrics invalid: %v", err)
 	}
 	penetration := metrics.MetricValues[maturity.MetricAIPenetration]
-	if penetration.Value == nil || *penetration.Value != 1 || penetration.Numerator == nil || *penetration.Numerator != 2 {
-		t.Fatalf("ai penetration = %+v, want two task initiators including the no-usage task", penetration)
+	if penetration.Value == nil || penetration.Numerator == nil || *penetration.Numerator != 2 || penetration.Denominator == nil || *penetration.Denominator != 3 {
+		t.Fatalf("ai penetration = %+v, want 2 current-day task initiators / 3 members", penetration)
+	}
+
+	var usageOnlyMetricsJSON []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT metrics FROM maturity_snapshot
+		WHERE workspace_id=$1 AND bucket_date=$2 AND scope='user' AND scope_id=$3`,
+		wsID, target, usageOnlyUserID.String(),
+	).Scan(&usageOnlyMetricsJSON); err != nil {
+		t.Fatalf("read usage-only user row: %v", err)
+	}
+	var usageOnlyMetrics maturity.SnapshotMetricsV1
+	if err := json.Unmarshal(usageOnlyMetricsJSON, &usageOnlyMetrics); err != nil {
+		t.Fatalf("usage-only metrics JSON: %v", err)
+	}
+	if got := usageOnlyMetrics.Headline.TotalTokens; got != 30 {
+		t.Fatalf("usage-only user tokens = %d, want 30", got)
 	}
 
 	var userMetricsJSON, userScoresJSON []byte

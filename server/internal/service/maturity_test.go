@@ -88,6 +88,22 @@ func TestMaturityServiceReadPath(t *testing.T) {
 	if rankings.Items[0].Value != nil {
 		t.Fatalf("observing rankings total must be null, got %v", *rankings.Items[0].Value)
 	}
+	if _, err := svc.Rankings(ctx, wsID, nil, "unknown_metric", 20, nil); !IsMaturityInvalidQuery(err) {
+		t.Fatalf("unknown ranking metric error = %v, want invalid query", err)
+	}
+	badCursor := "not-base64!"
+	if _, err := svc.Rankings(ctx, wsID, nil, "total", 20, &badCursor); !IsMaturityInvalidQuery(err) {
+		t.Fatalf("bad ranking cursor error = %v, want invalid query", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE maturity_snapshot SET scores='{"metric_scores":"invalid"}'::jsonb WHERE workspace_id=$1 AND scope='project'`, wsID); err != nil {
+		t.Fatalf("corrupt project scores: %v", err)
+	}
+	if _, err := svc.Rankings(ctx, wsID, nil, "total", 20, nil); err == nil {
+		t.Fatal("corrupt project ranking scores must return an error")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE maturity_snapshot SET scores='{}'::jsonb WHERE workspace_id=$1 AND scope='project'`, wsID); err != nil {
+		t.Fatalf("restore project scores: %v", err)
+	}
 
 	// token-trend: project series from the snapshot.
 	from := time.Date(2026, 8, 18, 0, 0, 0, 0, shanghaiLoc)
@@ -141,6 +157,10 @@ func TestMaturityServiceReadPath(t *testing.T) {
 	hist, err := svc.SuggestionHistory(ctx, wsID, 12, nil)
 	if err != nil || hist.DataStatus != "empty" || len(hist.Items) != 0 {
 		t.Fatalf("history = %+v, %v", hist, err)
+	}
+	badReportCursor := "not-base64!"
+	if _, err := svc.SuggestionHistory(ctx, wsID, 12, &badReportCursor); !IsMaturityInvalidQuery(err) {
+		t.Fatalf("bad report cursor error = %v, want invalid query", err)
 	}
 
 	// Persisted projection corruption must fail closed, never masquerade as an

@@ -1009,19 +1009,27 @@ func (q *Queries) MaturityPrototypeGates(ctx context.Context, arg MaturityProtot
 
 const maturityReportHistory = `-- name: MaturityReportHistory :many
 SELECT id, completed_at, result
-FROM agent_task_queue
-WHERE project_id = $1
-  AND status = 'completed'
-  AND result->>'schema' = $4::text
-ORDER BY completed_at DESC, id DESC
-LIMIT $2 OFFSET $3
+FROM (
+  SELECT DISTINCT ON (result->>'report_key') id, completed_at, result
+  FROM agent_task_queue
+  WHERE project_id = $1::uuid
+    AND status = 'completed'
+    AND result->>'schema' = $2::text
+    AND (
+      $3::text = ''
+      OR result->>'report_key' < $3::text
+    )
+  ORDER BY result->>'report_key', completed_at DESC, id DESC
+) reports
+ORDER BY result->>'report_key' DESC
+LIMIT $4
 `
 
 type MaturityReportHistoryParams struct {
-	ProjectID pgtype.UUID `json:"project_id"`
-	Limit     int32       `json:"limit"`
-	Offset    int32       `json:"offset"`
-	Schema    string      `json:"schema"`
+	ProjectID       pgtype.UUID `json:"project_id"`
+	Schema          string      `json:"schema"`
+	BeforeReportKey string      `json:"before_report_key"`
+	PageLimit       int32       `json:"page_limit"`
 }
 
 type MaturityReportHistoryRow struct {
@@ -1030,12 +1038,14 @@ type MaturityReportHistoryRow struct {
 	Result      []byte             `json:"result"`
 }
 
+// report_key ends in the ISO week and is immutable after completion. Keyset
+// pagination therefore stays stable when a newer weekly report arrives.
 func (q *Queries) MaturityReportHistory(ctx context.Context, arg MaturityReportHistoryParams) ([]MaturityReportHistoryRow, error) {
 	rows, err := q.db.Query(ctx, maturityReportHistory,
 		arg.ProjectID,
-		arg.Limit,
-		arg.Offset,
 		arg.Schema,
+		arg.BeforeReportKey,
+		arg.PageLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -1092,7 +1102,7 @@ FROM agent_task_queue
 WHERE project_id = $1
   AND status = 'completed'
   AND result->>'schema' = 'ai-first.maturity-report/v1'
-ORDER BY completed_at DESC, id DESC
+ORDER BY result->>'report_key' DESC, id DESC
 LIMIT 1
 `
 

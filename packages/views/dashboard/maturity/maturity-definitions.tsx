@@ -23,7 +23,7 @@ export function MaturityDefinitions({
           {" · "}
           <span>weight {m.weight}</span>
           {" · "}
-          <span>Known gameability: {m.known_gameability}</span>
+          <span>Known gameability: {m.knownGameability}</span>
         </li>
       ))}
     </ul>

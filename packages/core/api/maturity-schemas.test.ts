@@ -7,6 +7,7 @@ import {
   MaturitySuggestionResponseSchema,
   MaturitySuggestionHistoryResponseSchema,
   MaturityConfigResponseSchema,
+  OrgAdminResponseSchema,
   EMPTY_MATURITY_OVERALL,
   EMPTY_MATURITY_TOKEN_TREND,
   EMPTY_MATURITY_RANKINGS,
@@ -37,20 +38,22 @@ describe("maturity schemas parseWithFallback leniency", () => {
       future_field: "tolerated",
     };
     const out = parseWithFallback<MaturityOverallResponse>(raw, MaturityOverallResponseSchema, EMPTY_MATURITY_OVERALL, { endpoint: "test" });
-    expect(out.data_status).toBe("ready");
-    expect(out.dimensions[0]?.metrics[0]?.raw.value).toBe(1);
+    expect(out.dataStatus).toBe("ready");
+    expect(out.bucketDate).toBe("2026-08-19");
+    expect(out.headline?.activeMembers).toBe(3);
+    expect(out.dimensions[0]?.metrics[0]?.raw.attribution?.attributedCount).toBe(1);
   });
 
   it("malformed overall payload falls back without throwing", () => {
     const out = parseWithFallback<MaturityOverallResponse>(null, MaturityOverallResponseSchema, EMPTY_MATURITY_OVERALL, { endpoint: "test" });
-    expect(out.data_status).toBe("empty");
+    expect(out.dataStatus).toBe("empty");
     expect(out.dimensions).toEqual([]);
   });
 
   it("unknown enum values degrade to strings (never crash)", () => {
     const raw = { data_status: "weird_future_status", dimensions: [], governance: [] };
     const out = parseWithFallback<MaturityOverallResponse>(raw, MaturityOverallResponseSchema, EMPTY_MATURITY_OVERALL, { endpoint: "test" });
-    expect(out.data_status).toBe("weird_future_status");
+    expect(out.dataStatus).toBe("weird_future_status");
   });
 
   it("token-trend, rankings, suggestions, history, config all degrade safely", () => {
@@ -76,7 +79,7 @@ describe("maturity schemas parseWithFallback leniency", () => {
       EMPTY_MATURITY_SUGGESTIONS,
       { endpoint: "test" },
     );
-    expect(sugg.latest?.report_key).toBe("k");
+    expect(sugg.latest?.reportKey).toBe("k");
 
     const hist = parseWithFallback<MaturitySuggestionHistoryResponse>(
       { items: [{ schema: "ai-first.maturity-report/v1" }] },
@@ -92,7 +95,23 @@ describe("maturity schemas parseWithFallback leniency", () => {
       EMPTY_MATURITY_CONFIG,
       { endpoint: "test" },
     );
-    expect(cfg.calibration_status).toBe("observing");
+    expect(cfg.calibrationStatus).toBe("observing");
     expect(cfg.metrics).toEqual([]);
+  });
+
+  it("converts Org Admin wire ids at the API boundary", () => {
+    expect(
+      OrgAdminResponseSchema.parse({
+        project_id: "project-1",
+        agent_id: "agent-1",
+        autopilot_id: "autopilot-1",
+        trigger_id: "trigger-1",
+      }),
+    ).toEqual({
+      projectId: "project-1",
+      agentId: "agent-1",
+      autopilotId: "autopilot-1",
+      triggerId: "trigger-1",
+    });
   });
 });

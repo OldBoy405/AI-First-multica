@@ -420,13 +420,23 @@ WHERE workspace_id = $1 AND settings->>'system_key' = 'org-admin-workspace'
 LIMIT 1;
 
 -- name: MaturityReportHistory :many
+-- report_key ends in the ISO week and is immutable after completion. Keyset
+-- pagination therefore stays stable when a newer weekly report arrives.
 SELECT id, completed_at, result
-FROM agent_task_queue
-WHERE project_id = $1
-  AND status = 'completed'
-  AND result->>'schema' = sqlc.arg('schema')::text
-ORDER BY completed_at DESC, id DESC
-LIMIT $2 OFFSET $3;
+FROM (
+  SELECT DISTINCT ON (result->>'report_key') id, completed_at, result
+  FROM agent_task_queue
+  WHERE project_id = sqlc.arg('project_id')::uuid
+    AND status = 'completed'
+    AND result->>'schema' = sqlc.arg('schema')::text
+    AND (
+      sqlc.arg('before_report_key')::text = ''
+      OR result->>'report_key' < sqlc.arg('before_report_key')::text
+    )
+  ORDER BY result->>'report_key', completed_at DESC, id DESC
+) reports
+ORDER BY result->>'report_key' DESC
+LIMIT sqlc.arg('page_limit');
 
 -- name: MaturityReportLatest :one
 SELECT id, completed_at, result
@@ -434,7 +444,7 @@ FROM agent_task_queue
 WHERE project_id = $1
   AND status = 'completed'
   AND result->>'schema' = 'ai-first.maturity-report/v1'
-ORDER BY completed_at DESC, id DESC
+ORDER BY result->>'report_key' DESC, id DESC
 LIMIT 1;
 
 -- name: ListMaturitySnapshotsByScope :many

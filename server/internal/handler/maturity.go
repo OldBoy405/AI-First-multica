@@ -114,7 +114,11 @@ func (h *Handler) GetMaturityTokenTrend(w http.ResponseWriter, r *http.Request) 
 		From: from, To: to, IncludeCost: q.Get("include_cost") == "true",
 	})
 	if err != nil {
-		writeApiError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		if service.IsMaturityInvalidQuery(err) {
+			writeApiError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		} else {
+			writeApiError(w, http.StatusInternalServerError, "internal_error", "failed to load token trend")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -155,7 +159,11 @@ func (h *Handler) GetMaturityRankings(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.maturityService().Rankings(r.Context(), parseUUID(workspaceID), date, metric, limit, cursor)
 	if err != nil {
-		writeApiError(w, http.StatusInternalServerError, "internal_error", "failed to load rankings")
+		if service.IsMaturityInvalidQuery(err) {
+			writeApiError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		} else {
+			writeApiError(w, http.StatusInternalServerError, "internal_error", "failed to load rankings")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -197,7 +205,11 @@ func (h *Handler) GetMaturitySuggestionHistory(w http.ResponseWriter, r *http.Re
 	}
 	resp, err := h.maturityService().SuggestionHistory(r.Context(), parseUUID(workspaceID), limit, cursor)
 	if err != nil {
-		writeApiError(w, http.StatusInternalServerError, "internal_error", "failed to load report history")
+		if service.IsMaturityInvalidQuery(err) {
+			writeApiError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		} else {
+			writeApiError(w, http.StatusInternalServerError, "internal_error", "failed to load report history")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

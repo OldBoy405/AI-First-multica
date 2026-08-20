@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/maturity"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -163,6 +164,21 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load report autopilot: %v", err)
 	}
+	skippedRun, err := autopilotSvc.DispatchAutopilot(ctx, autopilot, first.TriggerID, "schedule", nil)
+	if err != nil {
+		t.Fatalf("preflight report autopilot: %v", err)
+	}
+	if skippedRun.Status != "skipped" || skippedRun.TaskID.Valid {
+		t.Fatalf("report without local directory = %+v, want skipped without task", skippedRun)
+	}
+	var setupInboxCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE workspace_id=$1 AND recipient_id=$2 AND type='maturity_report_setup_required'`, wsID, ownerID).Scan(&setupInboxCount); err != nil || setupInboxCount != 1 {
+		t.Fatalf("local-directory guidance inbox = %d, %v", setupInboxCount, err)
+	}
+	exec(`INSERT INTO project_resource (id,project_id,workspace_id,resource_type,resource_ref,created_by)
+	      VALUES ($1,$2,$3,'local_directory',$4,$5)`, uuid.New(), first.ProjectID.Bytes, wsID,
+		json.RawMessage(`{"local_path":"C:/work/org-admin","daemon_id":"test-daemon"}`), ownerID)
+
 	run, err := autopilotSvc.DispatchAutopilot(ctx, autopilot, first.TriggerID, "schedule", nil)
 	if err != nil {
 		t.Fatalf("dispatch report autopilot: %v", err)
@@ -240,6 +256,46 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE workspace_id=$1 AND recipient_id=$2 AND type='maturity_report_ready'`, wsID, ownerID).Scan(&inboxCount); err != nil || inboxCount != 1 {
 		t.Fatalf("same-week report inboxes = %d, %v", inboxCount, err)
+	}
+
+	// Report chronology is the immutable ISO-week key, not task completion
+	// time. A late retry of W34 must not displace W35, and keyset pagination
+	// must not skip when newer reports exist.
+	thirdRun, err := autopilotSvc.DispatchAutopilot(ctx, autopilot, first.TriggerID, "schedule", nil)
+	if err != nil {
+		t.Fatalf("dispatch third report: %v", err)
+	}
+	thirdTask, err := queries.GetAgentTask(ctx, thirdRun.TaskID)
+	if err != nil {
+		t.Fatalf("load third report task: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status='running', started_at=now() WHERE id=$1`, thirdTask.ID); err != nil {
+		t.Fatalf("start third report task: %v", err)
+	}
+	thirdEnvelope, err := BuildReportEnvelope(wsp, "2026-W35", markdown,
+		thirdTask.ID, thirdTask.ChatSessionID, []string{"config-rev"})
+	if err != nil {
+		t.Fatalf("build third report: %v", err)
+	}
+	thirdOutput, _ := json.Marshal(thirdEnvelope)
+	if _, err := taskSvc.CompleteTask(ctx, thirdTask.ID, thirdOutput, "", "", "", false, ""); err != nil {
+		t.Fatalf("complete third report: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET completed_at='2020-01-01' WHERE id=$1`, thirdTask.ID); err != nil {
+		t.Fatalf("backdate W35 completion: %v", err)
+	}
+	maturitySvc := NewMaturityService(queries, maturity.GeneratedConfig(), maturity.PriceMap{})
+	latestReport, err := maturitySvc.Suggestions(ctx, wsp)
+	if err != nil || latestReport.Latest == nil || latestReport.Latest.Week != "2026-W35" {
+		t.Fatalf("latest report = %+v, %v; want W35", latestReport, err)
+	}
+	page1, err := maturitySvc.SuggestionHistory(ctx, wsp, 1, nil)
+	if err != nil || len(page1.Items) != 1 || page1.Items[0].Week != "2026-W35" || page1.NextCursor == "" {
+		t.Fatalf("history page 1 = %+v, %v", page1, err)
+	}
+	page2, err := maturitySvc.SuggestionHistory(ctx, wsp, 1, &page1.NextCursor)
+	if err != nil || len(page2.Items) != 1 || page2.Items[0].Week != "2026-W34" {
+		t.Fatalf("history page 2 = %+v, %v", page2, err)
 	}
 
 	// Another run-only Autopilot may share the Org Admin agent and project. Its

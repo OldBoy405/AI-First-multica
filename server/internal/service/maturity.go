@@ -29,6 +29,18 @@ type MaturityService struct {
 	prices  maturity.PriceMap
 }
 
+var errMaturityInvalidQuery = errors.New("invalid maturity query")
+
+// IsMaturityInvalidQuery distinguishes client input failures from storage or
+// corrupted-projection failures, which must remain server errors.
+func IsMaturityInvalidQuery(err error) bool {
+	return errors.Is(err, errMaturityInvalidQuery)
+}
+
+func invalidMaturityQuery(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errMaturityInvalidQuery, fmt.Sprintf(format, args...))
+}
+
 // NewMaturityService wires the read service with the generated config copy.
 func NewMaturityService(queries *db.Queries, cfg maturity.ConfigV1, prices maturity.PriceMap) *MaturityService {
 	return &MaturityService{queries: queries, cfg: cfg, prices: prices}
@@ -57,13 +69,13 @@ func (s *MaturityService) Overall(ctx context.Context, workspaceID pgtype.UUID, 
 		return nil, err
 	}
 
-	var metrics maturity.SnapshotMetricsV1
-	if err := json.Unmarshal(row.Metrics, &metrics); err != nil {
-		return nil, fmt.Errorf("unmarshal snapshot metrics: %w", err)
+	metrics, err := decodeSnapshotMetrics(row.Metrics)
+	if err != nil {
+		return nil, fmt.Errorf("decode snapshot metrics: %w", err)
 	}
-	var scores maturity.SnapshotScoresV1
-	if err := json.Unmarshal(row.Scores, &scores); err != nil {
-		return nil, fmt.Errorf("unmarshal snapshot scores: %w", err)
+	scores, err := decodeSnapshotScores(row.Scores)
+	if err != nil {
+		return nil, fmt.Errorf("decode snapshot scores: %w", err)
 	}
 
 	resp := &maturity.MaturityOverallResponse{
@@ -191,16 +203,18 @@ func (s *MaturityService) TokenTrend(ctx context.Context, workspaceID pgtype.UUI
 		series := map[string]*maturity.TokenTrendSeries{}
 		names := map[string]string{}
 		if req.Dimension == "project" {
-			if projects, err := s.queries.ListProjects(ctx, db.ListProjectsParams{WorkspaceID: workspaceID}); err == nil {
-				for _, p := range projects {
-					names[uuid.UUID(p.ID.Bytes).String()] = p.Title
-				}
+			projects, err := s.queries.ListProjects(ctx, db.ListProjectsParams{WorkspaceID: workspaceID})
+			if err != nil {
+				return nil, fmt.Errorf("list maturity trend projects: %w", err)
+			}
+			for _, p := range projects {
+				names[uuid.UUID(p.ID.Bytes).String()] = p.Title
 			}
 		}
 		for _, r := range rows {
-			var m maturity.SnapshotMetricsV1
-			if err := json.Unmarshal(r.Metrics, &m); err != nil {
-				continue
+			m, err := decodeSnapshotMetrics(r.Metrics)
+			if err != nil {
+				return nil, fmt.Errorf("decode maturity trend metrics for %s/%s: %w", r.Scope, r.ScopeID, err)
 			}
 			key := r.ScopeID
 			label := key
@@ -228,7 +242,7 @@ func (s *MaturityService) TokenTrend(ctx context.Context, workspaceID pgtype.UUI
 		}
 		sort.Slice(resp.Series, func(i, j int) bool { return resp.Series[i].ID < resp.Series[j].ID })
 	default:
-		return nil, fmt.Errorf("invalid_query: unsupported dimension %q", req.Dimension)
+		return nil, invalidMaturityQuery("unsupported dimension %q", req.Dimension)
 	}
 	if len(resp.Series) > 0 {
 		resp.DataStatus = "ready"
@@ -238,14 +252,31 @@ func (s *MaturityService) TokenTrend(ctx context.Context, workspaceID pgtype.UUI
 
 // Rankings returns project rankings for one bucket and metric.
 func (s *MaturityService) Rankings(ctx context.Context, workspaceID pgtype.UUID, date *time.Time, metric string, limit int, cursor *string) (*maturity.ProjectRankingsResponse, error) {
+	if metric != "total" {
+		valid := false
+		for _, key := range maturity.AllMetricKeys {
+			if metric == string(key) {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, invalidMaturityQuery("unsupported ranking metric %q", metric)
+		}
+	}
 	bucket := time.Now().In(shanghaiLoc).AddDate(0, 0, -1)
 	if date != nil {
 		bucket = *date
 	}
 	offset := 0
 	if cursor != nil && *cursor != "" {
-		if raw, err := base64.RawURLEncoding.DecodeString(*cursor); err == nil {
-			offset, _ = strconv.Atoi(string(raw))
+		raw, err := base64.RawURLEncoding.DecodeString(*cursor)
+		if err != nil {
+			return nil, invalidMaturityQuery("invalid ranking cursor")
+		}
+		offset, err = strconv.Atoi(string(raw))
+		if err != nil || offset < 0 {
+			return nil, invalidMaturityQuery("invalid ranking cursor")
 		}
 	}
 	rows, err := s.queries.ListMaturitySnapshotsByScope(ctx, db.ListMaturitySnapshotsByScopeParams{
@@ -256,18 +287,22 @@ func (s *MaturityService) Rankings(ctx context.Context, workspaceID pgtype.UUID,
 	}
 	items := make([]maturity.ProjectRankingsItem, 0, len(rows))
 	names := map[string]string{}
-	if projects, err := s.queries.ListProjects(ctx, db.ListProjectsParams{WorkspaceID: workspaceID}); err == nil {
-		for _, p := range projects {
-			names[uuid.UUID(p.ID.Bytes).String()] = p.Title
-		}
+	projects, err := s.queries.ListProjects(ctx, db.ListProjectsParams{WorkspaceID: workspaceID})
+	if err != nil {
+		return nil, fmt.Errorf("list maturity ranking projects: %w", err)
+	}
+	for _, p := range projects {
+		names[uuid.UUID(p.ID.Bytes).String()] = p.Title
 	}
 	for _, r := range rows {
-		var m maturity.SnapshotMetricsV1
-		if err := json.Unmarshal(r.Metrics, &m); err != nil {
-			continue
+		m, err := decodeSnapshotMetrics(r.Metrics)
+		if err != nil {
+			return nil, fmt.Errorf("decode maturity ranking metrics for %s: %w", r.ScopeID, err)
 		}
-		var scores maturity.SnapshotScoresV1
-		_ = json.Unmarshal(r.Scores, &scores)
+		scores, err := decodeSnapshotScores(r.Scores)
+		if err != nil {
+			return nil, fmt.Errorf("decode maturity ranking scores for %s: %w", r.ScopeID, err)
+		}
 		item := maturity.ProjectRankingsItem{ProjectID: r.ScopeID, ProjectName: r.ScopeID}
 		if n, ok := names[r.ScopeID]; ok && n != "" {
 			item.ProjectName = n
@@ -334,53 +369,104 @@ func (s *MaturityService) Rankings(ctx context.Context, workspaceID pgtype.UUID,
 // Suggestions returns the latest valid weekly report envelope.
 func (s *MaturityService) Suggestions(ctx context.Context, workspaceID pgtype.UUID) (*maturity.SuggestionResponse, error) {
 	projectID, err := s.queries.MaturityOrgAdminProjectID(ctx, workspaceID)
-	if err != nil || !projectID.Valid {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !projectID.Valid) {
 		return &maturity.SuggestionResponse{DataStatus: "empty"}, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("load Org Admin project: %w", err)
+	}
 	row, err := s.queries.MaturityReportLatest(ctx, projectID)
-	if err != nil || len(row.Result) == 0 {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return &maturity.SuggestionResponse{DataStatus: "empty"}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load latest maturity report: %w", err)
 	}
 	report, ok := decodeReport(row.Result)
 	if !ok {
-		return &maturity.SuggestionResponse{DataStatus: "empty"}, nil
+		return nil, errors.New("decode latest maturity report: corrupt envelope or digest")
 	}
 	return &maturity.SuggestionResponse{Latest: &report, DataStatus: "ready"}, nil
 }
 
-// SuggestionHistory lists report envelopes newest-first (offset cursor).
+// SuggestionHistory lists report envelopes newest-first with a stable report-key cursor.
 func (s *MaturityService) SuggestionHistory(ctx context.Context, workspaceID pgtype.UUID, limit int, cursor *string) (*maturity.SuggestionHistoryResponse, error) {
+	before := ""
+	if cursor != nil && *cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(*cursor)
+		if err != nil || len(raw) == 0 {
+			return nil, invalidMaturityQuery("invalid report cursor")
+		}
+		before = string(raw)
+	}
 	projectID, err := s.queries.MaturityOrgAdminProjectID(ctx, workspaceID)
-	if err != nil || !projectID.Valid {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !projectID.Valid) {
 		return &maturity.SuggestionHistoryResponse{Items: []maturity.MaturityReport{}, DataStatus: "empty"}, nil
 	}
-	offset := 0
-	if cursor != nil && *cursor != "" {
-		if raw, err := base64.RawURLEncoding.DecodeString(*cursor); err == nil {
-			offset, _ = strconv.Atoi(string(raw))
-		}
+	if err != nil {
+		return nil, fmt.Errorf("load Org Admin project: %w", err)
 	}
 	rows, err := s.queries.MaturityReportHistory(ctx, db.MaturityReportHistoryParams{
-		ProjectID: projectID, Schema: "ai-first.maturity-report/v1", Limit: int32(limit + offset), Offset: 0,
+		ProjectID: projectID, Schema: maturityReportSchema,
+		BeforeReportKey: before, PageLimit: int32(limit + 1),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load maturity report history: %w", err)
 	}
-	items := []maturity.MaturityReport{}
-	seen := map[string]bool{}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items := make([]maturity.MaturityReport, 0, len(rows))
 	for _, r := range rows {
 		report, ok := decodeReport(r.Result)
-		if !ok || seen[report.ReportKey] {
-			continue
+		if !ok {
+			return nil, errors.New("decode maturity report history: corrupt envelope or digest")
 		}
-		seen[report.ReportKey] = true
 		items = append(items, report)
 	}
 	nextCursor := ""
-	if len(rows) == limit+offset {
-		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset + len(rows))))
+	if hasMore && len(items) > 0 {
+		nextCursor = base64.RawURLEncoding.EncodeToString([]byte(items[len(items)-1].ReportKey))
 	}
 	return &maturity.SuggestionHistoryResponse{Items: items, NextCursor: nextCursor, DataStatus: dataStatusOf(items)}, nil
+}
+
+func decodeSnapshotMetrics(raw []byte) (maturity.SnapshotMetricsV1, error) {
+	var metrics maturity.SnapshotMetricsV1
+	if err := json.Unmarshal(raw, &metrics); err != nil {
+		return metrics, err
+	}
+	if err := ValidateSnapshotMetrics(metrics); err != nil {
+		return metrics, err
+	}
+	return metrics, nil
+}
+
+func decodeSnapshotScores(raw []byte) (maturity.SnapshotScoresV1, error) {
+	var scores maturity.SnapshotScoresV1
+	if err := json.Unmarshal(raw, &scores); err != nil {
+		return scores, err
+	}
+	if len(scores.MetricScores) == 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
+			return scores, err
+		}
+		if len(object) != 0 {
+			return scores, errors.New("score payload is neither empty observation data nor a full score projection")
+		}
+		return scores, nil
+	}
+	if scores.Schema != "ai-first.maturity-scores/v1" || len(scores.MetricScores) != len(maturity.AllMetricKeys) || len(scores.DimensionScores) != 5 {
+		return scores, errors.New("incomplete maturity score projection")
+	}
+	for _, key := range maturity.AllMetricKeys {
+		if _, ok := scores.MetricScores[key]; !ok {
+			return scores, fmt.Errorf("missing maturity metric score %q", key)
+		}
+	}
+	return scores, nil
 }
 
 func dataStatusOf(items []maturity.MaturityReport) string {

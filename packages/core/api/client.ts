@@ -4453,14 +4453,14 @@ export class ApiClient {
 
   async getMaturityTokenTrend(
     workspaceId: string,
-    params: { dimension: "project" | "user" | "model"; dimension_id?: string; from?: string; to?: string; include_cost?: boolean },
+    params: { dimension: "project" | "user" | "model"; dimensionId?: string; from?: string; to?: string; includeCost?: boolean },
   ): Promise<MaturityTokenTrendResponse> {
     const search = new URLSearchParams();
     search.set("dimension", params.dimension);
-    if (params.dimension_id) search.set("dimension_id", params.dimension_id);
+    if (params.dimensionId) search.set("dimension_id", params.dimensionId);
     if (params.from) search.set("from", params.from);
     if (params.to) search.set("to", params.to);
-    if (params.include_cost) search.set("include_cost", "true");
+    if (params.includeCost) search.set("include_cost", "true");
     const raw = await this.fetch<unknown>(`/api/maturity/token-trend?${search}`, {
       headers: this.maturityHeaders(workspaceId),
     });

@@ -69,6 +69,24 @@ func TestMaturityHandlerGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("rankings unknown metric rejected", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := newRequest("GET", "/api/maturity/rankings?metric=made_up", nil)
+		testHandler.GetMaturityRankings(w, req)
+		if w.Code != http.StatusBadRequest || !containsMaturity(w.Body.String(), "invalid_query") {
+			t.Fatalf("unknown metric: code %d, body %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("report history invalid cursor rejected", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := newRequest("GET", "/api/maturity/suggestions/history?cursor=not-base64!", nil)
+		testHandler.GetMaturitySuggestionHistory(w, req)
+		if w.Code != http.StatusBadRequest || !containsMaturity(w.Body.String(), "invalid_query") {
+			t.Fatalf("invalid cursor: code %d, body %s", w.Code, w.Body.String())
+		}
+	})
+
 	t.Run("overall invalid date rejected", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		req := newRequest("GET", "/api/maturity/overall?date=not-a-date", nil)

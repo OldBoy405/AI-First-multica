@@ -82,6 +82,7 @@ import type {
   MaturitySuggestionResponse,
   MaturitySuggestionHistoryResponse,
   MaturityConfigResponse,
+  OrgAdminResponse,
 } from "../types";
 import type { CloudRuntimeNode } from "../runtimes/cloud-runtime";
 import type { CreateFeedbackResponse } from "../feedback/types";
@@ -3077,10 +3078,21 @@ export const EMPTY_JOIN_SHARE_LINK_RESPONSE: {
 };
 
 // ---------------------------------------------------------------------------
-// AIFIRST: AI maturity dashboard responses (CR-2026-047 TASK-08). Lenient
-// like the rest of this file: string enums degrade to fallback values, nulls
-// stay null, unknown fields pass through via .loose().
+// AIFIRST: AI maturity dashboard responses (CR-2026-047 TASK-08). The server
+// speaks snake_case JSON; this boundary recursively converts parsed response
+// objects so no wire names leak into TypeScript domain code.
 // ---------------------------------------------------------------------------
+
+function camelizeMaturity(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(camelizeMaturity);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()),
+      camelizeMaturity(item),
+    ]),
+  );
+}
 
 const MaturityMetricValueSchema = z.object({
   value: z.number().nullable().default(null),
@@ -3097,7 +3109,7 @@ const MaturityMetricValueSchema = z.object({
     })
     .nullable()
     .default(null),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value));
 
 const MaturityReportSchema = z.object({
   schema: z.literal("ai-first.maturity-report/v1"),
@@ -3110,7 +3122,7 @@ const MaturityReportSchema = z.object({
   source_task_id: z.string().default(""),
   chat_session_id: z.string().default(""),
   config_revs: z.array(z.string()).default([]),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value));
 
 const MaturityObservationSchema = z.object({
   active: z.boolean().default(false),
@@ -3118,14 +3130,14 @@ const MaturityObservationSchema = z.object({
   observation_weeks: z.number().default(4),
   first_bucket_date: z.string().default(""),
   elapsed_days: z.number().default(0),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value));
 
 const MaturityHeadlineSchema = z.object({
   active_members: z.number().default(0),
   total_tokens: z.number().default(0),
   cost_usd: z.number().nullable().default(null),
   cost_status: z.string().default("unavailable"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value));
 
 const MaturityDimensionSchema = z.object({
   key: z.string().default(""),
@@ -3153,7 +3165,7 @@ export const MaturityOverallResponseSchema = z.object({
     .array(z.object({ key: z.string().default(""), datum: MaturityMetricValueSchema }).loose())
     .default([]),
   data_status: z.string().default("empty"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturityOverallResponse);
 
 const MaturityTrendPointSchema = z.object({
   date: z.string().default(""),
@@ -3161,7 +3173,7 @@ const MaturityTrendPointSchema = z.object({
   cost_usd: z.number().nullable().default(null),
   cost_status: z.string().default("unavailable"),
   config_rev: z.string().optional(),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value));
 
 export const MaturityTokenTrendResponseSchema = z.object({
   dimension: z.string().default("project"),
@@ -3177,7 +3189,7 @@ export const MaturityTokenTrendResponseSchema = z.object({
     )
     .default([]),
   data_status: z.string().default("empty"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturityTokenTrendResponse);
 
 export const MaturityProjectRankingsResponseSchema = z.object({
   scope: z.string().default("project"),
@@ -3196,18 +3208,18 @@ export const MaturityProjectRankingsResponseSchema = z.object({
     .default([]),
   next_cursor: z.string().nullable().default(null),
   data_status: z.string().default("empty"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturityProjectRankingsResponse);
 
 export const MaturitySuggestionResponseSchema = z.object({
   latest: MaturityReportSchema.nullable().default(null),
   data_status: z.string().default("empty"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturitySuggestionResponse);
 
 export const MaturitySuggestionHistoryResponseSchema = z.object({
   items: z.array(MaturityReportSchema).default([]),
   next_cursor: z.string().nullable().default(null),
   data_status: z.string().default("empty"),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturitySuggestionHistoryResponse);
 
 export const MaturityConfigResponseSchema = z.object({
   config_rev: z.string().default(""),
@@ -3239,59 +3251,59 @@ export const MaturityConfigResponseSchema = z.object({
     )
     .default([]),
   price_config_rev: z.string().nullable().default(null),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as MaturityConfigResponse);
 
 export const OrgAdminResponseSchema = z.object({
   project_id: z.string().default(""),
   agent_id: z.string().default(""),
   autopilot_id: z.string().default(""),
   trigger_id: z.string().default(""),
-}).loose();
+}).loose().transform((value) => camelizeMaturity(value) as OrgAdminResponse);
 
-export const EMPTY_ORG_ADMIN_RESPONSE = {
-  project_id: "",
-  agent_id: "",
-  autopilot_id: "",
-  trigger_id: "",
+export const EMPTY_ORG_ADMIN_RESPONSE: OrgAdminResponse = {
+  projectId: "",
+  agentId: "",
+  autopilotId: "",
+  triggerId: "",
 };
 
 export const EMPTY_MATURITY_OVERALL: MaturityOverallResponse = {
-  bucket_date: null,
-  config_rev: null,
+  bucketDate: null,
+  configRev: null,
   observation: null,
   headline: null,
-  total_score: null,
+  totalScore: null,
   dimensions: [],
   governance: [],
-  data_status: "empty",
+  dataStatus: "empty",
 };
 export const EMPTY_MATURITY_TOKEN_TREND: MaturityTokenTrendResponse = {
   dimension: "project",
   from: "",
   to: "",
   series: [],
-  data_status: "empty",
+  dataStatus: "empty",
 };
 export const EMPTY_MATURITY_RANKINGS: MaturityProjectRankingsResponse = {
   scope: "project",
-  bucket_date: null,
+  bucketDate: null,
   metric: "total",
   items: [],
-  next_cursor: null,
-  data_status: "empty",
+  nextCursor: null,
+  dataStatus: "empty",
 };
-export const EMPTY_MATURITY_SUGGESTIONS: MaturitySuggestionResponse = { latest: null, data_status: "empty" };
+export const EMPTY_MATURITY_SUGGESTIONS: MaturitySuggestionResponse = { latest: null, dataStatus: "empty" };
 export const EMPTY_MATURITY_SUGGESTION_HISTORY: MaturitySuggestionHistoryResponse = {
   items: [],
-  next_cursor: null,
-  data_status: "empty",
+  nextCursor: null,
+  dataStatus: "empty",
 };
 export const EMPTY_MATURITY_CONFIG: MaturityConfigResponse = {
-  config_rev: "",
-  observation_weeks: 4,
-  calibration_status: "observing",
+  configRev: "",
+  observationWeeks: 4,
+  calibrationStatus: "observing",
   dimensions: [],
   metrics: [],
-  baseline_suggestions: [],
-  price_config_rev: null,
+  baselineSuggestions: [],
+  priceConfigRev: null,
 };

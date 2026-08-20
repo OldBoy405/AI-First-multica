@@ -244,6 +244,20 @@ func rollupWorkspaceRows(ctx context.Context, qtx *db.Queries, workspaceID pgtyp
 			userSet[r.InitiatorUserID.Bytes] = true
 		}
 	}
+	// A task may have been created before this bucket but emit usage today.
+	// Include its initiator so the user trend preserves those current-day
+	// tokens instead of silently omitting the user's snapshot.
+	usageRows, err := qtx.MaturityTaskTokenRows(ctx, db.MaturityTaskTokenRowsParams{
+		WorkspaceID: workspaceID, FromUtc: toPgTs(from), ToUtc: toPgTs(to),
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range usageRows {
+		if r.InitiatorUserID.Valid {
+			userSet[r.InitiatorUserID.Bytes] = true
+		}
+	}
 	userIDs := make([][16]byte, 0, len(userSet))
 	for u := range userSet {
 		userIDs = append(userIDs, u)
