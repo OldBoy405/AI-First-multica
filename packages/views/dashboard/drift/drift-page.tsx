@@ -8,7 +8,8 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useWorkspaceId, api } from "@multica/core";
+import { useWorkspaceId } from "@multica/core";
+import { api } from "@multica/core/api";
 import { driftOverviewOptions, driftFindingsOptions, driftKeys } from "@multica/core/drift/queries";
 import type { DriftFinding, DriftFindingStatus, DriftScanHealth } from "@multica/core/types";
 
