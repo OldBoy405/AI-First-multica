@@ -1,0 +1,2 @@
+-- AIFIRST: CR-2026-049 TASK-04 rollback.
+DROP INDEX CONCURRENTLY IF EXISTS drift_finding_id_uidx;

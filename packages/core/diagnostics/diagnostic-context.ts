@@ -74,6 +74,8 @@ const WORKSPACE_ROUTES: readonly RoutePattern[] = [
   ["usage"],
   ["billing"],
   ["maturity"], // AIFIRST: CR-2026-047 maturity dashboard route.
+  ["governance", "specs", ":specId"], // AIFIRST: CR-2026-049 TASK-12 spec trace route.
+  ["drift"], // AIFIRST: CR-2026-049 TASK-12 drift findings route.
   ["runtimes"],
   ["runtimes", ":id"],
   ["runtimes", ":id", "runtime", ":runtimeId"],

@@ -326,3 +326,6 @@ export type {
 } from "./maturity";
 
 export type { OrgAdminResponse } from "./org-admin";
+
+export * from "./trace";
+export * from "./drift";

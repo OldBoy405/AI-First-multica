@@ -176,18 +176,16 @@ func requireHumanActor(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // latestEvidence returns the newest non-empty evidence snapshot for a CR.
-// cr_sync_event has no workspace_id of its own (cr_id alone isn't globally
-// unique — only UNIQUE(workspace_id, cr_id) on the cr table), so this joins
-// through cr to scope the lookup to the caller's workspace; otherwise a
-// same-named CR in another workspace could leak its evidence (file paths +
-// sha256 digests) through this workspace's approval card.
+// cr_sync_event carries workspace_id (CR-2026-049 TASK-05, migration 390) and
+// the query scopes on it directly — a same-named CR in another workspace can
+// never leak its evidence (file paths + sha256 digests) through this
+// workspace's approval card.
 func (a *ApprovalService) latestEvidence(r *http.Request, crID string) (map[string]string, error) {
 	workspaceID := middleware.WorkspaceIDFromContext(r.Context())
 	var evidence map[string]string
 	err := a.pool.QueryRow(r.Context(), `
 		SELECT cse.evidence FROM cr_sync_event cse
-		JOIN cr ON cr.cr_id = cse.cr_id
-		WHERE cr.workspace_id = $1::uuid AND cse.cr_id = $2 AND cse.evidence <> '{}'::jsonb
+		WHERE cse.workspace_id = $1::uuid AND cse.cr_id = $2 AND cse.evidence <> '{}'::jsonb
 		ORDER BY cse.id DESC LIMIT 1`, workspaceID, crID).Scan(&evidence)
 	if err != nil {
 		if err.Error() == "no rows in result set" || strings.Contains(err.Error(), "no rows") {
@@ -264,7 +262,7 @@ func (a *ApprovalService) HandleApprove(w http.ResponseWriter, r *http.Request) 
 	tag, err := a.pool.Exec(r.Context(), `
 		INSERT INTO approval_record (workspace_id, cr_id, stage, decision, approver_user_id, evidence_digest, key_id, signature, reject_reason, grant_json)
 		VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, $7, $8, $9, $10)
-		ON CONFLICT (cr_id, stage, evidence_digest) WHERE decision = 'approve' DO NOTHING`,
+		ON CONFLICT (workspace_id, cr_id, stage, evidence_digest) WHERE decision = 'approve' DO NOTHING`,
 		workspaceID, crID, req.Stage, req.Decision, grant.Approver, digest, a.keyID, grant.Signature, req.RejectReason, grantJSON)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "approval persistence failed"})
@@ -276,8 +274,8 @@ func (a *ApprovalService) HandleApprove(w http.ResponseWriter, r *http.Request) 
 		var existing json.RawMessage
 		if err := a.pool.QueryRow(r.Context(), `
 			SELECT grant_json FROM approval_record
-			WHERE cr_id = $1 AND stage = $2 AND evidence_digest = $3 AND decision = 'approve'`,
-			crID, req.Stage, digest).Scan(&existing); err == nil {
+			WHERE workspace_id = $1::uuid AND cr_id = $2 AND stage = $3 AND evidence_digest = $4 AND decision = 'approve'`,
+			workspaceID, crID, req.Stage, digest).Scan(&existing); err == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"grant": existing, "idempotent": true})
 			return
 		}

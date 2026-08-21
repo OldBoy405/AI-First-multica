@@ -15,9 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/drift"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/governance"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/integrations/ghsnapshot"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/profiling"
@@ -612,6 +614,33 @@ func main() {
 		} else {
 			slog.Info("aifirst cr reconcile job registered", "interval", reconcileCfg.Interval, "remote", reconcileCfg.RemoteURL)
 		}
+	}
+	// AIFIRST: commit-prefix drift scan (CR-2026-049 TASK-10). Keep the job
+	// registered even when GitHub App configuration is unavailable so eligible
+	// workspaces record FAILED plans instead of being reported uninitialized.
+	scanGH, scanErr := ghsnapshot.NewClientFromEnv()
+	var scanAccess drift.AccessResolver
+	var scanSource ghsnapshot.CommitSource
+	if scanErr != nil {
+		slog.Warn("github: commit_prefix_scan will report configuration failures", "error", scanErr)
+		unavailable := ghsnapshot.NewUnavailableClient(scanErr)
+		scanAccess, scanSource = unavailable, unavailable
+	} else if scanGH == nil || !scanGH.Enabled() {
+		unavailable := ghsnapshot.NewUnavailableClient(nil)
+		scanAccess, scanSource = unavailable, unavailable
+	} else {
+		scanAccess, scanSource = scanGH, scanGH
+	}
+	if err := schedulerMgr.Register(*scheduler.CommitPrefixScanJob(scheduler.CommitPrefixScanDeps{
+		Pool:     pool,
+		Queries:  queries,
+		Resolver: drift.NewResolver(scanAccess),
+		GH:       scanSource,
+		Findings: drift.NewFindingRepo(pool),
+	})); err != nil {
+		slog.Warn("scheduler: failed to register commit_prefix_scan job", "error", err)
+	} else {
+		slog.Info("commit_prefix_scan job registered")
 	}
 	go func() {
 		_ = schedulerMgr.Run(sweepCtx)

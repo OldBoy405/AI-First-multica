@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { createMemoryRouter, Outlet, useMatches } from "react-router-dom";
+import { createMemoryRouter, Outlet, useMatches, useParams } from "react-router-dom";
 import type { RouteObject } from "react-router-dom";
 import { IssueDetailPage } from "./pages/issue-detail-page";
 import { ProjectDetailPage } from "./pages/project-detail-page";
@@ -17,6 +17,8 @@ import { IssuesPage } from "@multica/views/issues/components";
 import { ProjectsPage } from "@multica/views/projects/components";
 import { DashboardPage } from "@multica/views/dashboard";
 import { MaturityPage } from "@multica/views/dashboard/maturity";
+import { DriftPage } from "@multica/views/dashboard/drift";
+import { SpecTracePage } from "@multica/views/governance/spec-trace";
 import { AutopilotsPage } from "@multica/views/autopilots/components";
 import { MyIssuesPage } from "@multica/views/my-issues";
 import { MarketPage, SkillsPage } from "@multica/views/skills";
@@ -245,6 +247,16 @@ export const appRoutes: RouteObject[] = [
             handle: { title: "AI Maturity" },
           },
           {
+            path: "drift",
+            element: <DriftPage />,
+            handle: { title: "Drift" },
+          },
+          {
+            path: "governance/specs/:specId",
+            element: <SpecTracePageRoute />,
+            handle: { title: "Spec Trace" },
+          },
+          {
             path: "settings",
             element: <DesktopSettingsRoute />,
             handle: { title: "Settings" },
@@ -254,6 +266,12 @@ export const appRoutes: RouteObject[] = [
     ],
   },
 ];
+
+/** Route wrapper: SpecTracePage takes the spec id from the route params. */
+function SpecTracePageRoute() {
+  const { specId } = useParams<{ specId: string }>();
+  return <SpecTracePage specId={specId ?? ""} />;
+}
 
 /**
  * Create THE app router (MUL-4741 single-router session architecture).

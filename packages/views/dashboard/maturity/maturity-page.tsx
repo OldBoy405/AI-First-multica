@@ -16,6 +16,7 @@ import { Leaderboard } from "../components/leaderboard";
 import { UsageTrendCard } from "../components/usage-trend-card";
 import { MaturitySuggestionsPanel } from "./maturity-suggestions";
 import { MaturityDefinitions } from "./maturity-definitions";
+import { DriftCard } from "../drift";
 
 // AIFIRST: AI maturity dashboard (CR-2026-047 TASK-09). Observation period
 // renders only the three pillars (dimensions / trend / project rankings) —
@@ -257,6 +258,12 @@ export function MaturityPage() {
       )}
 
       <MaturitySuggestionsPanel wsId={wsId} />
+
+      {/* AIFIRST: CR-2026-049 TASK-12 — drift governance card (E5 finding summary). */}
+      <section className="space-y-2">
+        <h2 className="text-title-sm font-medium text-foreground">Drift</h2>
+        <DriftCard />
+      </section>
 
       <section className="space-y-2 text-body text-muted-foreground">
         <h2 className="text-title-sm font-medium text-foreground">Method</h2>
