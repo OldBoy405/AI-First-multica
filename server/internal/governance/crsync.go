@@ -47,6 +47,21 @@ var (
 // projection change (board refresh signal).
 const EventCRUpdated = protocol.EventCRUpdated
 
+// AIFIRST: CR-2026-051 FR-1 — alias of the shared protocol constant, same
+// shape as EventCRUpdated above; producers and the lark consumer reference
+// the same compile-time contract without importing each other.
+const EventCRApprovalGateEntered = protocol.EventCRApprovalGateEntered
+
+// AIFIRST: CR-2026-051 FR-1 — the four human-approval gate statuses.
+// Values mirror ../tools/dir-graph.yaml#change-request-track.state_machine
+// (the single source of truth for gate nodes).
+var approvalGateStatuses = map[string]bool{
+	"requirement-reviewing":      true,
+	"tech-design-review-pending": true,
+	"task-breakdown":             true,
+	"code-reviewing":             true,
+}
+
 var crIDRe = regexp.MustCompile(`^CR-\d{4}-\d{3}$`)
 
 var knownEventKinds = map[string]bool{
@@ -395,10 +410,16 @@ func (s *SyncService) apply(ctx context.Context, workspaceID string, ev OutboxEv
 
 func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev OutboxEvent) error {
 	var curStatus string
+	// AIFIRST: CR-2026-051 BL-3 — the existing single-column SELECT is widened
+	// to two columns so the approval-gate event payload can carry the CR's
+	// shell_issue_id (diagnostic only, never a query input). The ::text cast +
+	// *string target make NULL scan to nil via pgx's pointerPointerScanPlan;
+	// no extra round-trip and no signature change.
+	var shellIssueID *string
 	found := true
 	err := s.pool.QueryRow(ctx,
-		`SELECT status FROM cr WHERE workspace_id = $1 AND cr_id = $2`,
-		workspaceID, ev.CRID).Scan(&curStatus)
+		`SELECT status, shell_issue_id::text FROM cr WHERE workspace_id = $1 AND cr_id = $2`,
+		workspaceID, ev.CRID).Scan(&curStatus, &shellIssueID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			found = false
@@ -443,6 +464,12 @@ func (s *SyncService) applyStatus(ctx context.Context, workspaceID string, ev Ou
 			return err
 		}
 		s.projectGateTransition(ctx, workspaceID, ev.CRID, ev.FromStatus, ev.ToStatus)
+		// AIFIRST: CR-2026-051 FR-1 — publish the gate-entry event only from
+		// this trusted branch; the method itself re-checks from!=to and the
+		// four-gate set, but it must never be called from first-sighting,
+		// needs_reconcile, checkpoint/review/trace, reconcile, or gate
+		// projection paths.
+		s.publishApprovalGateEntered(ctx, workspaceID, ev, shellIssueID)
 	} else {
 		// Out-of-order or illegal: never force the projection — flag and let
 		// reconcile replay from the authority.
@@ -486,6 +513,31 @@ func (s *SyncService) publish(ctx context.Context, workspaceID, crID string) {
 			"cr_id":           crID,
 			"status":          status,
 			"needs_reconcile": needsReconcile,
+		},
+	})
+}
+
+// AIFIRST: CR-2026-051 FR-1/FR-2 — publishes cr:approval-gate-entered exactly
+// once per gate entry. Called ONLY from applyStatus's trusted branch (after
+// projectGateTransition): it fires only on a real status change (from != to)
+// whose target is one of the four human-approval gates. shellIssueID comes
+// from the same widened SELECT in applyStatus (one query, two columns — no
+// extra round-trip). event_id is the ledger idempotency-key projection
+// (cr_id:event_kind:commit_sha, SDD DD-1); workspace_id is deliberately NOT
+// part of it (the retrieval key is the (workspace_id, event_id) pair).
+func (s *SyncService) publishApprovalGateEntered(ctx context.Context, workspaceID string, ev OutboxEvent, shellIssueID *string) {
+	if s.bus == nil || ev.FromStatus == ev.ToStatus || !approvalGateStatuses[ev.ToStatus] {
+		return
+	}
+	s.bus.Publish(events.Event{
+		Type:        EventCRApprovalGateEntered,
+		WorkspaceID: workspaceID,
+		ActorType:   "system",
+		Payload: protocol.ApprovalGateEnteredPayload{
+			CRID:         ev.CRID,
+			Status:       ev.ToStatus,
+			EventID:      ev.CRID + ":" + ev.EventKind + ":" + ev.CommitSHA,
+			ShellIssueID: shellIssueID,
 		},
 	})
 }

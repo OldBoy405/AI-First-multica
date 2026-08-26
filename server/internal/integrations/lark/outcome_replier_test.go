@@ -79,6 +79,7 @@ func (s *stubAPIClientWithRecorder) SendBindingPromptCard(ctx context.Context, p
 	s.bindingCalls = append(s.bindingCalls, p)
 	return nil
 }
+func (s *stubAPIClientWithRecorder) SendApprovalReminderCard(context.Context, ApprovalReminderParams) error { return nil } // AIFIRST: CR-2026-051
 
 func (s *stubAPIClientWithRecorder) GetBotInfo(ctx context.Context, creds InstallationCredentials) (BotInfo, error) {
 	return BotInfo{}, nil

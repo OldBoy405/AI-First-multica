@@ -471,18 +471,32 @@ func (c *httpAPIClient) SendBindingPromptCard(ctx context.Context, p BindingProm
 	if p.BindURL == "" {
 		return errors.New("lark http client: missing bind url")
 	}
+	// AIFIRST: CR-2026-051 FR-9 — the only upstream function-body change in
+	// this CR: the transport segment moved to the shared private helper
+	// sendCardToOpenID (identical for the approval-reminder card). Behavior
+	// equivalence is locked by the unchanged
+	// TestHTTPClient_SendBindingPromptCard_* assertions in http_client_test.go;
+	// if any of them needs editing to pass, the extraction must be rolled back.
 	cardJSON, err := bindingPromptTemplate(p.BindURL)
 	if err != nil {
 		return fmt.Errorf("lark http client: render binding prompt: %w", err)
 	}
-	token, err := c.tenantAccessToken(ctx, p.InstallationID)
+	return c.sendCardToOpenID(ctx, p.InstallationID, p.OpenID, cardJSON, "send binding prompt")
+}
+
+// AIFIRST: CR-2026-051 FR-9 — shared open_id private-chat transport for the
+// binding-prompt and approval-reminder cards (receive_id_type=open_id,
+// msg_type=interactive). op is only the error-message prefix; the assertable
+// error parts (code=<n> msg=...) stay unchanged.
+func (c *httpAPIClient) sendCardToOpenID(ctx context.Context, creds InstallationCredentials, openID OpenID, cardJSON, op string) error {
+	token, err := c.tenantAccessToken(ctx, creds)
 	if err != nil {
 		return err
 	}
 	q := url.Values{}
 	q.Set("receive_id_type", "open_id")
 	body := map[string]string{
-		"receive_id": string(p.OpenID),
+		"receive_id": string(openID),
 		"msg_type":   "interactive",
 		"content":    cardJSON,
 	}
@@ -491,14 +505,14 @@ func (c *httpAPIClient) SendBindingPromptCard(ctx context.Context, p BindingProm
 		Msg  string `json:"msg"`
 	}
 	path := "/open-apis/im/v1/messages?" + q.Encode()
-	if err := c.doJSON(ctx, c.resolveBaseURL(p.InstallationID), http.MethodPost, path, token, body, &resp); err != nil {
-		return fmt.Errorf("lark http client: send binding prompt: %w", err)
+	if err := c.doJSON(ctx, c.resolveBaseURL(creds), http.MethodPost, path, token, body, &resp); err != nil {
+		return fmt.Errorf("lark http client: %s: %w", op, err)
 	}
 	if resp.Code != 0 {
 		if isTokenError(resp.Code) {
-			c.invalidateToken(p.InstallationID.AppID)
+			c.invalidateToken(creds.AppID)
 		}
-		return fmt.Errorf("lark http client: send binding prompt: code=%d msg=%q", resp.Code, resp.Msg)
+		return fmt.Errorf("lark http client: %s: code=%d msg=%q", op, resp.Code, resp.Msg)
 	}
 	return nil
 }
