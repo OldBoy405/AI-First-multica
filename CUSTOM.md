@@ -12,7 +12,7 @@
 grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=*.ts --include=*.tsx --include=*.sql --include=*.mjs | grep -v node_modules
 ```
 
-**基线（2026-08-19 合并后）：172 个文件 / 503 处命中**，其中 `AIFIRST` 字样 106 处、`packages/` 下 2 处（chat-input.tsx 与 inbox-page.tsx 的 CR 溯源注释）。合并后这三个数只能升不能降；降了就是挂钩点被上游覆盖掉了。前端不带标记，靠《前端定制文件清单》一节逐个文件核对。
+**基线（2026-08-26 合并后）：303 个文件 / 1070 处命中**，其中 `AIFIRST` 字样 297 处、`packages/` 下 247 处（chat-input.tsx 与 inbox-page.tsx 的 CR 溯源注释及后续 CR 的 CR-2026-xxx 注释）。合并后这三个数只能升不能降；降了就是挂钩点被上游覆盖掉了。前端不带标记，靠《前端定制文件清单》一节逐个文件核对。
 
 ## 合并冲突总则
 
@@ -56,28 +56,26 @@ grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=
 
 ## 迁移编号冲突（已发生，不是「注意别撞」）
 
-fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全部已被占用**（2026-08-19 合并时上游已排到 361；另 fork 的 265–268 与上游 issue_view 系列撞号）。合并后 fork 迁移已整体顺延为 **362–374**（158→362 … 166→370、265→371 … 268→374），文件已 `git mv` 改名，本机库 `schema_migrations` 已手工改号：
+fork 的 36 个迁移原占 362–397，上游 `upstream/main` 因自身 PR 撞号修复（`18f130a5d`）后**这 36 个号又全部被上游占用**（上游已排到 432；另上游新占 362–371、375–379、382–397 三段）。2026-08-26 合并后 fork 迁移已整体顺延为 **433–468**（362→433 … 397→468），文件已 `git mv` 改名；已部署库须按下方第 3 条手工修 `schema_migrations`。
 
-| 号 | fork | upstream/main |
-|---|---|---|
-| 158 | `158_aifirst_cr_projection` | `158_agent_task_queue_chat_input_task_id` |
-| 159 | `159_project_settings` | `159_chat_message_message_kind` |
-| 160 | `160_issue_origin_project_chat` | `160_chat_message_input_owner_index` |
-| 161 | `161_chat_session_project` | `161_agent_skill_enabled` |
-| 162 | `162_aifirst_pipeline_runs` | `162_resource_labels` |
-| 163 | `163_issue_origin_project_discussion` | `163_agent_builder` |
-| 164 | `164_agent_task_queue_project_id` | `164_attachment_task_id` |
-| 165 | `165_atq_project_active_index` | `165_attachment_task_id_index` |
-| 166 | `166_project_presenter_grant` | `166_project_dates` |
+**合并口径**：fork 的 36 个整体顺延到上游末位之后（433 起，保持相对顺序不变）。注意四件事：
 
-**合并口径**：fork 的 13 个整体顺延到上游末位之后（362 起，保持相对顺序不变）。注意三件事：
+1. **`435` / `438`（原 364/367）必须保持相对先后，且 CHECK 枚举必须并上游**——两者都用 `DROP CONSTRAINT + ADD CONSTRAINT` 重写 `issue_origin_type_check`。上游 366/367 新增了 `telegram_chat` 枚举值，重编号时已把 `telegram_chat` 并进 435 的八值集合与 438 的九值集合，否则会把上游新 origin_type 静默删掉。
+2. **`440`（原 165/369）是 `CREATE INDEX CONCURRENTLY` 单语句迁移**，不能与别的语句合并进同一文件（迁移器限制，见上游 068）。
+3. **已应用的库要手工修 `schema_migrations`**——重编号不是改个文件名就完事：已部署环境按旧号记过版本，直接改名会导致新号重跑（`IF NOT EXISTS` 大多幂等，但建表迁移不是）或旧号残留。重编号后对每个已存在的库核对一次版本表（fork 行 362–397 → 433–468；上游同名号迁移如 `362_plugin_hook_engine` 必须保留原号）。
+4. **上游 214/215 已收编 `chat_session.project_id` 列**（软引用，无 FK；`214_chat_session_project` + `215_chat_session_project_index`，上游还建了同名 `idx_chat_session_project` 单列索引）。fork 的 161 顺延为 365、再顺延为 436 时**改写**：不再建列，只补 fork 语义依赖的三件套——FK（`chat_session_project_fk`，fork 保留硬引用）、复合查找索引（改名 `idx_chat_session_project_creator` 避让上游同名索引）、active 唯一索引（`chat_session_project_creator_active_unique`，get-or-create 并发收敛的锁）。
 
-1. **`160` / `163` 必须保持相对先后**——两者都用 `DROP CONSTRAINT + ADD CONSTRAINT` 重写 `issue_origin_type_check` 的整张枚举表。上游若也动了这个 CHECK，重编号后要把**上游的枚举值并进来**再加 `project_chat` / `project_discussion`，否则会把上游新 origin_type 静默删掉。
-2. **`165` 是 `CREATE INDEX CONCURRENTLY` 单语句迁移**，不能与别的语句合并进同一文件（迁移器限制，见上游 068）。
-3. **已应用的库要手工修 `schema_migrations`**——重编号不是改个文件名就完事：已部署环境按旧号记过版本，直接改名会导致新号重跑（`IF NOT EXISTS` 大多幂等，但 158/162 建表不是）或旧号残留。重编号后对每个已存在的库核对一次版本表。本机库 2026-08-19 已执行（`schema_migrations.version` 旧号→新号，注意只改 fork 行：上游同名号迁移如 `162_resource_labels` 必须保留原号）。
-4. **上游 214/215 已收编 `chat_session.project_id` 列**（软引用，无 FK；`214_chat_session_project` + `215_chat_session_project_index`，上游还建了同名 `idx_chat_session_project` 单列索引）。fork 的 161 顺延为 365 时**改写**：不再建列，只补 fork 语义依赖的三件套——FK（`chat_session_project_fk`，fork 保留硬引用）、复合查找索引（改名 `idx_chat_session_project_creator` 避让上游同名索引）、active 唯一索引（`chat_session_project_creator_active_unique`，get-or-create 并发收敛的锁）。
+**顺延映射（2026-08-26）**：
 
-历史先例：CR-2026-010 的三个迁移在 worktree 里原编号 161–163，合并进 main 时因与 CR-008/009 已占用的号撞上而顺延为 164–166——顺延本身是走通过的流程，不是新发明。
+| 段 | fork 原号 → 新号 |
+|---|---|
+| 治理投影（CR-2026-002/010） | 362→433、363→434、364→435、365→436、366→437、367→438、368→439、369→440、370→441 |
+| Runner 唯一索引（CR-2026-045） | 371→442、372→443、373→444、374→445 |
+| 成熟度（CR-2026-047） | 375→446、376→447、377→448、378→449、379→450 |
+| Skill Market（CR-2026-048） | 380→451、381→452、382→453、383→454、384→455 |
+| 租户隔离（CR-2026-049） | 385→456、386→457、387→458、388→459、389→460、390→461、391→462、392→463、393→464、394→465、395→466、396→467、397→468 |
+
+历史先例：CR-2026-010 的三个迁移在 worktree 里原编号 161–163，合并进 main 时因与 CR-008/009 已占用的号撞上而顺延为 164–166；2026-08-19 又整体顺延 362–374——顺延本身是走通过的流程，不是新发明。
 
 ## 前端定制文件清单（`packages/`，无 `AIFIRST` 标记，靠本清单核对）
 
@@ -113,6 +111,7 @@ fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全�
 
 | 日期 | 对齐 | 冲突要点 |
 |---|---|---|
+| 2026-08-26 | `upstream/main` @ `09a2410e8`（167 个提交，第三次同步） | 24 个冲突文件。核心：① **迁移再次全量撞号**：上游 PR 撞号修复（`18f130a5d`）后自身已占满 362–397（plugin/dingtalk/seat_capacity/telegram 三段），fork 36 个迁移整体顺延 **433–468**（见《迁移编号冲突》）；上游 366/367 新增 `telegram_chat` origin_type，fork 的 CHECK 整表重写（原 364/367→435/438）与 forward repair（原 373/374→444/445）已并入该枚举（现完整十值）。② `agent.sql`/`autopilot.sql`/`chat.sql` 取并集：上游新增应用铸 UUIDv7 `id` 列、`channel_context_revision`、quick-create 手工重试两查询；fork 的 `project_id`/`cr_id`/`pipeline_node_run_id`/`chat_session_id` 列与 `CreatePipelineTask`/`GetActivePipelineTask`/`GetProjectChatSessionForCreator` 保留。③ 生成物丢弃冲突重跑 sqlc v1.31.1。④ 上游收编式重构：`ReportTaskMessages` 改批量 `CreateTaskMessages`（fork 的 per-user 投递 `ChatSessionID/ChatRecipientID` 贴回发布循环，CR-2026-008 隐私锁）；chat claim 改 `resolveClaimProjectContext` + channel_task_delivery 快照（fork 的 `AskOnly = cs.ProjectID.Valid` 与 Discussion 容器 ask-only 贴回）；`CreateAgentTask`/`CreateDeferredAgentTask` 增 `ID: dbid.NewV7()`（fork 的 `project_id` stamp 保留）；`publishChat`/`CompleteTask` 增参（fork 调用点适配）；issue-window entitlement 门禁与 pipeline hydration 并存。⑤ 前端：`chat-input.test.tsx` 上游新增 revoked-placeholder describe、fork adapter-isolation describe 完整保留（5 项隔离锁）；`use-chat-controller.test.tsx` 双 describe 并集；`ws-updaters.ts` 采用上游 helper 化重构（fork 语义等价）；react-query 升级使 fork 的 drift-page infinite query 改为显式 `queryFn(pageParam)`。验证：Go build/vet 全绿，gitguard 3 项、cmd/migrate 全包（含 TestEveryConcurrentUpBuildHasCleanup）、cmd/server RegisterListeners、governance 契约测试、service 纯函数测试全绿；TS 7 包 typecheck 全绿；chat-input 54 项、use-chat-controller+inbox 156 项、core api/issues 685 项全绿。 |
 | 2026-08-19 | `upstream/main` @ `b4137fc5b`（258 个提交，第二次同步） | 24 个冲突文件（2026-08-07 的 52 个减半）。核心：① 上游把 repo-checkout 认证从 body `auth_token` 改为 `Authorization: Bearer`（新 `registerActiveRepoCheckoutTask` 机制），fork 的 `activeTaskAuth` 任务身份校验保留并适配 header 回落（`health.go`）；`cmd_repo.go` 随上游改发 header。② 迁移全量顺延 362–374（见《迁移编号冲突》），`160/163` 的 CHECK 并上游 dingtalk/wecom 枚举；`161` 因上游 214/215 收编列而改写为纯约束补丁。③ `agent.sql` 冲突取并集：上游 `WHERE lock_task_owner_rows` 防 workspace-teardown 围栏与 fork 的 `project_id` 归因并存。④ 上游 API 变更适配 fork 代码：`DeleteComment` 返 `(DeleteCommentRow, error)`（新增 `commentFromCreateRow` 适配器）、`publishTaskEvent`/`publishChat` 增参、`DiscussionComposer.submitComment` 签名收窄、上游 `agent_task_queue_accountable_matches_originator(_strict)` CHECK 使 fork 测试 fixture 补 `accountable_user_id`、`hermesLaunchArgs` 被上游 hermesOverlay 机制吸收。⑤ 前端 `chat-input.test.tsx` 冲突重组：上游 focus describe 保留，fork adapter-isolation describe 完整贴回（含 spy 化 mock 与 `mockClear` 钩子）。⑥ `pnpm-lock.yaml` 由 pnpm 重解析（lockfile-only）。验证：Go 全量 build/vet 绿，governance/service/handler/daemon 定向套件全绿（含此前已知失败的 `TestTransitionTableShape`，断言已更新为 50）；TS 9 包 typecheck 全绿，chat-input 49 项、projects 九套件 118 项、core 135 项全绿。 |
 | 2026-08-07 | `upstream/main` @ `c7a8b1699`（608 个提交，fork 首次同步上游） | 52 个冲突文件。① `chat-input.tsx`：上游重写为受控值 + 协同上传 composer（新增 ProjectPicker/`uploadEnabled`/`allowSubmitWhileRunning`/`draftKeyOverride`）；按总则以上游为基底，把二开 `ChatInputCore` + `ChatInputDraftAdapter`（CR-2026-012 DD-9/FR-8）追加保留在文件尾部，上游组件补回二开 `mentionItemTypes`、`onUploadFile`、`onRestoreDraftConsumed` 兼容 prop；废弃二开旧全局 wrapper `useGlobalChatDraftAdapter`（被上游 composer 取代）。② `agent.sql`/`chat.sql`：上游 attribution 列组与二开 `cr_id`/`pipeline_node_run_id`/`project_id` 取并集；生成物按总则丢弃冲突块重跑 `sqlc generate`。③ `service/task.go`（9 块）：上游 attribution 体系为基底，二开项目队列门禁/抑制抢占/Private Ask 投递贴回；`taskEvent` 上游改为方法，二开 `task_failure_event_test.go` 适配并强化 `ChatRecipientID` 断言。④ `router.go`：保留上游新增 VCS webhook 路由，Stripe 摘除（#1 减法定制）在新基底重新摘除。⑤ `computeCommentAgentTriggers` 上游改双返回值，二开 4 个测试文件 16 处调用点适配。⑥ daemon 层快照上报/`crevents.go` 挂钩按上游新事件结构贴回。验证：TS 五包 typecheck 全绿；core 1375 项、views chat/projects 定向套件全过；Go build/vet 绿，handler/service/governance/events/vcs/channel 等合并相关包全过，剩余失败见《已知测试失败基线》 |
 
@@ -276,6 +275,8 @@ fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全�
 |---|---|---|---|---|---|
 | 38 | 第二次上游合并的 fork 侧适配（无单一 CR 归属）：`internal/daemon/health.go`（activeTaskAuth 校验增加 `Authorization` header 回落）、`health_test.go`（fork 测试适配 bearer 注册机制 + Windows 路径 `filepath.ToSlash`）、`cmd/multica/cmd_repo.go`（body `auth_token` 字段随上游移除）、`internal/service/{discussion_coordinator,project_chat}.go`（`commentFromCreateRow` 适配 sqlc 新返回行）、`task.go`/`mika_onboarding.go`（`publishTaskEvent`/`publishChat` 增参）、`cancel_task_by_user_test.go`/`project_queue_capacity_test.go`（fixture 补 `accountable_user_id` 满足上游 strict CHECK）、迁移 362–374 顺延与 `364/367` CHECK 并枚举、前端 `chat-input.test.tsx`（adapter-isolation describe 重组 + spy mock）、`discussion-pane.tsx`（submitComment 签名适配） | 上游 258 提交合并（`b4137fc5b`）。合并总则适配：上游改签名则跟改、上游收编则改写（161→365）、上游新约束则 fixture 补列 | 2026-08-19 | 下次合并前对照本行复核：上游再改 checkout 认证协议时重贴 `health.go` 回落；上游再改 `agent_task_queue` 归因约束时复核 fork fixture；`commentFromCreateRow` 随 sqlc 行结构同步。验证：`go test ./internal/daemon/ -run 'RepoCheckout'`、`go test ./internal/handler/ -run 'CancelTaskByUser|ProjectQueueCapacity'`、`pnpm -C packages/views vitest run chat/components/chat-input.test.tsx` |
 
+> **第三次合并（2026-08-26）适配已在合并记录摘要内**，未单开行：适配点全部是「上游改签名则跟改」类（`publishChat`/`CompleteTask` 增参、chat claim 重构贴回 `AskOnly`/Discussion ask-only、`ReportTaskMessages` 批量化后 per-user 投递贴回、`ws-updaters` helper 化、react-query infinite 适配）。下次合并前对照 2026-08-26 摘要逐项复核。
+
 ## 纯配置约定（无代码改动，部署时执行）
 
 | # | 项 | 口径 | 原因 |
@@ -306,6 +307,7 @@ fork 的 9 个迁移原占 158–166，上游 `upstream/main` **这 9 个号全�
 | `views/autopilots/components/autopilot-dialog.validation.test.tsx` | 资源性 flake | 全量并行跑偶发失败，单独复跑稳定通过（2026-08-07 已复验） | 2026-08-19 |
 | `internal/integrations/ghsnapshot` `TestInFlightOldHeadKeepsTrailingRefresh` | 时序 flaky | 上游 refresh 并发竞态（日志 `closed pool`/`stop after fetch`）；本机复现 2 次，文件属上游 `ecce58986`（MUL-5265），与 fork 改动无关（CR-2026-049 全量时观察，已缩测试集） | 2026-08-19 |
 | `views/projects/components/project-detail.test.tsx` 「project deletion」2 项 | fork 测试 mock 缺口 | CR-2026-004/007 新增 `projectQueueStatusOptions` 未补进该测试的 `vi.mock`，报 `No "projectQueueStatusOptions" export`；属早前 CR 夹具收尾，非本 CR 引入 | 2026-08-19 |
+| `internal/daemon/execenv`：`TestPrepareCodexHomeFailsClosedWhenSandboxWriteFails` / `TestPrepareLocalWorktree*` / `TestPrepareHermesHome*` / `TestOpenclaw*` 等约 20 项 | 上游 Windows 环境假设 | 上游 MUL-6686/6518/6491 新测试（本次合并带入）：写块探测依赖 `GetFileAttributesEx` 存在性语义、worktree/Codex-home 路径操作，Windows 下与预期相反（如 sandbox 写失败本应 fail-closed 却返回 nil）。fork 的 execenv AIFIRST 代码在 `crguard_config.go` 等独立文件，与此无关；`pkg/gitguard` 三关键项（`TestCheckTable`/`TestRealRulesLoadUnderRE2`/`TestFromEnvSemantics`）全绿 | 2026-08-26 |
 
 ## 未做（防止误以为已做）
 
