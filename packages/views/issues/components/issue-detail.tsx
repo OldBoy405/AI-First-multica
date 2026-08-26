@@ -78,6 +78,7 @@ import { SubIssuesAgentWorkingChip } from "./sub-issues-agent-working-chip";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
 import { CommentCard } from "./comment-card";
+import { SourceContextBadge } from "./source-context-viewer";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
 import { CommentInput } from "./comment-input";
 import { CurrentIssueRenderContextProvider } from "../current-issue-render-context";
@@ -99,6 +100,7 @@ import { useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useRecentContextStore } from "@multica/core/chat";
+import { useModalStore } from "@multica/core/modals";
 import { issueListOptions, issueDetailOptions, childIssuesOptions, childIssueProgressOptions, issueAttachmentsOptions } from "@multica/core/issues/queries";
 import { projectDetailOptions } from "@multica/core/projects/queries";
 import { ProjectIcon } from "../../projects/components/project-icon";
@@ -143,6 +145,7 @@ import {
   getAnimatedRightSidebarInitialOpen,
   rightSidebarPanelMotionProps,
   useAnimatedRightSidebarState,
+  useRightSidebarShortcut,
 } from "../../layout/animated-right-sidebar";
 
 /**
@@ -532,6 +535,7 @@ function ActivityBlock({
   getActorName,
   resolveStatusLabel,
   resolveStatusCategory,
+  resolveStatusColor,
   t,
   timeAgo,
 }: {
@@ -547,6 +551,8 @@ function ActivityBlock({
   getActorName: (type: string, id: string) => string;
   resolveStatusLabel: (statusKey: string) => string;
   resolveStatusCategory: (statusKey: string) => IssueStatusCategory;
+  /** A custom status's own `#rrggbb`; null for built-ins and unknown keys. */
+  resolveStatusColor: (statusKey: string) => string | null;
   t: ActivityT;
   timeAgo: (dateStr: string) => string;
 }) {
@@ -613,6 +619,7 @@ function ActivityBlock({
             <StatusIcon
               status={details.to as IssueStatus}
               category={resolveStatusCategory(details.to ?? "")}
+              color={resolveStatusColor(details.to ?? "")}
               className="h-4 w-4 shrink-0"
             />
           );
@@ -1119,6 +1126,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const id = issueId;
   const user = useAuthStore((s) => s.user);
   const paths = useWorkspacePaths();
+  const openModal = useModalStore((state) => state.open);
 
   // Issue navigation — read from TQ list cache
   const wsId = useWorkspaceId();
@@ -1134,7 +1142,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const { data: allIssues = [] } = useQuery(issueListOptions(wsId));
   const { getActorName } = useActorName();
   const resolveStatusLabel = useStatusLabel(wsId);
-  const { categoryOf: resolveStatusCategory } = useIssueStatuses(wsId);
+  // The glyph set is per CATEGORY (MUL-6243), so a status-change entry for a
+  // custom status drew the same icon as the built-in it sits beside — an
+  // "In Review → Awaiting Response" line looked like nothing had moved. Colour
+  // is what carries a custom status's own identity, as the inbox row and the
+  // status-changed detail label already render it. `colorOf` is what keeps a
+  // built-in on its semantic token instead of the catalog's seed hex.
+  const { categoryOf: resolveStatusCategory, colorOf: resolveStatusColor } =
+    useIssueStatuses(wsId);
   // Description autosave is deliberately NOT gated (no explicit submit; the
   // editor already strips `blob:` before serializing and binds ids on the
   // later save). It still needs the failure toast, or a failed upload just
@@ -1230,8 +1245,10 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const consumedHighlightRef = useRef(consumedHighlightId);
   consumedHighlightRef.current = consumedHighlightId;
   const writeViewState = useViewStateWriter();
+  const rightSidebarShortcutTargetRef = useRef<HTMLDivElement | null>(null);
   const attachScrollContainer = useCallback(
     (el: HTMLDivElement | null) => {
+      rightSidebarShortcutTargetRef.current = el;
       setScrollContainerEl(el);
       restoreScrollRef(el);
     },
@@ -1325,13 +1342,31 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // Issue data from TQ — uses detail query, seeded from list cache if available.
   // Only seed when description is present; the list API omits it, so a partial
   // list row must not masquerade as a hydrated issue detail.
-  const { data: issue = null, isLoading: issueLoading } = useQuery({
+  const { data: issue = null, isLoading: issueLoading, refetch: refetchIssue } = useQuery({
     ...issueDetailOptions(wsId, id),
+    // List rows and issue-created realtime payloads intentionally omit the
+    // detail-only source-context snapshot. They can still seed this query via
+    // initialData, so always reconcile with the authoritative detail endpoint
+    // when the detail view mounts. Without this, the global Infinity staleTime
+    // hides source context until a full page refresh.
+    refetchOnMount: "always",
     initialData: () => {
       const cached = allIssues.find((i) => i.id === id);
       return cached?.description != null ? cached : undefined;
     },
   });
+  const openCommentSubIssue = useCallback((commentId: string) => {
+    if (!issue) return;
+    openModal("quick-create-issue", {
+      anchor_comment_id: commentId,
+      parent_issue_id: issue.id,
+      parent_issue_identifier: issue.identifier,
+      ...(issue.project_id ? { project_id: issue.project_id } : {}),
+      ...(issue.assignee_type && issue.assignee_id
+        ? { assignee_type: issue.assignee_type, assignee_id: issue.assignee_id }
+        : {}),
+    });
+  }, [issue, openModal]);
 
   // Record recent visit
   const recordVisit = useRecentIssuesStore((s) => s.recordVisit);
@@ -2195,6 +2230,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     });
   }, [beginDesktopSidebarToggle, isMobile, sidebarRef]);
 
+  useRightSidebarShortcut(rightSidebarShortcutTargetRef, handleToggleSidebar);
+
   useIssueDetailScrollRestore({
     restoreKey: `${wsId}:${id}`,
     scrollContainerEl,
@@ -2649,6 +2686,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             onEdit={editComment}
             onDelete={deleteComment}
             onToggleReaction={handleToggleReaction}
+            onCreateSubIssue={openCommentSubIssue}
             onResolveToggle={handleResolveToggle}
             onCollapseResolved={isResolved ? () => toggleResolvedExpand(item.id, false) : undefined}
             expandedResolvedIds={expandedResolved}
@@ -2677,6 +2715,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
         getActorName={getActorName}
         resolveStatusLabel={resolveStatusLabel}
         resolveStatusCategory={resolveStatusCategory}
+        resolveStatusColor={resolveStatusColor}
         t={t}
         timeAgo={timeAgo}
       />
@@ -2965,7 +3004,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             />
           ) : null}
 
-          {parentIssue && (
+          {parentIssue && !issue.source_context && (
             <AppLink
               href={paths.issueDetail(parentIssue.id)}
               className="mt-2 inline-flex max-w-full items-center gap-1.5 text-caption text-muted-foreground hover:text-foreground transition-colors group/parent"
@@ -2992,6 +3031,23 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 );
               })()}
             </AppLink>
+          )}
+
+          {issue.source_context && (
+            <SourceContextBadge
+              context={issue.source_context}
+              parentIssue={parentIssue}
+              parentProgress={parentChildIssues.length > 0
+                ? {
+                    done: parentChildIssues.filter((child) => issueBehavesAs(child, "done")).length,
+                    total: parentChildIssues.length,
+                  }
+                : undefined}
+              refetchIssue={async () => {
+                const result = await refetchIssue();
+                return result.isError ? null : result.data;
+              }}
+            />
           )}
 
           <div

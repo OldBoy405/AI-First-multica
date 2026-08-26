@@ -134,15 +134,27 @@ SELECT id FROM issue
 WHERE id = $1 AND workspace_id = $2
 FOR UPDATE;
 
+-- name: DetachDirectChildIssues :many
+UPDATE issue
+SET parent_issue_id = NULL,
+    stage = NULL,
+    revision = revision + 1,
+    updated_at = now(),
+    last_activity_at = GREATEST(COALESCE(last_activity_at, updated_at), now())
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND parent_issue_id = sqlc.arg(parent_issue_id)
+  AND NOT COALESCE(id = ANY(sqlc.arg(excluded_issue_ids)::uuid[]), false)
+RETURNING *;
+
 -- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    stage, last_activity_at
+    stage, last_activity_at, id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('stage'), now()
+    sqlc.narg('stage'), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 ) RETURNING *;
 
 -- name: GetIssueByNumber :one
@@ -159,7 +171,34 @@ WITH candidate AS (
         COALESCE(sqlc.narg('priority')::text, i.priority) AS next_priority,
         sqlc.narg('assignee_type')::text AS next_assignee_type,
         sqlc.narg('assignee_id')::uuid AS next_assignee_id,
-        COALESCE(sqlc.narg('position')::double precision, i.position) AS next_position,
+        CASE
+            -- An explicit position wins. Cross-column drag-and-drop sends
+            -- status and position together and means the slot it dropped on.
+            WHEN sqlc.narg('position')::double precision IS NOT NULL
+                THEN sqlc.narg('position')::double precision
+            -- position ranks an issue *within* its (workspace, status)
+            -- column, so it stops meaning anything the moment the column
+            -- changes: the value that put the issue on top of Todo lands it
+            -- below every hand-dragged issue in Done. Re-rank to the top of
+            -- the destination, the same policy new issues get from
+            -- NextTopPosition. Keep the two in sync.
+            --
+            -- Two status changes running at once can read the same MIN and
+            -- claim one slot. Every position-ordered query carries a unique
+            -- final key (created_at DESC, id DESC), so a tie leaves the
+            -- relative order of simultaneous moves arbitrary but never
+            -- unstable across pages. Creation avoids the tie by computing its
+            -- min under the workspace counter lock; a status change holds no
+            -- such lock and is not worth taking one for.
+            WHEN i.status IS DISTINCT FROM COALESCE(sqlc.narg('status')::text, i.status)
+                THEN (
+                    SELECT COALESCE(MIN(target.position), 0) - 1
+                    FROM issue AS target
+                    WHERE target.workspace_id = i.workspace_id
+                      AND target.status = sqlc.narg('status')::text
+                )
+            ELSE i.position
+        END AS next_position,
         sqlc.narg('start_date')::date AS next_start_date,
         sqlc.narg('due_date')::date AS next_due_date,
         sqlc.narg('parent_issue_id')::uuid AS next_parent_issue_id,
@@ -210,19 +249,34 @@ UPDATE issue AS i SET
     updated_at = CASE WHEN changed.did_change THEN now() ELSE i.updated_at END
 FROM changed
 WHERE i.id = changed.id
+  -- Re-check the precondition on the row version that UPDATE actually locks.
+  -- Under READ COMMITTED, concurrent statements may both populate candidate
+  -- from the same snapshot; EvalPlanQual re-evaluates this target-row predicate
+  -- after waiting for the first writer, leaving the stale writer with 0 rows.
+  AND (sqlc.narg('expected_revision')::bigint IS NULL OR i.revision = sqlc.narg('expected_revision')::bigint)
 RETURNING i.*;
 
 -- name: UpdateIssueStatus :one
 -- Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
-UPDATE issue SET
+-- Repositioning lives here rather than in the callers (GitHub sync, agent task
+-- completion) so a status write cannot land without one: an issue carrying its
+-- old column's rank into a new column is the bug this guards against. See the
+-- next_position CASE in UpdateIssue for the policy.
+UPDATE issue AS i SET
     status = $2,
-    revision = revision + CASE WHEN status IS DISTINCT FROM $2 THEN 1 ELSE 0 END,
-    last_activity_at = CASE WHEN status IS DISTINCT FROM $2
-        THEN GREATEST(COALESCE(last_activity_at, updated_at), now())
-        ELSE last_activity_at
+    position = CASE WHEN i.status IS DISTINCT FROM $2 THEN (
+        SELECT COALESCE(MIN(target.position), 0) - 1
+        FROM issue AS target
+        WHERE target.workspace_id = i.workspace_id
+          AND target.status = $2
+    ) ELSE i.position END,
+    revision = i.revision + CASE WHEN i.status IS DISTINCT FROM $2 THEN 1 ELSE 0 END,
+    last_activity_at = CASE WHEN i.status IS DISTINCT FROM $2
+        THEN GREATEST(COALESCE(i.last_activity_at, i.updated_at), now())
+        ELSE i.last_activity_at
     END,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE i.id = $1 AND i.workspace_id = $3
 RETURNING *;
 
 -- name: CreateIssueWithOrigin :one
@@ -230,10 +284,10 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    origin_type, origin_id, stage, last_activity_at
+    origin_type, origin_id, stage, last_activity_at, id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), now()
+    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 ) RETURNING *;
 
 -- name: LockIssueDuplicateKey :exec
@@ -314,9 +368,11 @@ WHERE i.workspace_id = $1
   AND (sqlc.narg('metadata_filter')::jsonb IS NULL OR i.metadata @> sqlc.narg('metadata_filter')::jsonb)
   -- properties_filter is a jsonb array of groups, each group an array of
   -- containment patterns (built by parsePropertiesFilterParam): the issue
-  -- must match at least one pattern from EVERY group (AND of ORs). The
-  -- correlated form skips the GIN index, which is fine here: open_only is
-  -- an unpaginated workspace scan already narrowed by status.
+  -- must match at least one pattern from EVERY group (AND of ORs). A pattern
+  -- of the shape {"__none__": "<definitionId>"} is the "no value" marker and
+  -- matches when the issue's properties are missing that key. The correlated
+  -- form skips the GIN index, which is fine here: open_only is an
+  -- unpaginated workspace scan already narrowed by status.
   AND (
     sqlc.narg('properties_filter')::jsonb IS NULL
     OR NOT EXISTS (
@@ -325,7 +381,8 @@ WHERE i.workspace_id = $1
       WHERE NOT EXISTS (
         SELECT 1
         FROM jsonb_array_elements(pf.alternatives) AS alt(pattern)
-        WHERE i.properties @> alt.pattern
+        WHERE (alt.pattern ? '__none__' AND NOT (i.properties ? (alt.pattern ->> '__none__')))
+           OR (NOT (alt.pattern ? '__none__') AND i.properties @> alt.pattern)
       )
     )
   )

@@ -1,4 +1,4 @@
-export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction } from "./issue";
+export type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction, SourceContextAttachment, SourceContextAuthor, SourceContextIssueSnapshot, SourceContextCommentSnapshot, SourceContextSnapshot, SourceContextLimitUsage, SourceContextPreview, SourceContextAuthorState, IssueSourceContext } from "./issue";
 export type {
   IssueStatusCategory,
   IssueStatusEntry,
@@ -8,6 +8,7 @@ export type {
 } from "./issue-status";
 export type {
   Agent,
+  AgentConversationStarter,
   AgentStatus,
   AgentRuntimeMode,
   AgentVisibility,
@@ -102,10 +103,18 @@ export type {
   PluginResource,
   PluginInstallationListResponse,
   PluginManifestSummary,
+  PluginPackage,
+  PluginPackageVersion,
+  PluginPackageListResponse,
+  PluginSurfaceLaunch,
   PluginPreview,
   PluginPreviewRequest,
   PluginInstallRequest,
   PluginConfigRequest,
+  PluginHookResult,
+  PluginInvocation,
+  PluginMCPTool,
+  PluginTokenIssue,
 } from "./plugin";
 export type { InboxItem, InboxSeverity, InboxItemType, InboxWorkspaceUnread } from "./inbox";
 export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
@@ -223,12 +232,13 @@ export type {
 } from "./slack";
 export type {
   DingTalkInstallation,
-  DingTalkGroupRoute,
   ListDingTalkInstallationsResponse,
-  ListDingTalkGroupRoutesResponse,
+  DingTalkGroupBot,
+  DingTalkGroup,
+  ListDingTalkGroupsResponse,
+  ListDingTalkGroupsParams,
   RegisterDingTalkBYORequest,
   RedeemDingTalkBindingTokenResponse,
-  UpdateDingTalkGroupRouteRequest,
 } from "./dingtalk";
 export type {
   WecomInstallation,
@@ -236,6 +246,12 @@ export type {
   RegisterWecomBYORequest,
   RedeemWecomBindingTokenResponse,
 } from "./wecom";
+export type {
+  TelegramInstallation,
+  ListTelegramInstallationsResponse,
+  RegisterTelegramRequest,
+  RedeemTelegramBindingTokenResponse,
+} from "./telegram";
 export type {
   Autopilot,
   AutopilotStatus,
@@ -303,10 +319,16 @@ export type {
   WorkspaceSubscriptionInterval,
   WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  WorkspaceSeatCapacity,
+  WorkspaceSeatPurchaseSummary,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutRequest,
   CreateWorkspaceSubscriptionCheckoutResponse,
+  PreviewWorkspaceSeatPurchaseRequest,
+  WorkspaceSeatPurchasePreview,
+  PurchaseWorkspaceSeatsRequest,
+  PurchaseWorkspaceSeatsResponse,
   WorkspaceSubscriptionSeatReconcileResult,
   CreateWorkspaceSubscriptionPortalResponse,
 } from "./billing";

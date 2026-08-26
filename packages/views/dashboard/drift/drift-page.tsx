@@ -10,7 +10,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core";
 import { api } from "@multica/core/api";
-import { driftOverviewOptions, driftFindingsOptions, driftKeys } from "@multica/core/drift/queries";
+import { driftOverviewOptions, driftKeys } from "@multica/core/drift/queries";
 import type { DriftFinding, DriftFindingStatus, DriftScanHealth } from "@multica/core/types";
 
 const noDriftLabel = "无漂移";
@@ -90,9 +90,12 @@ export function DriftFindingsList({ status, kind }: { status?: string; kind?: st
   const queryClient = useQueryClient();
   const params = useMemo(() => ({ status, kind, limit: 20 }), [status, kind]);
   const pages = useInfiniteQuery({
-    ...driftFindingsOptions(wsId, params),
+    queryKey: driftKeys.findings(wsId, params),
+    queryFn: ({ pageParam }) =>
+      api.listDriftFindings(wsId, { ...params, cursor: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor ?? undefined,
+    staleTime: 60 * 1000,
   });
   const findings = pages.data?.pages.flatMap((p) => p.findings) ?? [];
   const onPatch = useCallback(

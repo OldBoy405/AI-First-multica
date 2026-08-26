@@ -2,7 +2,8 @@ import { forwardRef, useEffect, useRef, useState, useImperativeHandle } from "re
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { Issue, Label, TimelineEntry } from "@multica/core/types";
+import type { Issue, IssueStatusEntry, Label, TimelineEntry } from "@multica/core/types";
+import { issueStatusKeys } from "@multica/core/issue-statuses";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { toast } from "sonner";
 import { useResolvedExpandStore } from "@multica/core/issues/stores/resolved-expand-store";
@@ -495,10 +496,14 @@ beforeEach(() => {
 });
 
 // Mock modals
+const mockOpenModal = vi.hoisted(() => vi.fn());
 vi.mock("@multica/core/modals", () => ({
   useModalStore: Object.assign(
-    () => ({ open: vi.fn() }),
-    { getState: () => ({ open: vi.fn() }) },
+    (selector?: (state: { open: typeof mockOpenModal }) => unknown) => {
+      const state = { open: mockOpenModal };
+      return selector ? selector(state) : state;
+    },
+    { getState: () => ({ open: mockOpenModal }) },
   ),
 }));
 
@@ -615,6 +620,28 @@ function renderIssueDetail(issueId = "issue-1") {
   );
 }
 
+/**
+ * Renders with the workspace status catalog already in cache, so custom
+ * statuses resolve to their real name, category and color. Seeding the query
+ * (rather than stubbing the hook) keeps the shipped resolvers in the path; the
+ * generous staleTime on the catalog query means it is never refetched. Every
+ * other test runs without it — the cold-catalog case. (MUL-6243)
+ */
+function renderIssueDetailWithStatusCatalog(
+  entries: IssueStatusEntry[],
+  issueId = "issue-1",
+) {
+  const queryClient = createTestQueryClient();
+  queryClient.setQueryData(issueStatusKeys.list("ws-1"), { statuses: entries });
+  return render(
+    <I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={queryClient}>
+        <IssueDetail issueId={issueId} />
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+}
+
 function renderIssueDetailWithHighlight(
   highlightCommentId: string,
   issueId = "issue-1",
@@ -687,6 +714,56 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.getProject.mockReset();
   });
 
+  it("opens source-context creation from both a root comment and a reply", async () => {
+    mockApiObj.listTimeline.mockResolvedValue([
+      { ...mockTimeline[0], id: "source-root", parent_id: null },
+      { ...mockTimeline[1], id: "source-reply", parent_id: "source-root" },
+    ]);
+    const { container } = renderIssueDetail();
+    await screen.findByText("Started working on this");
+
+    const menuButton = (commentId: string) => Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-label="Comment actions"]'),
+    )
+      .find((button): button is HTMLButtonElement => button?.closest("[id^='comment-']")?.id === `comment-${commentId}`);
+    await waitFor(() => expect(menuButton("source-root")).toBeTruthy());
+    await waitFor(() => expect(menuButton("source-reply")).toBeTruthy());
+
+    fireEvent.click(menuButton("source-root")!);
+    const branchAction = await screen.findByText("Create sub-issue from here");
+    expect(branchAction.closest('[role="menuitem"]')?.querySelector(".lucide-message-square-plus")).toBeInTheDocument();
+    fireEvent.click(branchAction);
+    expect(mockOpenModal).toHaveBeenLastCalledWith("quick-create-issue", expect.objectContaining({
+      anchor_comment_id: "source-root",
+      parent_issue_id: "issue-1",
+    }));
+
+    fireEvent.click(menuButton("source-reply")!);
+    fireEvent.click(await screen.findByText("Create sub-issue from here"));
+    expect(mockOpenModal).toHaveBeenLastCalledWith("quick-create-issue", expect.objectContaining({
+      anchor_comment_id: "source-reply",
+      parent_issue_id: "issue-1",
+    }));
+  });
+
+  it("does not offer source-context creation for system comments", async () => {
+    mockApiObj.listTimeline.mockResolvedValue([{
+      ...mockTimeline[0],
+      id: "system-comment",
+      comment_type: "system",
+    }]);
+    const { container } = renderIssueDetail();
+    await screen.findByText("Started working on this");
+
+    const menuButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-label="Comment actions"]'),
+    ).find((button) => button.closest("[id^='comment-']")?.id === "comment-system-comment");
+    expect(menuButton).toBeTruthy();
+    fireEvent.click(menuButton!);
+
+    expect(screen.queryByText("Create sub-issue from here")).not.toBeInTheDocument();
+  });
+
   it("shows loading skeleton while data is loading", () => {
     // Make the API hang to keep loading state
     mockApiObj.getIssue.mockReturnValue(new Promise(() => {}));
@@ -750,6 +827,102 @@ describe("IssueDetail (shared)", () => {
     expect(screen.queryByTestId("title-editor")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("rich-text-editor")).toHaveLength(1);
     expect(contentEditorMounts.count).toBe(1);
+  });
+
+  it("reconciles a cached list snapshot so source context appears on first entry", async () => {
+    const sourceContext: NonNullable<Issue["source_context"]> = {
+      id: "context-1",
+      version: 1,
+      usage: "read_only_historical_background",
+      captured_at: "2026-08-21T12:00:00Z",
+      display_state: "unchanged",
+      source_issue_state: "unchanged",
+      comment_thread_state: "unchanged",
+      anchor_comment_state: "available",
+      can_open_current_source: true,
+      current_source: {
+        issue_id: "source-issue",
+        anchor_comment_id: "source-comment",
+        identifier: "TES-7",
+      },
+      source_author_state: [],
+      snapshot: {
+        version: 1,
+        captured_by_user_id: "user-1",
+        captured_at: "2026-08-21T12:00:00Z",
+        source_issue: {
+          id: "source-issue",
+          identifier: "TES-7",
+          number: 7,
+          title: "Source issue",
+          description: "Source description",
+          created_at: "2026-08-20T00:00:00Z",
+          updated_at: "2026-08-21T00:00:00Z",
+          revision: 2,
+          attachments: [],
+        },
+        anchor_comment_id: "source-comment",
+        comment_thread: [
+          {
+            id: "source-comment",
+            parent_id: null,
+            type: "comment",
+            content: "Source comment",
+            author: { type: "member", id: "user-1", name: "Test User" },
+            created_at: "2026-08-21T01:00:00Z",
+            updated_at: "2026-08-21T01:00:00Z",
+            revision: 1,
+            attachments: [],
+          },
+        ],
+      },
+    };
+    const cachedWithoutDetailOnlyContext: Issue = {
+      ...mockIssue,
+      parent_issue_id: "source-issue",
+    };
+    const authoritativeDetail: Issue = {
+      ...cachedWithoutDetailOnlyContext,
+      source_context: sourceContext,
+    };
+    const parentIssue: Issue = {
+      ...mockIssue,
+      id: "source-issue",
+      identifier: "TES-7",
+      number: 7,
+      title: "Source issue",
+      parent_issue_id: null,
+    };
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: 0, staleTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    queryClient.setQueryData(
+      ["issues", "ws-1", "detail", "issue-1"],
+      cachedWithoutDetailOnlyContext,
+    );
+    mockApiObj.getIssue.mockImplementation((issueId: string) =>
+      Promise.resolve(issueId === "source-issue" ? parentIssue : authoritativeDetail),
+    );
+
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={queryClient}>
+          <IssueDetail issueId="issue-1" />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    const snapshotAction = await screen.findByRole("button", { name: "Context snapshot" });
+    const summary = snapshotAction.closest<HTMLElement>('[data-slot="source-context-summary"]');
+    expect(summary).toHaveTextContent("Sub-issue of");
+    expect(within(summary!).getByRole("link", { name: "TES-7 Source issue" })).toBeInTheDocument();
+    // The summary replaces the plain parent row rather than adding a second one.
+    expect(screen.getAllByText("Sub-issue of")).toHaveLength(1);
+    expect(screen.queryByText(/From TES-7/)).not.toBeInTheDocument();
+    expect(mockApiObj.getIssue).toHaveBeenCalledWith("issue-1");
   });
 
   it("opts the description editor into the unmount flush", async () => {
@@ -1313,6 +1486,94 @@ describe("IssueDetail (shared)", () => {
     await waitFor(() => {
       expect(screen.getByText(/from Todo to mystery_status/i)).toBeInTheDocument();
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // MUL-6413 — the activity glyph is per CATEGORY, so a move into a custom
+  // status drew the icon of the built-in it sits beside: "In Review → Awaiting
+  // Response" repainted identically and read as though nothing had moved.
+  // Colour is what carries a custom status's own identity.
+  // -------------------------------------------------------------------------
+
+  const IN_REVIEW_BUILT_IN: IssueStatusEntry = {
+    id: "in_review",
+    workspace_id: "ws-1",
+    key: "in_review",
+    name: "In Review",
+    description: "",
+    category: "in_review",
+    color: "#8b5cf6",
+    is_system: true,
+    position: 0,
+    archived_at: null,
+    created_at: "",
+    updated_at: "",
+  };
+
+  const AWAITING_RESPONSE: IssueStatusEntry = {
+    ...IN_REVIEW_BUILT_IN,
+    id: "awaiting_response",
+    key: "awaiting_response",
+    name: "Awaiting Response",
+    color: "#ff0000",
+    is_system: false,
+    position: 1,
+  };
+
+  function statusChangeIcon(to: string): SVGElement {
+    const row = screen.getByText(new RegExp(`to ${to}$`, "i")).closest("div")
+      ?.parentElement;
+    const icon = row?.querySelector("svg");
+    if (!icon) throw new Error(`no status glyph for the "${to}" activity row`);
+    return icon;
+  }
+
+  it("paints a status-change activity in the custom status's own colour", async () => {
+    mockApiObj.listTimeline.mockResolvedValue([
+      {
+        type: "activity",
+        id: "act-custom-status",
+        actor_type: "member",
+        actor_id: "user-1",
+        action: "status_changed",
+        details: { from: "in_review", to: "awaiting_response" },
+        created_at: "2026-01-18T00:00:00Z",
+      },
+    ] as TimelineEntry[]);
+
+    renderIssueDetailWithStatusCatalog([IN_REVIEW_BUILT_IN, AWAITING_RESPONSE]);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/from In Review to Awaiting Response/i),
+      ).toBeInTheDocument();
+    });
+    expect(statusChangeIcon("Awaiting Response").style.color).toBe("rgb(255, 0, 0)");
+  });
+
+  it("leaves a built-in status-change activity on its semantic token colour", async () => {
+    // The catalog seeds a colour for the built-ins too, but those are theme
+    // tokens in the UI — painting the seeded hex would hard-code one theme.
+    mockApiObj.listTimeline.mockResolvedValue([
+      {
+        type: "activity",
+        id: "act-built-in-status",
+        actor_type: "member",
+        actor_id: "user-1",
+        action: "status_changed",
+        details: { from: "in_progress", to: "in_review" },
+        created_at: "2026-01-18T00:00:00Z",
+      },
+    ] as TimelineEntry[]);
+
+    renderIssueDetailWithStatusCatalog([IN_REVIEW_BUILT_IN, AWAITING_RESPONSE]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/from In Progress to In Review/i)).toBeInTheDocument();
+    });
+    const icon = statusChangeIcon("In Review");
+    expect(icon.style.color).toBe("");
+    expect(icon.getAttribute("class")).toContain("text-success");
   });
 
   it("truncates the trailing activity block to the most recent 8 entries with a show-more toggle", async () => {

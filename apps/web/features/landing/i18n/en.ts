@@ -101,7 +101,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       label: "RUNTIMES",
       title: "One dashboard for all your compute",
       description:
-        "Local daemons and cloud runtimes, managed from a single panel. Real-time monitoring of online/offline status, usage charts, and activity heatmaps. Auto-detects 22 supported coding tools on your machine.",
+        "Local daemons and cloud runtimes, managed from a single panel. Real-time monitoring of online/offline status, usage charts, and activity heatmaps. Auto-detects 23 supported coding tools on your machine.",
       cards: [
         {
           title: "Unified runtime panel",
@@ -116,7 +116,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         {
           title: "Auto-detection on first run",
           description:
-            "Multica scans for 22 supported coding tools \u2014 Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, and Trae CLI \u2014 and registers a runtime for each one it finds.",
+            "Multica scans for 23 supported coding tools \u2014 Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Dim, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, and Trae CLI \u2014 and registers a runtime for each one it finds.",
         },
       ],
     },
@@ -136,7 +136,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       {
         title: "Install the CLI & connect your machine",
         description:
-          "Run multica setup \u2014 it walks you through OAuth, starts the daemon, and scans for the 22 supported coding tools (Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, Trae CLI). Whichever ones you already have installed get registered as runtimes automatically.",
+          "Run multica setup \u2014 it walks you through OAuth, starts the daemon, and scans for the 23 supported coding tools (Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Dim, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, Trae CLI). Whichever ones you already have installed get registered as runtimes automatically.",
       },
       {
         title: "Create your first agent",
@@ -192,7 +192,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       {
         question: "What coding agents does Multica support?",
         answer:
-          "Multica supports 22 coding tools out of the box: Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, and Trae CLI. The daemon auto-detects whichever CLIs you already have installed and registers a runtime for each one. Since it's open source, you can also add your own backends.",
+          "Multica supports 23 coding tools out of the box: Antigravity, Claude Code, CodeBuddy, Codex, Copilot, Cursor, DeepSeek Harness, DevEco Code, Dim, Grok, Hermes, Kimi, Kiro CLI, Oh-My-Pi, OpenClaw, OpenCode, Pi, Qoder, Qoder CN, Qwen Code, QwenPaw, Reasonix, and Trae CLI. The daemon auto-detects whichever CLIs you already have installed and registers a runtime for each one. Since it's open source, you can also add your own backends.",
       },
       {
         question: "Do I need to self-host, or is there a cloud version?",
@@ -293,6 +293,157 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       fixes: "Bug Fixes",
     },
     entries: [
+      {
+        version: "0.4.35",
+        date: "2026-08-26",
+        title: "Session controls in every chat channel, agent conversation starters, and Inbox filters",
+        changes: [],
+        features: [
+          "Start a fresh session with /new, or clear the current one with /clear.",
+          "Both work in DingTalk, Lark, Slack, Telegram, and WeCom.",
+          "Give an agent up to three conversation starters, shown in every empty chat.",
+          "Tapping a starter fills the composer, so you can edit it before sending.",
+          "Filter Inbox notifications by who started them, or show only unread ones.",
+        ],
+        improvements: [
+          "Run costs for Qwen, Kimi, and Ark models are now accurate.",
+          "The Autopilot list shows subscribers and the next scheduled run.",
+          "A single Cloud address turns on cloud runtimes, billing, and seat management together.",
+          "Local task folders now have readable names, so your files are easy to find.",
+        ],
+        fixes: [
+          "Autopilots can hand work to your private agents and Squads again.",
+          "An Autopilot keeps its Project when you edit its other settings.",
+          "Chat follows the newest output as it streams, and scrolling up no longer snaps you back.",
+          "Private runtimes are no longer visible to other members.",
+          "Billing reflects your Pro plan right after you subscribe.",
+          "Codex runs no longer end early, so nothing is missed or counted twice.",
+          "Autopilot commands no longer accept a priority option that did nothing.",
+          "Issue boards stay fast even when descriptions are very long.",
+          "Reading large Skills is reliable and no longer stops midway.",
+        ],
+      },
+      {
+        version: "0.4.34",
+        date: "2026-08-25",
+        title: "Sub-Issues from comments, and custom Issue statuses for every workspace",
+        changes: [],
+        features: [
+          "Turn any comment into a sub-Issue with one click.",
+          "New sub-Issues carry the original discussion, so whoever picks them up starts with full context.",
+          "Custom Issue statuses are now open to every workspace — create your own right away.",
+        ],
+        improvements: [
+          "Checkout pre-fills your account email automatically.",
+          "Failed repository checkouts now say exactly what went wrong and how to fix it.",
+          "Self-hosting guides now cover health checks, single-domain setups, and choosing a release.",
+        ],
+        fixes: [
+          "MiniMax Code no longer fails intermittently on startup.",
+          "Members who leave a workspace no longer get its Autopilot notifications.",
+          "Automatic recovery replies for failed tasks now land in the original comment thread.",
+          "Comment timestamps no longer show the wrong timezone.",
+          "Agents locate Issues by full ID faster and more reliably.",
+          "Cancelling a task now truly stops the agent — nothing keeps running in the background.",
+          "Cancelled subscription seats no longer appear in billing.",
+          "When a task is cancelled, the CLI no longer asks you to sign in again.",
+        ],
+      },
+      {
+        version: "0.4.33",
+        date: "2026-08-24",
+        title: "Inbox filters, the ZeroClaw runtime, and localized failure messages",
+        changes: [],
+        features: [
+          "Filter Inbox notifications by Issue status and priority.",
+          "Use ZeroClaw as a native agent runtime.",
+          "Self-hosted teams can send daemon traffic to a separate server.",
+          "Self-hosted teams can set how long queued tasks remain available.",
+        ],
+        improvements: [
+          "Task failure messages now appear in your chosen language.",
+          "Grok shows each model's supported reasoning levels.",
+          "Skill download failures now show how much data arrived.",
+          "Use a keyboard shortcut to show or hide the right sidebar.",
+          "The iOS app now has a cleaner flat icon.",
+          "Self-hosting guides now state the right PostgreSQL requirements.",
+        ],
+        fixes: [
+          "Windows Qwen and Pi runs now preserve complete prompts.",
+          "Antigravity responses keep their original line breaks.",
+          "Lark post mentions reach the intended people.",
+          "Agent and Issue activity stays correctly authorized and ordered.",
+          "New chats and project work stay in the right workspace context.",
+          "Self-hosted health checks and concurrent local work stay reliable.",
+          "Hermes, Kimi, and Pi now handle runtime failures more reliably.",
+          "Purchase quotes and archived Inbox counts now recover correctly.",
+        ],
+      },
+      {
+        version: "0.4.32",
+        date: "2026-08-21",
+        title: "DingTalk groups, Project views, and smoother teamwork",
+        changes: [],
+        features: [
+          "Mention a DingTalk bot in a group and that group appears under its agent.",
+          "Group Board and Table views by Project to keep related Issues together.",
+        ],
+        improvements: [
+          "Long-running agents stay more responsive while they work.",
+          "Self-hosted servers recover automatically after a brief database outage.",
+          "Telegram now greets you and replies in English.",
+        ],
+        fixes: [
+          "Running a task again no longer stops work already in progress.",
+          "Tasks running at the same time no longer overwrite one another’s workspace.",
+          "OpenClaw, Pi, and OpenCode work with the custom providers you configure.",
+          "Changing workspaces no longer interrupts live updates or @mentions.",
+          "Autopilot webhook secrets stay out of normal CLI output.",
+          "Chat with your agents without waiting for unrelated coding work to finish.",
+        ],
+      },
+      {
+        version: "0.4.31",
+        date: "2026-08-20",
+        title: "Run confirmation before leaving backlog, Webhook event filters, and Windows build fixes",
+        changes: [],
+        improvements: [
+          "The web Help menu now makes the desktop app easier to find.",
+          "You can confirm an agent run before moving an assigned Issue out of backlog.",
+          "Webhook event filters are easier to add and remove.",
+          "The / picker now ranks exact skill matches first.",
+        ],
+        fixes: [
+          "Windows command-line builds now create correctly named executables.",
+          "Agents can still load skills after a brief connection drop.",
+          "Run now no longer exposes internal error details.",
+          "Agent updates stay responsive in busy workspaces.",
+        ],
+      },
+      {
+        version: "0.4.30",
+        date: "2026-08-19",
+        title: "Safer Issue editing, empty-property filters, and clearer agent identity",
+        changes: [],
+        features: [
+          "You can see which agent is handling each chat session.",
+          "Workspace admins can see linked DingTalk identities.",
+          "You can filter Issues by custom properties that have no value.",
+          "When an Issue or comment changes while you edit it, you can compare both versions before saving.",
+        ],
+        improvements: [
+          "The command palette now includes every workspace page.",
+          "Chat sessions now resume faster.",
+          "Issue activity times now reflect meaningful updates.",
+        ],
+        fixes: [
+          "Private agents can only be invoked by their owners.",
+          "Agent workspaces stay isolated when tasks run at the same time.",
+          "Provider command logs no longer expose credentials or prompts.",
+          "Posting a comment no longer reports a false send failure.",
+          "A dependency security vulnerability has been fixed.",
+        ],
+      },
       {
         version: "0.4.29",
         date: "2026-08-18",
@@ -405,6 +556,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
           "Parallel local-folder mode, per-group DingTalk routing, and one-click skill updates",
         changes: [],
         features: [
+          "Your agents can now live in Telegram — DM them or @-mention them in a group or forum topic.",
           "A local folder can now run tasks in parallel, each delivering its own branch.",
           "One DingTalk bot can now serve each group with its own agent.",
           "Imported skills can now be updated from their source in one click.",

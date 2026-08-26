@@ -56,11 +56,11 @@ Once registered, a runtime keeps a persistent connection. When a new task enters
 
 The daemon sends a heartbeat every 15 seconds. The server combines heartbeats and connection state to decide whether a runtime is online; after a daemon exits unexpectedly, the runtime usually shows as offline within about 3 minutes at the latest.
 
-![Runtime details for one online computer: the same daemon registered 7 runtimes, one row per detected AI coding tool, each showing online status and CLI version](/images/docs/runtime-machine-detail.png)
+![Runtime details for one online computer: the same daemon registered 7 runtimes, one row per detected AI coding tool, each showing online status and CLI version](/images/docs/runtime-machine-detail.webp)
 
 When a runtime is offline:
 
-- Tasks already queued wait for the runtime to recover, for up to 2 hours.
+- Tasks already queued wait for the runtime to recover, for up to 2 hours by default (adjustable via `MULTICA_TASK_QUEUED_TTL`, see [Environment variables](/environment-variables)).
 - Tasks that were running fail; eligible issue or chat tasks can retry automatically.
 - When the daemon starts again, it re-registers its runtimes and reclaims tasks that did not end cleanly last time.
 - A runtime offline for more than 7 days with no agents bound to it (including archived ones) is cleaned up automatically.

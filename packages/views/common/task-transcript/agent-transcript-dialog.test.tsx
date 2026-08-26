@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { api } from "@multica/core/api";
+import type { SupportedLocale } from "@multica/core/i18n";
 import type { AgentRuntime, AgentTask } from "@multica/core/types/agent";
 import { useTranscriptViewStore } from "@multica/core/agents/stores";
 import { renderWithI18n } from "../../test/i18n";
@@ -210,7 +211,11 @@ const items: TimelineItem[] = [
 
 function renderDialog(
   dialogItems: TimelineItem[] = items,
-  options: { task?: AgentTask; isLive?: boolean } = {},
+  options: {
+    task?: AgentTask;
+    isLive?: boolean;
+    locale?: SupportedLocale;
+  } = {},
 ) {
   return renderWithI18n(
     <AgentTranscriptDialog
@@ -221,6 +226,7 @@ function renderDialog(
       agentName="Codex"
       isLive={options.isLive}
     />,
+    { locale: options.locale },
   );
 }
 
@@ -704,6 +710,64 @@ describe("AgentTranscriptDialog", () => {
   });
 });
 
+describe("AgentTranscriptDialog — work directory handoff", () => {
+  it("shows and copies the durable project directory after worktree cleanup", async () => {
+    renderDialog(items, {
+      task: {
+        ...baseTask,
+        work_dir: "/managed/task/worktree",
+        relative_work_dir: "workspace/task/worktree",
+        durable_work_dir: "/Users/dev/project",
+        relative_durable_work_dir: "project",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+    expect(screen.getByText("Project directory")).toBeInTheDocument();
+    expect(screen.getByText("project")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle("Copy project directory"));
+    expect(copyTextMock).toHaveBeenCalledWith("/Users/dev/project");
+  });
+
+  it("keeps a live task on its actual workdir", async () => {
+    renderDialog(items, {
+      task: {
+        ...liveTask,
+        work_dir: "/managed/task/worktree",
+        relative_work_dir: "workspace/task/worktree",
+        durable_work_dir: "/Users/dev/project",
+        relative_durable_work_dir: "project",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+    expect(screen.getByText("Workdir")).toBeInTheDocument();
+    expect(screen.getByText("workspace/task/worktree")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle("Copy working directory"));
+    expect(copyTextMock).toHaveBeenCalledWith("/managed/task/worktree");
+  });
+
+  it("keeps a failed-but-preserved task on its worktree", async () => {
+    renderDialog(items, {
+      task: {
+        ...baseTask,
+        status: "failed",
+        work_dir: "/managed/preserved/worktree",
+        relative_work_dir: "workspace/task/worktree",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+    expect(screen.getByText("Workdir")).toBeInTheDocument();
+    expect(screen.getByText("workspace/task/worktree")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle("Copy working directory"));
+    expect(copyTextMock).toHaveBeenCalledWith("/managed/preserved/worktree");
+  });
+});
+
 // A worktree-mode run never touches the user's working copy: the branch is the
 // only pointer to what it produced. Showing it in Run details is what makes the
 // result findable — including for a run that failed partway, which still
@@ -733,8 +797,9 @@ describe("AgentTranscriptDialog — delivered branch", () => {
 });
 
 // A server-cancelled run (worktree claim gate, preserved-work delivery) must
-// explain itself: the reason rides the status badge and the full persisted
-// error is readable in Run details. A user's own cancel stays a plain
+// explain itself: the localized reason rides the status badge and heads the
+// "Reason" row in Run details, while the raw persisted diagnostic sits under
+// its own "Technical details" heading. A user's own cancel stays a plain
 // "Cancelled" — they know why they clicked.
 describe("AgentTranscriptDialog — cancel reason", () => {
   const gateError = "worktree mode needs daemon version 0.4.24 or newer on that machine";
@@ -755,6 +820,23 @@ describe("AgentTranscriptDialog — cancel reason", () => {
     expect(screen.getByText(gateError)).toBeInTheDocument();
   });
 
+  it("renders a server cancellation reason in the active locale", () => {
+    renderDialog(items, {
+      locale: "zh-Hans",
+      task: {
+        ...baseTask,
+        status: "cancelled",
+        error: gateError,
+        failure_reason: "local_directory_error",
+      },
+    });
+
+    expect(screen.getByText(/本地目录出错/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Local directory error/),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps a user-initiated cancel a plain Cancelled", () => {
     renderDialog(items, {
       task: { ...baseTask, status: "cancelled", error: null },
@@ -762,5 +844,80 @@ describe("AgentTranscriptDialog — cancel reason", () => {
 
     expect(screen.getByText("Cancelled")).toBeInTheDocument();
     expect(screen.queryByText(/Local directory error/)).not.toBeInTheDocument();
+  });
+
+  // #7411: the status badge used to carry the raw English error as its
+  // `title`. Hovering a translated pill and getting English prose (with an
+  // absolute path in it) is exactly the leak this issue reported.
+  it("keeps the raw diagnostic off the status badge tooltip", () => {
+    renderDialog(items, {
+      locale: "zh-Hans",
+      task: {
+        ...baseTask,
+        status: "cancelled",
+        error: gateError,
+        failure_reason: "local_directory_error",
+      },
+    });
+
+    expect(screen.queryByTitle(gateError)).not.toBeInTheDocument();
+  });
+});
+
+// The two audiences of a failure, kept apart in Run details: the localized
+// reason answers "what happened" for the person who ran the task, the raw
+// persisted text answers "what exactly did the runner say" for whoever
+// debugs it. Merging them is what made #7411 unfixable by translation alone.
+describe("AgentTranscriptDialog — reason vs raw diagnostics", () => {
+  const rawError =
+    "opencode stream ended on an empty step (no text, no tool call, no reported usage)";
+
+  it("heads the localized reason and the raw text with different labels", async () => {
+    renderDialog(items, {
+      task: {
+        ...baseTask,
+        status: "failed",
+        error: rawError,
+        failure_reason: "agent_error.provider_network",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+
+    expect(screen.getByText("Reason")).toBeInTheDocument();
+    expect(screen.getByText("Network error reaching provider")).toBeInTheDocument();
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+    expect(screen.getByText(rawError)).toBeInTheDocument();
+  });
+
+  it("translates both headings and the reason, leaving the raw text verbatim", async () => {
+    renderDialog(items, {
+      locale: "zh-Hans",
+      task: {
+        ...baseTask,
+        status: "failed",
+        error: rawError,
+        failure_reason: "agent_error.provider_network",
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "运行详情" }));
+
+    expect(screen.getByText("原始诊断")).toBeInTheDocument();
+    expect(screen.queryByText("Technical details")).not.toBeInTheDocument();
+    // The diagnostic itself is not translated — it is the runner's own output.
+    // Keeping it readable is the point; presenting it as the reason is not.
+    expect(screen.getByText(rawError)).toBeInTheDocument();
+  });
+
+  it("shows no diagnostics section for a run that persisted no error", async () => {
+    renderDialog(items, {
+      task: { ...baseTask, status: "completed", error: null },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Run details" }));
+
+    expect(screen.queryByText("Technical details")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reason")).not.toBeInTheDocument();
   });
 });

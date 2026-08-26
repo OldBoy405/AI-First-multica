@@ -1,19 +1,22 @@
 // @vitest-environment jsdom
 
 /**
- * The status filter's category headings, against the REAL Base UI menu
- * primitives (MUL-6393).
+ * The status filter's list, against the REAL Base UI menu primitives.
  *
- * `DropdownMenuLabel` renders Base UI's `Menu.GroupLabel`, whose
- * `useMenuGroupRootContext()` THROWS when it has no `Menu.Group` ancestor.
- * The heading only renders once a workspace holds a custom status, so the
- * missing group stayed invisible until the first one was created — and then
- * opening the filter menu took the whole app down, because no error boundary
- * sits above the issues surface. Same failure as MUL-4819, one menu over.
+ * The filter lists every offerable status flat, in canonical category order,
+ * with no category heading — the icon already carries the category, and a
+ * heading per category doubled the menu's height (MUL-6399).
+ *
+ * That is also what keeps the menu from crashing. `DropdownMenuLabel` renders
+ * Base UI's `Menu.GroupLabel`, whose `useMenuGroupRootContext()` THROWS
+ * without a `Menu.Group` ancestor; the heading only rendered once a workspace
+ * held a custom status, so the missing group stayed invisible until the first
+ * one was created — and then opening the filter took the whole app down, since
+ * no error boundary sits above the issues surface (MUL-6393, MUL-4819).
  *
  * These tests therefore must NOT mock `@multica/ui/components/ui/dropdown-menu`:
  * a flattened mock renders a heading outside a group perfectly happily, which
- * is exactly how the bug shipped.
+ * is exactly how that bug shipped.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -111,29 +114,33 @@ afterEach(() => {
 });
 
 describe("IssueFilterMenu status section", () => {
-  it("opens with a custom status in the catalog instead of crashing on the category heading", async () => {
+  it("lists a custom status inline, with no category heading", async () => {
     renderFilterMenu([...BUILT_INS, HUMAN_REVIEW]);
 
-    // Reaching this at all is the regression: the heading below used to throw
-    // out of Base UI's Menu.GroupLabel and unmount the app.
+    // Opening at all is the MUL-6393 regression: the heading this list no
+    // longer renders used to throw out of Base UI's Menu.GroupLabel and
+    // unmount the app.
     await openStatusSubmenu();
 
+    expect(document.querySelector("[data-slot='dropdown-menu-label']")).toBeNull();
+    // The custom status sits directly after the built-in of the category it
+    // behaves as — one flat list, top to bottom.
+    // Built-ins are named by i18n, the custom one by the catalog.
     expect(
-      screen.getByRole("menuitemcheckbox", { name: /Human Review/ }),
-    ).toBeInTheDocument();
-    // The heading is present AND owns a group — Base UI wires it up as the
-    // group's accessible name, which is only possible inside Menu.Group.
-    const heading = screen.getByText("In Review", {
-      selector: "[data-slot='dropdown-menu-label']",
-    });
-    const group = heading.closest("[data-slot='dropdown-menu-group']");
-    expect(group).not.toBeNull();
-    expect(group?.getAttribute("aria-labelledby")).toBe(heading.id);
-    // Both In Review statuses sit under that one heading.
-    expect(group?.querySelectorAll("[role='menuitemcheckbox']")).toHaveLength(2);
+      screen.getAllByRole("menuitemcheckbox").map((el) => el.textContent?.trim()),
+    ).toEqual([
+      "Backlog",
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Human Review",
+      "Done",
+      "Blocked",
+      "Cancelled",
+    ]);
   });
 
-  it("keeps the flat, heading-free list for a workspace with no custom statuses", async () => {
+  it("lists the 7 built-ins for a workspace with no custom statuses", async () => {
     renderFilterMenu(BUILT_INS);
 
     await openStatusSubmenu();

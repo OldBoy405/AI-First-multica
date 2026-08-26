@@ -15,6 +15,7 @@
     "placeholder_archived": "This session is archived",
     "placeholder_archived_agent": "This agent has been archived",
     "placeholder_runtime_required": "Bind a runtime to continue",
+    "placeholder_access_revoked": "You no longer have permission to run this agent",
     "placeholder_named": "Message {{name}}…",
     "placeholder_default": "Start a message…",
     "send_tooltip": "Send",
@@ -38,6 +39,7 @@
     "clear": "Clear all",
     "steer": "Steer",
     "steer_unavailable": "Steer is available after the current reply starts",
+    "steer_no_permission": "You no longer have permission to run this agent",
     "steer_unavailable_toast": "Steer is unavailable. Refreshing the queue.",
     "edit": "Edit queued message",
     "remove": "Remove queued message",
@@ -149,10 +151,21 @@
     "returning_subtitle": "Try asking",
     "chat_with_named": "Chat with {{name}}"
   },
-  "starter_prompts": {
-    "list_open": "List my open tasks by priority",
-    "summarize_today": "Summarize what I did today",
-    "plan_next": "Plan what to work on next"
+  "conversation_starters": {
+    "aria_label": "Conversation starters",
+    "capabilities": {
+      "label": "What can you help with?",
+      "prompt": "What are you best at helping with? Give me a concise overview."
+    },
+    "first_task": {
+      "label": "Suggest a first task",
+      "prompt": "Suggest three useful tasks I could delegate to you."
+    },
+    "recommend": {
+      "label": "Recommend an action",
+      "prompt": "Review what you know about my workspace and recommend a useful first action."
+    },
+    "customize": "Customize starters"
   },
   "onboarding_cards": {
     "aria_label": "Ways to start",
@@ -176,6 +189,7 @@
   },
   "no_agent_banner": "You need an agent to start chatting.",
   "archived_agent_banner": "{{name}} has been archived — this conversation is read-only.",
+  "agent_access_revoked_banner": "You no longer have permission to run {{name}} — this conversation is read-only.",
   "runtime_required_banner": {
     "fallback_name": "The agent",
     "message": "{{name}} needs a runtime before it can reply.",
@@ -193,6 +207,7 @@
       "retrying": "Retrying",
       "queued": "Queued",
       "waiting_local_directory": "Waiting for local directory",
+      "waiting_local_directory_reason": "Waiting for {{reason}}",
       "starting_up": "Starting up",
       "thinking": "Thinking",
       "typing": "Typing"

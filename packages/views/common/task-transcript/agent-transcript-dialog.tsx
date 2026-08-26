@@ -42,7 +42,7 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { ActorAvatar } from "../actor-avatar";
 import { AttributionBadge } from "../../issues/components/attribution-badge";
-import { cancelReasonLabel } from "../../agents/components/tabs/task-failure";
+import { cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { RichContent } from "../../rich-content";
 import { api } from "@multica/core/api";
 import {
@@ -51,6 +51,7 @@ import {
   type TranscriptSortDirection,
 } from "@multica/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multica/core/types/agent";
+import { resolveWorkdirCopyTarget } from "@multica/core/issues";
 import { runtimeDisplayName, providerDisplayName } from "@multica/core/runtimes";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { redactSecrets } from "./redact";
@@ -315,6 +316,10 @@ export function AgentTranscriptDialog({
   const [copiedBranch, showCopiedBranch] = useCopyFeedback();
   const [agentInfo, setAgentInfo] = useState<Agent | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<AgentRuntime | null>(null);
+  const workdirCopyTarget = useMemo(
+    () => resolveWorkdirCopyTarget([task]),
+    [task],
+  );
   const sortDirection = useTranscriptViewStore((s) => s.sortDirection);
   const setSortDirection = useTranscriptViewStore((s) => s.setSortDirection);
   // Filters always persist across opens — a facet a run doesn't have simply
@@ -613,12 +618,12 @@ export function AgentTranscriptDialog({
   );
 
   const handleCopyWorkdir = useCallback(() => {
-    if (!task.relative_work_dir) return;
-    void copyText(task.relative_work_dir).then((ok) => {
+    if (!workdirCopyTarget) return;
+    void copyText(workdirCopyTarget.path).then((ok) => {
       if (!ok) return;
       showCopiedWorkdir();
     });
-  }, [task.relative_work_dir, showCopiedWorkdir]);
+  }, [workdirCopyTarget, showCopiedWorkdir]);
 
   // Worktree-mode runs deliver a branch instead of edits in the working copy,
   // so copying the name is the fastest path to `git diff <branch>`.
@@ -710,10 +715,13 @@ export function AgentTranscriptDialog({
         // A server-cancelled run (worktree claim gate, preserved-work
         // delivery) carries a persisted reason the user must act on; surface
         // it on the badge instead of a bare "Cancelled". User-initiated
-        // cancels have no reason and keep the plain label.
-        const cancelReason = cancelReasonLabel(task);
+        // cancels have no reason and keep the plain label. The badge carries
+        // no `title`: the raw `task.error` behind it is untranslated
+        // operator prose (#7411) and belongs in Run details, not in hover
+        // text on a status pill.
+        const cancelReason = cancelReasonLabel(task, t);
         return (
-          <span className={cn(base, "bg-muted text-muted-foreground")} title={task.error ?? undefined}>
+          <span className={cn(base, "bg-muted text-muted-foreground")}>
             <XCircle className="h-3 w-3" />
             {cancelReason
               ? `${t(($) => $.transcript.status_cancelled)} · ${cancelReason}`
@@ -780,10 +788,23 @@ export function AgentTranscriptDialog({
   // this figure, same as on the other usage surfaces.
   useCustomPricingStore((s) => s.pricings);
   const usage = summarizeTaskUsage(task.usage);
+  // Two separate things, deliberately not one string (#7411):
+  //   • `reasonLabel` — the localized reason, derived from the stable
+  //     `failure_reason` enum. This is the user-facing explanation.
+  //   • `task.error` — the raw diagnostic the server/daemon persisted, in
+  //     English, for classification and logs. Kept readable (it is how you
+  //     find "which worktree holds my preserved work" and "which machine
+  //     needs upgrading") but labelled as a technical detail rather than
+  //     presented as the reason, and never merged into the localized text.
+  const reasonLabel =
+    task.status === "failed"
+      ? failureReasonLabel(task.failure_reason, t)
+      : cancelReasonLabel(task, t);
   const hasRunDetails =
     !!runtimeInfo ||
-    !!task.relative_work_dir ||
+    !!workdirCopyTarget?.relativePath ||
     !!task.branch_name ||
+    !!reasonLabel ||
     !!task.error ||
     !!createdLabel ||
     !!startedLabel ||
@@ -895,14 +916,30 @@ export function AgentTranscriptDialog({
                       {runtimeInfo && (
                         <RunDetailRow label={t(($) => $.transcript.details_mode)} value={runtimeInfo.runtime_mode} />
                       )}
-                      {task.relative_work_dir && (
+                      {workdirCopyTarget?.relativePath && (
                         <RunDetailRow
-                          label={t(($) => $.transcript.details_workdir)}
-                          value={task.relative_work_dir}
+                          label={
+                            workdirCopyTarget.source ===
+                            "durable_project_directory"
+                              ? t(
+                                  ($) =>
+                                    $.transcript.details_project_directory,
+                                )
+                              : t(($) => $.transcript.details_workdir)
+                          }
+                          value={workdirCopyTarget.relativePath}
                           mono
                           onCopy={handleCopyWorkdir}
                           copied={copiedWorkdir}
-                          copyTitle={t(($) => $.transcript.copy_workdir)}
+                          copyTitle={
+                            workdirCopyTarget.source ===
+                            "durable_project_directory"
+                              ? t(
+                                  ($) =>
+                                    $.transcript.copy_project_directory,
+                                )
+                              : t(($) => $.transcript.copy_workdir)
+                          }
                         />
                       )}
                       {task.branch_name && (
@@ -915,14 +952,13 @@ export function AgentTranscriptDialog({
                           copyTitle={t(($) => $.transcript.copy_branch)}
                         />
                       )}
-                      {/* The full persisted error, for failed AND
-                          server-cancelled runs — this is where "which
-                          worktree holds my preserved work" and "which
-                          machine needs upgrading" are actually readable. */}
-                      {task.error && (
+                      {/* The localized reason, from the stable
+                          `failure_reason` enum — this is the explanation, and
+                          it reads in the user's language. */}
+                      {reasonLabel && (
                         <RunDetailRow
                           label={t(($) => $.transcript.details_reason)}
-                          value={task.error}
+                          value={reasonLabel}
                         />
                       )}
                       {createdLabel && (
@@ -933,6 +969,23 @@ export function AgentTranscriptDialog({
                       )}
                       {completedLabel && (
                         <RunDetailRow label={t(($) => $.transcript.details_completed)} value={completedLabel} />
+                      )}
+                      {/* The raw persisted diagnostic, last and behind its own
+                          divider. It is English prose written by the server
+                          and daemon for logs and classification, so it is
+                          labelled "Technical details" — a translated heading
+                          over untranslated content — rather than shown as the
+                          run's reason (#7411). Still the place where "which
+                          worktree holds my preserved work" is readable. */}
+                      {task.error && (
+                        <>
+                          <div className="my-2 h-px bg-border" />
+                          <RunDetailRow
+                            label={t(($) => $.transcript.details_diagnostics)}
+                            value={task.error}
+                            mono
+                          />
+                        </>
                       )}
                       {usage && (
                         <>

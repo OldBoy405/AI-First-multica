@@ -193,7 +193,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status='running', started_at=now() WHERE id=$1`, task.ID); err != nil {
 		t.Fatalf("start report task: %v", err)
 	}
-	if _, err := taskSvc.CompleteTask(ctx, task.ID, []byte(`{"output":"not a report"}`), "", "", "", false, ""); err == nil {
+	if _, err := taskSvc.CompleteTask(ctx, task.ID, []byte(`{"output":"not a report"}`), "", "", "", false, "", ""); err == nil {
 		t.Fatal("malformed scheduled report completion must fail closed")
 	}
 	var status string
@@ -208,7 +208,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	}
 	output, _ := json.Marshal(envelope)
 	wrapped, _ := json.Marshal(protocol.TaskCompletedPayload{TaskID: uuid.UUID(task.ID.Bytes).String(), Output: string(output)})
-	completed, err := taskSvc.CompleteTask(ctx, task.ID, wrapped, "", "", "", false, "")
+	completed, err := taskSvc.CompleteTask(ctx, task.ID, wrapped, "", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("complete report task: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM chat_message WHERE chat_session_id=$1 AND role='assistant'`, task.ChatSessionID.Bytes).Scan(&messageCount); err != nil || messageCount != 1 {
 		t.Fatalf("report chat messages = %d, %v", messageCount, err)
 	}
-	if _, err := taskSvc.CompleteTask(ctx, task.ID, wrapped, "", "", "", false, ""); err != nil {
+	if _, err := taskSvc.CompleteTask(ctx, task.ID, wrapped, "", "", "", false, "", ""); err != nil {
 		t.Fatalf("idempotent report completion: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE workspace_id=$1 AND recipient_id=$2 AND type='maturity_report_ready'`, wsID, ownerID).Scan(&inboxCount); err != nil || inboxCount != 1 {
@@ -251,7 +251,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 		t.Fatalf("build second report: %v", err)
 	}
 	secondOutput, _ := json.Marshal(secondEnvelope)
-	if _, err := taskSvc.CompleteTask(ctx, secondTask.ID, secondOutput, "", "", "", false, ""); err != nil {
+	if _, err := taskSvc.CompleteTask(ctx, secondTask.ID, secondOutput, "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete second report: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE workspace_id=$1 AND recipient_id=$2 AND type='maturity_report_ready'`, wsID, ownerID).Scan(&inboxCount); err != nil || inboxCount != 1 {
@@ -278,7 +278,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 		t.Fatalf("build third report: %v", err)
 	}
 	thirdOutput, _ := json.Marshal(thirdEnvelope)
-	if _, err := taskSvc.CompleteTask(ctx, thirdTask.ID, thirdOutput, "", "", "", false, ""); err != nil {
+	if _, err := taskSvc.CompleteTask(ctx, thirdTask.ID, thirdOutput, "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete third report: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET completed_at='2020-01-01' WHERE id=$1`, thirdTask.ID); err != nil {
@@ -325,7 +325,7 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 		t.Fatalf("start non-report task: %v", err)
 	}
 	ordinary := []byte(`{"output":"housekeeping complete"}`)
-	otherCompleted, err := taskSvc.CompleteTask(ctx, otherTask.ID, ordinary, "", "", "", false, "")
+	otherCompleted, err := taskSvc.CompleteTask(ctx, otherTask.ID, ordinary, "", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("complete non-report Autopilot: %v", err)
 	}

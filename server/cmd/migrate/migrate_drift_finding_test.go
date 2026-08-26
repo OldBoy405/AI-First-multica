@@ -1,6 +1,6 @@
 package main
 
-// AIFIRST: CR-2026-049 TASK-04 — drift_finding migrations 385–389 integration test.
+// AIFIRST: CR-2026-049 TASK-04 — drift_finding migrations 456–460 integration test.
 // Runs the real migration files inside a throwaway schema (search_path pinned on a
 // dedicated connection), asserts the SDD §2.1/§2.3 shape, evidence CHECK, dedup
 // behavior, keyset index coverage and a clean up/down roundtrip. Skips when the
@@ -23,8 +23,8 @@ func driftMigrations(t *testing.T, dir string) []string {
 	t.Helper()
 	var files []string
 	for _, v := range []string{
-		"385_drift_finding", "386_drift_finding_id_uidx", "387_drift_finding_primary_key",
-		"388_drift_finding_dedup_idx", "389_drift_finding_keyset",
+		"456_drift_finding", "457_drift_finding_id_uidx", "458_drift_finding_primary_key",
+		"459_drift_finding_dedup_idx", "460_drift_finding_keyset",
 	} {
 		files = append(files, filepath.Join(dir, v+".up.sql"))
 	}
@@ -174,11 +174,11 @@ func TestDriftFindingMigrationsUpDownRoundtrip(t *testing.T) {
 
 	// Down roundtrip in reverse order leaves a clean schema.
 	downs := []string{
-		filepath.Join(migrationsDir, "389_drift_finding_keyset.down.sql"),
-		filepath.Join(migrationsDir, "388_drift_finding_dedup_idx.down.sql"),
-		filepath.Join(migrationsDir, "387_drift_finding_primary_key.down.sql"),
-		filepath.Join(migrationsDir, "386_drift_finding_id_uidx.down.sql"),
-		filepath.Join(migrationsDir, "385_drift_finding.down.sql"),
+		filepath.Join(migrationsDir, "460_drift_finding_keyset.down.sql"),
+		filepath.Join(migrationsDir, "459_drift_finding_dedup_idx.down.sql"),
+		filepath.Join(migrationsDir, "458_drift_finding_primary_key.down.sql"),
+		filepath.Join(migrationsDir, "457_drift_finding_id_uidx.down.sql"),
+		filepath.Join(migrationsDir, "456_drift_finding.down.sql"),
 	}
 	for _, p := range downs {
 		execFileOnConn(t, conn.Conn(), p)

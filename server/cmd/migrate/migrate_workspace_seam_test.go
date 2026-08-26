@@ -116,25 +116,25 @@ func runSQLFile(t *testing.T, conn *pgx.Conn, path string) error {
 }
 
 var wsUps = []string{
-	"390_cr_sync_event_workspace_id.up.sql",
-	"391_cr_sync_event_workspace_uniq.up.sql",
-	"392_cr_sync_event_trace_spec_idx.up.sql",
-	"393_cr_sync_event_ws_unprocessed_idx.up.sql",
-	"394_drop_cr_sync_event_old_uniq.up.sql",
-	"395_drop_cr_sync_event_unprocessed_idx.up.sql",
-	"396_approval_workspace_approve_uniq.up.sql",
-	"397_drop_approval_record_approve_uniq.up.sql",
+	"461_cr_sync_event_workspace_id.up.sql",
+	"462_cr_sync_event_workspace_uniq.up.sql",
+	"463_cr_sync_event_trace_spec_idx.up.sql",
+	"464_cr_sync_event_ws_unprocessed_idx.up.sql",
+	"465_drop_cr_sync_event_old_uniq.up.sql",
+	"466_drop_cr_sync_event_unprocessed_idx.up.sql",
+	"467_approval_workspace_approve_uniq.up.sql",
+	"468_drop_approval_record_approve_uniq.up.sql",
 }
 
 var wsDowns = []string{
-	"397_drop_approval_record_approve_uniq.down.sql",
-	"396_approval_workspace_approve_uniq.down.sql",
-	"395_drop_cr_sync_event_unprocessed_idx.down.sql",
-	"394_drop_cr_sync_event_old_uniq.down.sql",
-	"393_cr_sync_event_ws_unprocessed_idx.down.sql",
-	"392_cr_sync_event_trace_spec_idx.down.sql",
-	"391_cr_sync_event_workspace_uniq.down.sql",
-	"390_cr_sync_event_workspace_id.down.sql",
+	"468_drop_approval_record_approve_uniq.down.sql",
+	"467_approval_workspace_approve_uniq.down.sql",
+	"466_drop_cr_sync_event_unprocessed_idx.down.sql",
+	"465_drop_cr_sync_event_old_uniq.down.sql",
+	"464_cr_sync_event_ws_unprocessed_idx.down.sql",
+	"463_cr_sync_event_trace_spec_idx.down.sql",
+	"462_cr_sync_event_workspace_uniq.down.sql",
+	"461_cr_sync_event_workspace_id.down.sql",
 }
 
 func TestCRSyncEventWorkspaceMigrationHappyPath(t *testing.T) {
@@ -150,7 +150,7 @@ func TestCRSyncEventWorkspaceMigrationHappyPath(t *testing.T) {
 	wsA := "00000000-0000-0000-0000-00000000000a"
 	wsB := "00000000-0000-0000-0000-00000000000b"
 	// Backfill preflight requires one cr_id → one workspace: seed only wsA before
-	// 390; the same-named wsB CR is created post-migration (new events carry
+	// 461; the same-named wsB CR is created post-migration (new events carry
 	// workspace_id directly, the new unique key is workspace-scoped).
 	if _, err := conn.Exec(ctx, `INSERT INTO cr (workspace_id, cr_id) VALUES ($1,'CR-2026-001')`, wsA); err != nil {
 		t.Fatalf("seed cr: %v", err)
@@ -285,8 +285,8 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-999','shaX','status','{}',now())`); err != nil {
 			t.Fatalf("seed orphan: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "390_cr_sync_event_workspace_id.up.sql")); err == nil {
-			t.Fatalf("390 must hard-fail on orphan rows")
+		if err := runSQLFile(t, conn, workspaceMigration(t, "461_cr_sync_event_workspace_id.up.sql")); err == nil {
+			t.Fatalf("461 must hard-fail on orphan rows")
 		}
 	})
 
@@ -309,8 +309,8 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-001','shaA','status','{}',now())`); err != nil {
 			t.Fatalf("seed event: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "390_cr_sync_event_workspace_id.up.sql")); err == nil {
-			t.Fatalf("390 must hard-fail on ambiguous cr_id")
+		if err := runSQLFile(t, conn, workspaceMigration(t, "461_cr_sync_event_workspace_id.up.sql")); err == nil {
+			t.Fatalf("461 must hard-fail on ambiguous cr_id")
 		}
 	})
 }
