@@ -61,6 +61,14 @@ type APIClient interface {
 	// Lark's card schema.
 	SendBindingPromptCard(ctx context.Context, p BindingPromptParams) error
 
+	// SendApprovalReminderCard posts the CR approval-reminder card to a
+	// member's open_id private chat (AIFIRST: CR-2026-051 FR-5). Not
+	// SendInteractiveCard — that path fixes receive_id_type=chat_id via
+	// outboundMessageRequest and cannot address an open_id DM — and not
+	// SendBindingPromptCard, whose card body and CTA are different. Both
+	// implementations live in approval_reminder_card.go.
+	SendApprovalReminderCard(ctx context.Context, p ApprovalReminderParams) error
+
 	// GetBotInfo returns the Bot's per-installation `open_id` (the
 	// `bot_open_id` we persist on lark_installation). RegistrationService
 	// is the only caller — after the device-flow registration returns
