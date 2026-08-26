@@ -109,6 +109,35 @@ describe("issue realtime revision admission", () => {
     ).toBe(true);
   });
 
+  it("skips non-owner flat and table cache shapes while invalidating stale owner rows", () => {
+    const qc = new QueryClient();
+    const flatKey = [...issueKeys.flatAll("ws-1"), "rows"] as const;
+    const flatExportKey = [...issueKeys.flatAll("ws-1"), "export"] as const;
+    const tableRowsKey = [...issueKeys.tableAll("ws-1"), "rows"] as const;
+    const tableGroupsKey = [...issueKeys.tableAll("ws-1"), "groups"] as const;
+    const tableFacetsKey = [...issueKeys.tableAll("ws-1"), "facets"] as const;
+
+    qc.setQueryData(tableGroupsKey, { groups: [] });
+    qc.setQueryData(tableFacetsKey, { facets: [] });
+    expect(() =>
+      onIssueAuxiliaryRevision(qc, "ws-1", "issue-1", 2),
+    ).not.toThrow();
+    expect(qc.getQueryState(tableGroupsKey)?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(tableFacetsKey)?.isInvalidated).toBe(false);
+
+    qc.setQueryData(flatKey, { pages: [{ issues: [issue(1, "flat")] }] });
+    qc.setQueryData(flatExportKey, { issues: [issue(1, "export")] });
+    qc.setQueryData(tableRowsKey, {
+      rows: [{ issue: issue(1, "row"), direct_child_count: 0 }],
+    });
+    expect(() =>
+      onIssueAuxiliaryRevision(qc, "ws-1", "issue-1", 3),
+    ).not.toThrow();
+    expect(qc.getQueryState(flatExportKey)?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(flatKey)?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(tableRowsKey)?.isInvalidated).toBe(true);
+  });
+
   it("admits a fuller snapshot after a newer revision-only event", () => {
     const qc = new QueryClient();
     const detailKey = issueKeys.detail("ws-1", "issue-1");
