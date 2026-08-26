@@ -242,14 +242,18 @@ func (r *ApprovalReminder) deliverToRecipients(ctx context.Context, p protocol.A
 			return
 		}
 		// Zero rows: pick the reason with a second anchored query
-		// (reason-selection only — never produces recipients).
+		// (reason-selection only — never produces recipients). The CR row
+		// itself gone (pgx.ErrNoRows) counts as unresolved, not mismatched
+		// (SDD §4.4 / TASK-06 point 2: null shell or no row ⇒
+		// project-unresolved).
 		var shellNull bool
-		if serr := r.pool.QueryRow(ctx, `SELECT shell_issue_id IS NULL FROM cr WHERE workspace_id = $1 AND cr_id = $2`,
-			anchorWorkspaceID, p.CRID).Scan(&shellNull); serr != nil && !errors.Is(serr, pgx.ErrNoRows) {
-			r.logFailEvent(p, anchorWorkspaceID, stepProjectChain, errorClassOf(serr))
+		reasonErr := r.pool.QueryRow(ctx, `SELECT shell_issue_id IS NULL FROM cr WHERE workspace_id = $1 AND cr_id = $2`,
+			anchorWorkspaceID, p.CRID).Scan(&shellNull)
+		if reasonErr != nil && !errors.Is(reasonErr, pgx.ErrNoRows) {
+			r.logFailEvent(p, anchorWorkspaceID, stepProjectChain, errorClassOf(reasonErr))
 			return
 		}
-		if shellNull {
+		if shellNull || errors.Is(reasonErr, pgx.ErrNoRows) {
 			r.logSkipEvent(p, anchorWorkspaceID, reasonProjectUnresolved)
 		} else {
 			r.logSkipEvent(p, anchorWorkspaceID, reasonWorkspaceMismatch)

@@ -1169,6 +1169,25 @@ func TestApprovalReminderAC10CrossWorkspace(t *testing.T) {
 		}
 	})
 
+	t.Run("cr row missing in anchor workspace", func(t *testing.T) {
+		f := newRemDB(t)
+		f.addUser(remWS, "owner", "rem-xws4@test")
+		// No cr row at all for this id: the reason query itself returns
+		// pgx.ErrNoRows, which must resolve to project-unresolved — never
+		// workspace-mismatch (SDD §4.4 / TASK-06 point 2: null shell or no
+		// row ⇒ project-unresolved).
+		f.publish("CR-9001-023")
+		waitFor(t, "project-unresolved for missing cr row", func() bool {
+			return f.logs.count("reason", reasonProjectUnresolved) == 1
+		})
+		if f.logs.count("reason", reasonWorkspaceMismatch) != 0 {
+			t.Error("a missing cr row must not masquerade as workspace-mismatch")
+		}
+		if f.logs.count("result", "sent") != 0 {
+			t.Error("zero sends expected")
+		}
+	})
+
 	t.Run("static workspace anchor in every query", func(t *testing.T) {
 		raw, err := os.ReadFile("approval_reminder.go")
 		if err != nil {

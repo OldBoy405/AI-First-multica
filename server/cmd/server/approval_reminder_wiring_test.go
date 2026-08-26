@@ -30,14 +30,13 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// wiringBlockClient is a full lark.APIClient fake whose card send blocks
-// until released, so the end-to-end test can prove the sync handler stays
-// fast while the async chain is stuck.
+// wiringBlockClient is a full lark.APIClient fake whose card send hangs on
+// ctx.Done() — the recipient-timeout context — so the end-to-end test can
+// prove the sync handler stays fast while the async chain is stuck, and that
+// the hung send itself fails as error_class=timeout (AC-11).
 type wiringBlockClient struct {
-	mu      sync.Mutex
-	sendCh  chan struct{}
-	sends   int
-	released bool
+	mu    sync.Mutex
+	sends int
 }
 
 func (c *wiringBlockClient) IsConfigured() bool { return true }
@@ -60,10 +59,8 @@ func (c *wiringBlockClient) SendApprovalReminderCard(ctx context.Context, p lark
 	c.mu.Lock()
 	c.sends++
 	c.mu.Unlock()
-	if c.sendCh != nil {
-		<-c.sendCh
-	}
-	return nil
+	<-ctx.Done() // hang until the recipient timeout fires, like a stuck upstream
+	return ctx.Err()
 }
 func (c *wiringBlockClient) GetBotInfo(context.Context, lark.InstallationCredentials) (lark.BotInfo, error) {
 	return lark.BotInfo{}, nil
@@ -312,16 +309,18 @@ func TestApprovalReminderEndToEndLatency(t *testing.T) {
 
 	baseline := postStatus("CR-9051-051", "drafting", "requirement-reviewing", "sha-e2e-base")
 
-	// Register the reminder with a client that blocks on send.
-	client := &wiringBlockClient{sendCh: make(chan struct{})}
+	// Register the reminder with a client whose send hangs on the recipient
+	// timeout context; a short RecipientTimeout keeps the test fast.
+	client := &wiringBlockClient{}
 	mu := &sync.Mutex{}
 	logs := &wiringLogs{}
 	rem := lark.NewApprovalReminder(lark.ApprovalReminderConfig{
-		Pool:        testPool,
-		Client:      client,
-		Credentials: e2eInstallationService(t),
-		AppURL:      "https://multica.test",
-		Logger:      newWiringLogger(mu, logs),
+		Pool:             testPool,
+		Client:           client,
+		Credentials:      e2eInstallationService(t),
+		AppURL:           "https://multica.test",
+		Logger:           newWiringLogger(mu, logs),
+		RecipientTimeout: 200 * time.Millisecond,
 	})
 	rem.Register(bus)
 
@@ -348,8 +347,6 @@ func TestApprovalReminderEndToEndLatency(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	close(client.sendCh)
-
 	// Projection unchanged and healthy: both CRs reached the gate, no
 	// needs_reconcile, no rollback.
 	for _, crID := range []string{"CR-9051-051", "CR-9051-052"} {
@@ -364,13 +361,19 @@ func TestApprovalReminderEndToEndLatency(t *testing.T) {
 			t.Errorf("cr %s: status=%q needs_reconcile=%v", crID, status, needsReconcile)
 		}
 	}
-	// The released send completes with a sent log.
+
+	// AC-11: the hung send fails on the recipient timeout — one recipient-
+	// level failed with error_class=timeout at step=send, never a sent.
 	deadline = time.Now().Add(3 * time.Second)
-	for logs.count("result", "sent") != 1 && time.Now().Before(deadline) {
+	for logs.count("error_class", "timeout") != 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if logs.count("result", "sent") != 1 {
-		t.Errorf("sent = %d, want 1 after release", logs.count("result", "sent"))
+	if logs.count("result", "failed") != 1 || logs.count("error_class", "timeout") != 1 || logs.count("step", "send") != 1 {
+		t.Errorf("failed=%d timeout-class=%d step=send=%d, want 1/1/1 (hung send must fail on recipient timeout)",
+			logs.count("result", "failed"), logs.count("error_class", "timeout"), logs.count("step", "send"))
+	}
+	if logs.count("result", "sent") != 0 {
+		t.Errorf("sent = %d, want 0", logs.count("result", "sent"))
 	}
 }
 

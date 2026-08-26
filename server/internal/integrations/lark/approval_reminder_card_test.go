@@ -129,6 +129,36 @@ func TestApprovalReminderCardHappyPath(t *testing.T) {
 	}
 }
 
+// TestApprovalReminderCardRateLimitStructured is the BL-C1 regression: a
+// real non-zero Lark business response must survive the send path as a
+// structured *APIError, so the reminder's errorClassOf classifies it
+// rate-limited from the code even when the message text carries no
+// "rate limit" substring.
+func TestApprovalReminderCardRateLimitStructured(t *testing.T) {
+	fake := newLarkFake(t)
+	fake.stubToken("tok_rl", 7200)
+	fake.mux.HandleFunc("/open-apis/im/v1/messages", func(w http.ResponseWriter, r *http.Request) {
+		fake.sendN.Add(1)
+		writeJSON(w, map[string]any{"code": 230020, "msg": "quota exhausted"})
+	})
+
+	c := newTestClient(fake, time.Now)
+	err := c.SendApprovalReminderCard(context.Background(), approvalReminderParams())
+	if err == nil {
+		t.Fatal("rate-limited send must fail")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != 230020 {
+		t.Fatalf("want structured *APIError code=230020, got %T %v", err, err)
+	}
+	if strings.Contains(apiErr.Msg, "rate") {
+		t.Fatalf("fixture msg must not smuggle a rate-limit substring: %q", apiErr.Msg)
+	}
+	if got := errorClassOf(err); got != errorClassRateLimited {
+		t.Errorf("errorClassOf(real rate-limit response) = %q, want %q", got, errorClassRateLimited)
+	}
+}
+
 func TestApprovalReminderCardTokenInvalidation(t *testing.T) {
 	fake := newLarkFake(t)
 	fake.stubToken("tok_t", 7200)

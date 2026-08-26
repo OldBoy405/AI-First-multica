@@ -486,8 +486,9 @@ func (c *httpAPIClient) SendBindingPromptCard(ctx context.Context, p BindingProm
 
 // AIFIRST: CR-2026-051 FR-9 — shared open_id private-chat transport for the
 // binding-prompt and approval-reminder cards (receive_id_type=open_id,
-// msg_type=interactive). op is only the error-message prefix; the assertable
-// error parts (code=<n> msg=...) stay unchanged.
+// msg_type=interactive). op labels the *APIError operation; the assertable
+// error text (code=<n> msg=...) stays unchanged. Non-zero business codes
+// stay structured so the reminder can classify rate limits (BL-C1).
 func (c *httpAPIClient) sendCardToOpenID(ctx context.Context, creds InstallationCredentials, openID OpenID, cardJSON, op string) error {
 	token, err := c.tenantAccessToken(ctx, creds)
 	if err != nil {
@@ -512,7 +513,7 @@ func (c *httpAPIClient) sendCardToOpenID(ctx context.Context, creds Installation
 		if isTokenError(resp.Code) {
 			c.invalidateToken(creds.AppID)
 		}
-		return fmt.Errorf("lark http client: %s: code=%d msg=%q", op, resp.Code, resp.Msg)
+		return &APIError{Op: op, Code: resp.Code, Msg: resp.Msg}
 	}
 	return nil
 }
