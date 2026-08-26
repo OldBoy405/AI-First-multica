@@ -314,17 +314,29 @@ function invalidateIssueOwnerProjectionsWhere(
       }
     }
   }
+  // AIFIRST: flatAll also prefixes export responses without pages.
   for (const [key, data] of qc.getQueriesData<IssueFlatCache>({
     queryKey: issueKeys.flatAll(wsId),
   })) {
-    if (data?.pages.some((page) => shouldInvalidate(page.issues.find((issue) => issue.id === issueId)))) {
+    if (
+      Array.isArray(data?.pages) &&
+      data.pages.some((page) =>
+        shouldInvalidate(page.issues.find((issue) => issue.id === issueId)),
+      )
+    ) {
       invalidateExact(key);
     }
   }
+  // AIFIRST: tableAll also prefixes group and facet responses without rows.
   for (const [key, data] of qc.getQueriesData<IssueTableRowsResponse>({
     queryKey: issueKeys.tableAll(wsId),
   })) {
-    if (data?.rows.some((row) => row.issue.id === issueId && shouldInvalidate(row.issue))) {
+    if (
+      Array.isArray(data?.rows) &&
+      data.rows.some(
+        (row) => row.issue.id === issueId && shouldInvalidate(row.issue),
+      )
+    ) {
       invalidateExact(key);
     }
   }

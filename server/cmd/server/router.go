@@ -639,6 +639,21 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		slog.Info("lark integration disabled (MULTICA_LARK_SECRET_KEY not set)")
 	}
 
+	// AIFIRST: CR-2026-051 FR-8.3 — registered unconditionally, OUTSIDE the
+	// MULTICA_LARK_SECRET_KEY block: a disabled Lark integration must still
+	// consume the event and log a feishu-disabled skip. h.LarkAPIClient /
+	// h.LarkInstallations are nil in that case — assign only when non-nil,
+	// otherwise the config holds a typed-nil interface that panics on use.
+	reminderCfg := lark.ApprovalReminderConfig{
+		Pool: pool, AppURL: appURLFromEnv(), Logger: slog.Default(),
+	}
+	if h.LarkAPIClient != nil {
+		reminderCfg.Client = h.LarkAPIClient
+	}
+	if h.LarkInstallations != nil {
+		reminderCfg.Credentials = h.LarkInstallations
+	}
+	lark.NewApprovalReminder(reminderCfg).Register(bus)
 	// Slack integration. Multi-tenant B2 model (MUL-3666): Multica hosts ONE
 	// Slack app, workspaces self-install via OAuth, and inbound runs on a single
 	// deployment-level Socket Mode connection routed by team_id — replacing the

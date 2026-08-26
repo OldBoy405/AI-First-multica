@@ -195,6 +195,15 @@ const (
 	// constant rather than duplicating the string literal.
 	EventCRUpdated = "cr:updated"
 
+	// AIFIRST: CR-2026-051 FR-1 — dedicated semantic event, fired exactly once
+	// when a CR enters one of the four human-approval gates. Deliberately NOT
+	// a reuse of cr:updated: that event is published from five call sites and
+	// carries projection-maintenance semantics; consumers of the approval-gate
+	// reminder must react to the gate-entry fact alone. Declared here (not in
+	// internal/governance) because producer and consumer must share one
+	// compile-time contract without importing each other.
+	EventCRApprovalGateEntered = "cr:approval-gate-entered"
+
 	// DingTalk installation lifecycle follows the same create/revoke semantics
 	// as Slack's BYO channel installation. BindingUpdated shares the
 	// dingtalk_installation prefix because it changes the member-scoped account
@@ -213,3 +222,25 @@ const (
 	EventWecomInstallationCreated = "wecom_installation:created"
 	EventWecomInstallationRevoked = "wecom_installation:revoked"
 )
+
+// AIFIRST: CR-2026-051 FR-1 — payload of EventCRApprovalGateEntered.
+// Three things to know about this shape:
+//  1. It carries locating identifiers only (cr_id / status / event_id /
+//     shell_issue_id) — evidence, titles, and recipients are re-read from
+//     Postgres by the consumer, so the handler stays replayable
+//     (ARCHITECTURE.md §7).
+//  2. This struct doubles as the WebSocket frame shape broadcast via
+//     listeners.go#SubscribeAll: the JSON key order is a client-visible
+//     contract. Only ADD fields, never rename or remove keys.
+//  3. ShellIssueID is a pointer because cr.shell_issue_id is nullable
+//     (migration 362); it is correlation/diagnostic ONLY and must never be
+//     used as a query input (FR-3).
+//
+// No omitempty on shell_issue_id: the canonical shape keeps the key always
+// present with JSON null when absent (plan.md §5.3 decision).
+type ApprovalGateEnteredPayload struct {
+	CRID         string  `json:"cr_id"`
+	Status       string  `json:"status"`
+	EventID      string  `json:"event_id"`
+	ShellIssueID *string `json:"shell_issue_id"`
+}
