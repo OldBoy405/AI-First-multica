@@ -108,11 +108,11 @@ type approvalContinuationEnqueuer interface {
 
 // ApprovalService issues signed grants and serves the daemon delivery queue.
 type ApprovalService struct {
-	pool   *pgxpool.Pool
+	pool    *pgxpool.Pool
 	queries *db.Queries
 	tasks   approvalContinuationEnqueuer
-	key    ed25519.PrivateKey
-	keyID  string
+	key     ed25519.PrivateKey
+	keyID   string
 	// onGrantAck is the FR-10 canonical callback: a PRE-COMMIT pure
 	// validation hook. Its error rolls back the whole ACK batch and yields
 	// HTTP 5xx. It MUST have zero external side effects — no table writes, no
@@ -526,12 +526,12 @@ func (a *ApprovalService) HandleGrantsAck(w http.ResponseWriter, r *http.Request
 
 	if len(reasons) > 0 {
 		// FR-7 fail-closed: any unresolved target rolls back the whole batch.
-			rollbackTx(tx)
+		rollbackTx(tx)
 		slog.Warn("approval continuation fail-closed", "reasons", reasons)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "approval continuation failed",
-				"reasons": reasons,
-			})
+			"error":   "approval continuation failed",
+			"reasons": reasons,
+		})
 		return
 	}
 

@@ -66,10 +66,10 @@ SELECT
     sqlc.narg('project_id')
 FROM cr c
 JOIN issue i ON i.id = @issue_id::uuid AND i.workspace_id = @workspace_id::uuid
-JOIN squad s ON s.id = i.assignee_id AND s.workspace_id = @workspace_id::uuid
-             AND s.leader_id = a.id AND s.archived_at IS NULL
 JOIN agent a ON a.id = @agent_id::uuid AND a.workspace_id = @workspace_id::uuid
              AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL AND a.kind = 'user'
+JOIN squad s ON s.id = i.assignee_id AND s.workspace_id = @workspace_id::uuid
+             AND s.leader_id = a.id AND s.archived_at IS NULL
 WHERE c.workspace_id = @workspace_id::uuid AND c.cr_id = @cr_id AND c.shell_issue_id = i.id
 ON CONFLICT DO NOTHING
 RETURNING *;

@@ -62,9 +62,9 @@ func seedContinuationAuthority(t *testing.T, ws, crID string) (issueID, squadID,
 	t.Helper()
 	ctx := context.Background()
 	approverID = testUserID(t)
-	leaderID = wsUUID(ws, 0x51)
-	runtimeID = wsUUID(ws, 0x52)
-	squadID = wsUUID(ws, 0x53)
+	leaderID = wsUUID(ws, 'a')
+	runtimeID = wsUUID(ws, 'b')
+	squadID = wsUUID(ws, 'c')
 	if _, err := testPool.Exec(ctx, `
 		INSERT INTO agent_runtime(id,workspace_id,name,runtime_mode,provider)
 		VALUES($1::uuid,$2::uuid,'cont-rt','local','multica_daemon') ON CONFLICT(id) DO NOTHING`, runtimeID, ws); err != nil {
