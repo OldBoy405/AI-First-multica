@@ -761,16 +761,64 @@ func (r *Runner) WireEvents(bus *events.Bus) {
 	}
 }
 
-// WakeGrant is installed into ApprovalService. The ACK handler already scoped
-// the IDs to this workspace; the callback only wakes, then Reconcile re-reads
-// approval_record as authority.
-func (r *Runner) WakeGrant(ctx context.Context, workspaceID, crID string) {
-	ws, err := parseUUID(workspaceID)
-	if err == nil {
-		if err := r.Reconcile(ctx, ws, crID); err != nil {
-			slog.Warn("runner grant wake failed", "cr_id", crID, "error", err)
-		}
+// WakeGrant is the POST-COMMIT wake installed into ApprovalService's
+// SetGrantAckCommittedHandler. The ACK handler already scoped the IDs to this
+// workspace and committed delivered_at; the callback only wakes, then
+// Reconcile re-reads approval_record as authority. Its error is logged by the
+// ACK handler and never turns a committed ACK into a 5xx (TD-BL-12 / SDD §3.2).
+// AIFIRST: CR-2026-052 TASK-05 — signature extended to GrantAckEvent + error.
+func (r *Runner) WakeGrant(ctx context.Context, ev GrantAckEvent) error {
+	ws, err := parseUUID(ev.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("invalid workspace id: %w", err)
 	}
+	return r.Reconcile(ctx, ws, ev.CrID)
+}
+
+// ValidateGrantAck is the PRE-COMMIT FR-10 callback installed into
+// ApprovalService's SetGrantAckHandler. It is a pure validation with ZERO
+// external side effects — it takes no advisory lock, writes no
+// pipeline_run/pipeline_node_run, enqueues no task, and does not call
+// Reconcile. An error here rolls back the whole ACK batch and yields HTTP 5xx
+// (FR-10 canonical callback, TD-BL-12). It validates the event fields and
+// confirms the CR exists in the authenticated workspace via a workspace-scoped
+// read-only lookup (reuses GetCrShellIssueInWorkspaceForShare without the
+// FOR SHARE lock — the ACK transaction's own resolveContinuationTarget already
+// holds the authority locks; this is a defense-in-depth re-check only).
+// AIFIRST: CR-2026-052 TASK-05.
+func (r *Runner) ValidateGrantAck(ctx context.Context, ev GrantAckEvent) error {
+	if ev.WorkspaceID == "" {
+		return fmt.Errorf("grant ack event: empty workspace id")
+	}
+	if ev.CrID == "" {
+		return fmt.Errorf("grant ack event: empty cr id")
+	}
+	if _, err := parseUUID(ev.WorkspaceID); err != nil {
+		return fmt.Errorf("grant ack event: invalid workspace id: %w", err)
+	}
+	if _, err := parseUUID(ev.RecordID); err != nil {
+		return fmt.Errorf("grant ack event: invalid record id: %w", err)
+	}
+	if !approvalStages[ev.Stage] {
+		return fmt.Errorf("grant ack event: invalid stage %q", ev.Stage)
+	}
+	if ev.Decision != "approve" && ev.Decision != "reject" {
+		return fmt.Errorf("grant ack event: invalid decision %q", ev.Decision)
+	}
+	// Read-only workspace-scoped CR existence check on a SEPARATE connection
+	// with NO lock: resolveContinuationTarget in the ACK transaction already
+	// holds the authoritative FOR SHARE; taking it again here would self-deadlock.
+	// This is defense-in-depth against a malformed/foreign event reaching the
+	// Runner — it reads the committed cr row only.
+	ws, _ := parseUUID(ev.WorkspaceID)
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cr WHERE workspace_id=$1::uuid AND cr_id=$2)`, ws, ev.CrID).Scan(&exists); err != nil {
+		return fmt.Errorf("grant ack event: cr %s lookup failed: %w", ev.CrID, err)
+	}
+	if !exists {
+		return fmt.Errorf("grant ack event: cr %s not found in workspace", ev.CrID)
+	}
+	return nil
 }
 
 func (r *Runner) StartupScan(ctx context.Context) error {

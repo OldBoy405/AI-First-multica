@@ -183,7 +183,7 @@ func signCrosscheckGrantWithDigest(t *testing.T, ws, stage, decision, digest str
 		Approver: "alice@corp", ApprovedAt: time.Now().Format(time.RFC3339),
 		EvidenceDigest: digest, KeyID: "approval-crosscheck",
 	}
-	NewApprovalService(nil, priv, "approval-crosscheck").signGrant(&grant)
+	NewApprovalService(nil, priv, "approval-crosscheck", nil, nil).signGrant(&grant)
 	return writeSignedGrant(t, ws, grant)
 }
 

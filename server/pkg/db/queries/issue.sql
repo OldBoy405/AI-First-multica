@@ -94,6 +94,19 @@ SELECT id FROM issue
 WHERE id = $1 AND workspace_id = $2
 FOR KEY SHARE;
 
+-- name: LockIssueInWorkspaceForShare :one
+-- AIFIRST: CR-2026-052 TASK-02 (TD-BL-5/8/10, SDD §4.2) — approval-continuation
+-- authority lock for the shell issue. FOR SHARE (not FOR KEY SHARE) is the
+-- weakest lock that conflicts with an ordinary non-key UPDATE (FOR NO KEY
+-- UPDATE): a concurrent issue.assignee_id reassignment or status flip blocks
+-- until our ACK tx commits, so the leader we resolve is the ACK-time
+-- authority (no INSERT-then-reassign stale window). FOR KEY SHARE would NOT
+-- block those (it only conflicts with FOR UPDATE / key-column changes), which
+-- is why this query is distinct from LockIssueForChannelMediaBind above.
+SELECT * FROM issue
+WHERE id = $1 AND workspace_id = $2
+FOR SHARE;
+
 -- name: LockIssueForDescriptionUpdate :one
 -- Serialize field-baseline checks and combined attachment binding on the
 -- owner row. The handler merges channel media that landed after the editor's

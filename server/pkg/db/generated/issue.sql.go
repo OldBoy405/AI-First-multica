@@ -1549,6 +1549,61 @@ func (q *Queries) LockIssueForDescriptionUpdate(ctx context.Context, arg LockIss
 	return i, err
 }
 
+const lockIssueInWorkspaceForShare = `-- name: LockIssueInWorkspaceForShare :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at FROM issue
+WHERE id = $1 AND workspace_id = $2
+FOR SHARE
+`
+
+type LockIssueInWorkspaceForShareParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// AIFIRST: CR-2026-052 TASK-02 (TD-BL-5/8/10, SDD §4.2) — approval-continuation
+// authority lock for the shell issue. FOR SHARE (not FOR KEY SHARE) is the
+// weakest lock that conflicts with an ordinary non-key UPDATE (FOR NO KEY
+// UPDATE): a concurrent issue.assignee_id reassignment or status flip blocks
+// until our ACK tx commits, so the leader we resolve is the ACK-time
+// authority (no INSERT-then-reassign stale window). FOR KEY SHARE would NOT
+// block those (it only conflicts with FOR UPDATE / key-column changes), which
+// is why this query is distinct from LockIssueForChannelMediaBind above.
+func (q *Queries) LockIssueInWorkspaceForShare(ctx context.Context, arg LockIssueInWorkspaceForShareParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, lockIssueInWorkspaceForShare, arg.ID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+	)
+	return i, err
+}
+
 const markIssueFirstExecuted = `-- name: MarkIssueFirstExecuted :one
 UPDATE issue
 SET first_executed_at = now()

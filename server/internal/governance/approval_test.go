@@ -95,12 +95,12 @@ func TestSigningKeyLoading(t *testing.T) {
 	// Configured-but-invalid env must error (caller refuses to start).
 	t.Setenv("APPROVAL_SIGNING_KEY", "garbage")
 	t.Setenv("APPROVAL_SIGNING_KEY_ID", "k1")
-	if _, err := NewApprovalServiceFromEnv(nil); err == nil {
+	if _, err := NewApprovalServiceFromEnv(nil, nil, nil); err == nil {
 		t.Error("invalid configured key must be a startup error")
 	}
 	// Unset env = feature off, no error.
 	t.Setenv("APPROVAL_SIGNING_KEY", "")
-	if svc, err := NewApprovalServiceFromEnv(nil); err != nil || svc != nil {
+	if svc, err := NewApprovalServiceFromEnv(nil, nil, nil); err != nil || svc != nil {
 		t.Errorf("unset key must mean (nil, nil), got (%v, %v)", svc, err)
 	}
 }
@@ -113,7 +113,7 @@ func newTestApprovalService(t *testing.T) (*ApprovalService, ed25519.PublicKey) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewApprovalService(testPool, priv, "approval-test"), pub
+	return NewApprovalService(testPool, priv, "approval-test", db.New(testPool), nil), pub
 }
 
 // testUserID returns a user who is also an owner member of testWorkspaceID.
@@ -303,8 +303,11 @@ func TestApproveIssuesVerifiableGrantAndPersistsRecord(t *testing.T) {
 func TestGrantDeliveryQueue(t *testing.T) {
 	crID := "CR-9002-004"
 	resetCR(t, crID)
+	// AIFIRST: CR-2026-052 — the ACK continuation needs the full authority
+	// chain (shell issue → squad → leader), so seed it before the evidence.
+	seedContinuationAuthority(t, testWorkspaceID, crID)
 	seedEvidenceEvent(t, crID, map[string]string{"x.yml": "sha256:" + hex.EncodeToString(bytes.Repeat([]byte{0x01}, 32))})
-	svc, _ := newTestApprovalService(t)
+	svc, _ := newContinuationApprovalService(t)
 	rec := approveHTTP(t, svc, testUserID(t), crID, approveRequest{Stage: "dev-start", Decision: "approve"}, false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve: %d %s", rec.Code, rec.Body.String())
@@ -327,27 +330,28 @@ func TestGrantDeliveryQueue(t *testing.T) {
 	if err := json.Unmarshal(r1.Body.Bytes(), &pending); err != nil || len(pending.Grants) == 0 {
 		t.Fatalf("pending must include the new grant: %s (err=%v)", r1.Body.String(), err)
 	}
-	// Ack → queue drains.
 	ids := []string{}
 	for _, g := range pending.Grants {
 		if g.CRID == crID {
 			ids = append(ids, g.ID)
 		}
 	}
-	var wokeWorkspace, wokeCR string
-	svc.SetGrantAckHandler(func(_ context.Context, workspaceID, gotCR string) {
-		wokeWorkspace, wokeCR = workspaceID, gotCR
+	// AIFIRST: CR-2026-052 TASK-04 — pre-commit FR-10 callback now receives a
+	// GrantAckEvent and returns error; nil = accept → commit. The committed
+	// wake is separate (SetGrantAckCommittedHandler), exercised in AC-9.
+	var wokeEvent GrantAckEvent
+	var sawPreCommit bool
+	svc.SetGrantAckHandler(func(_ context.Context, ev GrantAckEvent) error {
+		sawPreCommit = true
+		wokeEvent = ev
+		return nil
 	})
-	body, _ := json.Marshal(map[string]any{"ids": ids})
-	ackReq := httptest.NewRequest(http.MethodPost, "/api/daemon/approvals/ack", bytes.NewReader(body))
-	ackReq = ackReq.WithContext(middleware.WithDaemonContext(ackReq.Context(), testWorkspaceID, "daemon-test"))
-	ackRec := httptest.NewRecorder()
-	svc.HandleGrantsAck(ackRec, ackReq)
+	ackRec := ackHTTP(t, svc, testWorkspaceID, ids)
 	if ackRec.Code != http.StatusOK {
-		t.Fatalf("ack: %d", ackRec.Code)
+		t.Fatalf("ack: %d %s", ackRec.Code, ackRec.Body.String())
 	}
-	if wokeWorkspace != testWorkspaceID || wokeCR != crID {
-		t.Fatalf("grant ACK wake mismatch: workspace=%q cr=%q", wokeWorkspace, wokeCR)
+	if !sawPreCommit || wokeEvent.WorkspaceID != testWorkspaceID || wokeEvent.CrID != crID || wokeEvent.Stage != "dev-start" || wokeEvent.Decision != "approve" {
+		t.Fatalf("grant ACK pre-commit event mismatch: %+v (saw=%v)", wokeEvent, sawPreCommit)
 	}
 	r2 := pendingReq()
 	var after struct {
