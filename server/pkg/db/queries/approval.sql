@@ -88,8 +88,7 @@ SET context = jsonb_set(
         COALESCE(context, '{}'::jsonb), '{approvals}',
         COALESCE(context -> 'approvals', '[]'::jsonb) || @new_entry::jsonb
       ),
-    handoff_note = COALESCE(handoff_note, '') || E'\n' || @new_line,
-    updated_at = now()
+    handoff_note = COALESCE(handoff_note, '') || E'\n' || @new_line
 WHERE id = @successor_id::uuid
   AND approval_workspace_id = @workspace_id::uuid
   AND trigger_evidence_kind = 'approval_continuation'

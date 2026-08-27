@@ -81,8 +81,9 @@ func seedContinuationAuthority(t *testing.T, ws, crID string) (issueID, squadID,
 		t.Fatalf("seed squad: %v", err)
 	}
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO issue(workspace_id,title,creator_type,creator_id,assignee_type,assignee_id,priority)
-		VALUES($1::uuid,'cont-issue','member',$2::uuid,'squad',$3::uuid,'medium')
+		INSERT INTO issue(workspace_id,title,creator_type,creator_id,assignee_type,assignee_id,priority,number)
+		VALUES($1::uuid,'cont-issue','member',$2::uuid,'squad',$3::uuid,'medium',
+		       (SELECT COALESCE(MAX(number),0)+1 FROM issue WHERE workspace_id=$1::uuid))
 		RETURNING id::text`, ws, approverID, squadID).Scan(&issueID); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
@@ -260,8 +261,9 @@ func TestAC6_FailClosedReasons(t *testing.T) {
 		// CR with a shell issue but no squad leader → leader-missing.
 		var issueID string
 		if err := testPool.QueryRow(ctx, `
-			INSERT INTO issue(workspace_id,title,creator_type,creator_id,assignee_type,priority)
-			VALUES($1::uuid,'no-leader-issue','member',$2::uuid,'member','medium') RETURNING id::text`, testWorkspaceID, approverID).Scan(&issueID); err != nil {
+			INSERT INTO issue(workspace_id,title,creator_type,creator_id,assignee_type,priority,number)
+			VALUES($1::uuid,'no-leader-issue','member',$2::uuid,'member','medium',
+			       (SELECT COALESCE(MAX(number),0)+1 FROM issue WHERE workspace_id=$1::uuid)) RETURNING id::text`, testWorkspaceID, approverID).Scan(&issueID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := testPool.Exec(ctx, `INSERT INTO cr(workspace_id,cr_id,status,shell_issue_id) VALUES($1::uuid,$2,'developing',$3::uuid) ON CONFLICT DO NOTHING`, testWorkspaceID, crID, issueID); err != nil {
@@ -401,12 +403,12 @@ func TestAC8_RunnerOffContinuationStillEnqueues(t *testing.T) {
 // zero-side-effect (replayable); committed handler error → log only, HTTP 2xx.
 func TestAC9_DoubleHookContract(t *testing.T) {
 	ctx := context.Background()
-	crID := "CR-9006-9"
-	resetCR(t, crID)
-	seedContinuationAuthority(t, testWorkspaceID, crID)
 	approverID := testUserID(t)
 
 	t.Run("9a_precommit_error_rolls_back", func(t *testing.T) {
+		crID := "CR-9006-9a"
+		resetCR(t, crID)
+		seedContinuationAuthority(t, testWorkspaceID, crID)
 		recID := insertApprovalRecord(t, testWorkspaceID, crID, "code", "approve", approverID)
 		svc, _ := newContinuationApprovalService(t)
 		var gotEvent GrantAckEvent
@@ -437,6 +439,9 @@ func TestAC9_DoubleHookContract(t *testing.T) {
 	})
 
 	t.Run("9b_precommit_replayable", func(t *testing.T) {
+		crID := "CR-9006-9b"
+		resetCR(t, crID)
+		seedContinuationAuthority(t, testWorkspaceID, crID)
 		// The handler did no side effects (9a); retrying the ACK after the
 		// handler returns nil must succeed end-to-end (daemon replay semantics).
 		recID := insertApprovalRecord(t, testWorkspaceID, crID, "code", "approve", approverID)
@@ -456,6 +461,9 @@ func TestAC9_DoubleHookContract(t *testing.T) {
 	})
 
 	t.Run("9c_committed_error_keeps_2xx", func(t *testing.T) {
+		crID := "CR-9006-9c"
+		resetCR(t, crID)
+		seedContinuationAuthority(t, testWorkspaceID, crID)
 		recID := insertApprovalRecord(t, testWorkspaceID, crID, "code", "approve", approverID)
 		svc, _ := newContinuationApprovalService(t)
 		svc.SetGrantAckCommittedHandler(func(_ context.Context, ev GrantAckEvent) error {
