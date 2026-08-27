@@ -1386,7 +1386,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// AIFIRST: signed-approval service (CR-2026-002 TASK-08). Key not configured →
 	// approval endpoints are not mounted (feature off); configured but invalid →
 	// refuse to start (P1 §B.5 fail-closed). Only key_id is ever logged.
-	approvalSvc, approvalErr := governance.NewApprovalServiceFromEnv(pool)
+	approvalSvc, approvalErr := governance.NewApprovalServiceFromEnv(pool, queries, h.TaskService)
 	if approvalErr != nil {
 		slog.Error("approval signing key rejected; refusing to start", "error", approvalErr)
 		os.Exit(1)
@@ -1405,7 +1405,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		}
 		architectureRunner.WireEvents(bus)
 		if approvalSvc != nil {
-			approvalSvc.SetGrantAckHandler(architectureRunner.WakeGrant)
+			// AIFIRST: CR-2026-052 TASK-05 — double hook wiring (TD-BL-12):
+			// pre-commit pure validation (error → 5xx) + post-commit wake
+			// (error → log/2xx). Runner off (default) → both nil, continuation
+			// enqueue still runs (AC-8).
+			approvalSvc.SetGrantAckHandler(architectureRunner.ValidateGrantAck)
+			approvalSvc.SetGrantAckCommittedHandler(architectureRunner.WakeGrant)
 		}
 		go func() {
 			if err := architectureRunner.StartupScan(context.Background()); err != nil {

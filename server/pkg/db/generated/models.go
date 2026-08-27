@@ -175,6 +175,7 @@ type AgentTaskQueue struct {
 	CrID                      pgtype.Text `json:"cr_id"`
 	PipelineNodeRunID         pgtype.UUID `json:"pipeline_node_run_id"`
 	ProjectID                 pgtype.UUID `json:"project_id"`
+	ApprovalWorkspaceID       pgtype.UUID `json:"approval_workspace_id"`
 }
 
 type AgentToLabel struct {

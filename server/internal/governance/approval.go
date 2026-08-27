@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"sort"
@@ -30,9 +31,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // Grant mirrors the crctl grant file schema v1 (source design §B.2). Field
@@ -78,31 +84,78 @@ func CanonicalDigestFromEvidence(evidence map[string]string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ApprovalService issues signed grants and serves the daemon delivery queue.
-type ApprovalService struct {
-	pool       *pgxpool.Pool
-	key        ed25519.PrivateKey
-	keyID      string
-	onGrantAck func(context.Context, string, string)
+// GrantAckEvent carries the fields an ACK callback (FR-10) needs. WorkspaceID
+// is the authenticated daemon workspace; RecordID is approval_record.id in
+// its text form (parity with the pending endpoint); Stage/Decision are the
+// approval_record values. It is passed to BOTH hooks so each can decide
+// independently (TD-BL-12).
+type GrantAckEvent struct {
+	WorkspaceID string // daemon workspace (authenticated)
+	CrID        string
+	RecordID    string // approval_record.id text form
+	Stage       string // requirement | tech-design | dev-start | code
+	Decision    string // approve | reject
 }
 
-// SetGrantAckHandler wires the optional Runner wake callback. ApprovalService
-// remains the sole writer of delivered_at; the callback is only a wake signal.
-func (a *ApprovalService) SetGrantAckHandler(fn func(context.Context, string, string)) {
+// approvalContinuationEnqueuer is the TaskService surface HandleGrantsAck needs.
+// Declared as a local interface (same convention as Runner's
+// pipelineTaskEnqueuer) so governance stays mockable and the import direction
+// stays governance → service (no cycle).
+type approvalContinuationEnqueuer interface {
+	EnqueueApprovalContinuation(ctx context.Context, qtx *db.Queries, spec service.ApprovalContinuationSpec) (db.AgentTaskQueue, service.EnqueueOutcome, error)
+	NotifyContinuationTaskEnqueued(ctx context.Context, task db.AgentTaskQueue) error
+}
+
+// ApprovalService issues signed grants and serves the daemon delivery queue.
+type ApprovalService struct {
+	pool    *pgxpool.Pool
+	queries *db.Queries
+	tasks   approvalContinuationEnqueuer
+	key     ed25519.PrivateKey
+	keyID   string
+	// onGrantAck is the FR-10 canonical callback: a PRE-COMMIT pure
+	// validation hook. Its error rolls back the whole ACK batch and yields
+	// HTTP 5xx. It MUST have zero external side effects — no table writes, no
+	// event enqueue, no locks intersecting the ACK row locks, and it must not
+	// depend on this transaction's uncommitted writes (TD-BL-12). The real
+	// wake is onGrantAckCommitted below.
+	onGrantAck func(context.Context, GrantAckEvent) error
+	// onGrantAckCommitted is the POST-COMMIT wake. Its error is logged only;
+	// HTTP stays 2xx because delivered_at is already committed and the daemon
+	// does not redeliver an ACKed record (TD-BL-12 / SDD §3.2).
+	onGrantAckCommitted func(context.Context, GrantAckEvent) error
+}
+
+// SetGrantAckHandler wires the PRE-COMMIT FR-10 callback (pure validation,
+// error → rollback/5xx). Retains the onGrantAck / SetGrantAckHandler name to
+// match PRD FR-10 mechanically; the name is NOT reused for the committed wake
+// (TD-BL-12).
+func (a *ApprovalService) SetGrantAckHandler(fn func(context.Context, GrantAckEvent) error) {
 	if a != nil {
 		a.onGrantAck = fn
 	}
 }
 
-func NewApprovalService(pool *pgxpool.Pool, key ed25519.PrivateKey, keyID string) *ApprovalService {
-	return &ApprovalService{pool: pool, key: key, keyID: keyID}
+// SetGrantAckCommittedHandler wires the POST-COMMIT wake (Reconcile). Its
+// error is logged only; HTTP stays 2xx (TD-BL-12 / SDD §3.2).
+func (a *ApprovalService) SetGrantAckCommittedHandler(fn func(context.Context, GrantAckEvent) error) {
+	if a != nil {
+		a.onGrantAckCommitted = fn
+	}
+}
+
+func NewApprovalService(pool *pgxpool.Pool, key ed25519.PrivateKey, keyID string, queries *db.Queries, tasks approvalContinuationEnqueuer) *ApprovalService {
+	if queries == nil {
+		queries = db.New(pool) // nil-pool callers (e.g. signGrant-only) get a nil-DBTX handle
+	}
+	return &ApprovalService{pool: pool, queries: queries, tasks: tasks, key: key, keyID: keyID}
 }
 
 // NewApprovalServiceFromEnv builds the service from APPROVAL_SIGNING_KEY /
 // APPROVAL_SIGNING_KEY_ID. Returns (nil, nil) when the key is not configured
 // (feature off) and an error when it is configured but unusable (caller must
 // refuse to start — §B.5).
-func NewApprovalServiceFromEnv(pool *pgxpool.Pool) (*ApprovalService, error) {
+func NewApprovalServiceFromEnv(pool *pgxpool.Pool, queries *db.Queries, tasks approvalContinuationEnqueuer) (*ApprovalService, error) {
 	raw := strings.TrimSpace(os.Getenv("APPROVAL_SIGNING_KEY"))
 	if raw == "" {
 		return nil, nil
@@ -122,7 +175,7 @@ func NewApprovalServiceFromEnv(pool *pgxpool.Pool) (*ApprovalService, error) {
 	if !ed25519.Verify(key.Public().(ed25519.PublicKey), msg, ed25519.Sign(key, msg)) {
 		return nil, fmt.Errorf("signing key smoke test failed for key_id=%s", keyID)
 	}
-	return NewApprovalService(pool, key, keyID), nil
+	return NewApprovalService(pool, key, keyID, queries, tasks), nil
 }
 
 // parseSigningKey accepts base64(PEM PKCS#8), raw PEM PKCS#8, or base64(DER PKCS#8).
@@ -374,7 +427,12 @@ func (a *ApprovalService) HandleGrantsPending(w http.ResponseWriter, r *http.Req
 }
 
 // HandleGrantsAck is POST /api/daemon/approvals/ack {ids: [...]} — the daemon
-// confirms grants were written to the workspace's .crctl/grants/.
+// confirms grants were written to the workspace's .crctl/grants/. Per CR-2026-052
+// (SDD §4.1) this is a single pgx transaction: mark delivered_at AND enqueue
+// the approval-continuation task atomically, all-or-nothing. The only 5xx
+// paths are pre-commit (tx error or onGrantAck handler error) — committed wake
+// errors are logged but keep HTTP 2xx (TD-BL-12).
+// AIFIRST: CR-2026-052 TASK-04.
 func (a *ApprovalService) HandleGrantsAck(w http.ResponseWriter, r *http.Request) {
 	workspaceID, denyReason := resolveDaemonWorkspace(r, a.pool)
 	if workspaceID == "" {
@@ -388,34 +446,215 @@ func (a *ApprovalService) HandleGrantsAck(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids required"})
 		return
 	}
-	rows, err := a.pool.Query(r.Context(), `
-		UPDATE approval_record SET delivered_at = now()
-		WHERE workspace_id = $1::uuid AND id::text = ANY($2) AND delivered_at IS NULL
-		RETURNING cr_id`, workspaceID, req.IDs)
+	ws, err := util.ParseUUID(workspaceID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid daemon workspace"})
+		return
+	}
+
+	ctx := r.Context()
+	tx, err := a.pool.Begin(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack failed"})
 		return
 	}
-	crIDs := map[string]struct{}{}
-	for rows.Next() {
-		var crID string
-		if err := rows.Scan(&crID); err != nil {
-			rows.Close()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack scan failed"})
-			return
-		}
-		crIDs[crID] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack scan failed"})
+	qtx := a.queries.WithTx(tx)
+
+	rows, err := qtx.AckApprovalGrants(ctx, db.AckApprovalGrantsParams{WorkspaceID: ws, Ids: req.IDs})
+	if err != nil {
+		rollbackTx(tx)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack failed"})
 		return
 	}
-	rows.Close()
-	if a.onGrantAck != nil {
-		for crID := range crIDs {
-			a.onGrantAck(r.Context(), workspaceID, crID)
+
+	type ackReason struct {
+		CrID   string `json:"cr_id"`
+		Stage  string `json:"stage"`
+		Reason string `json:"reason"`
+	}
+	reasons := []ackReason{}
+	ackEvents := make([]GrantAckEvent, 0, len(rows))
+	type newTask struct {
+		task    db.AgentTaskQueue
+		outcome service.EnqueueOutcome
+	}
+	newTasks := []newTask{}
+
+	for _, row := range rows {
+		target, reason := resolveContinuationTarget(ctx, qtx, ws, row)
+		if target == nil {
+			reasons = append(reasons, ackReason{CrID: row.CrID, Stage: row.Stage, Reason: reason})
+			continue
+		}
+		approver, _ := util.ParseUUID(row.ApproverUserID)
+		task, outcome, enqErr := a.tasks.EnqueueApprovalContinuation(ctx, qtx, service.ApprovalContinuationSpec{
+			WorkspaceID: ws,
+			AgentID:     target.agentID,
+			RuntimeID:   target.runtimeID,
+			IssueID:     target.issueID,
+			SquadID:     target.squadID,
+			ProjectID:   target.projectID,
+			CrID:        row.CrID,
+			RecordID:    row.ID,
+			Stage:       row.Stage,
+			Decision:    row.Decision,
+			ApproverID:  approver,
+			Priority:    target.priority,
+		})
+		if enqErr != nil {
+			rollbackTx(tx)
+			slog.Warn("approval continuation enqueue failed", "cr_id", row.CrID, "stage", row.Stage, "error", enqErr)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "approval continuation failed",
+				"reasons": append(reasons, ackReason{CrID: row.CrID, Stage: row.Stage, Reason: "tx-failure"}),
+			})
+			return
+		}
+		// Only newly-created rows are broadcast post-commit; merged/already-queued
+		// reuse an existing row and must not be re-announced (TD-SUG-1).
+		if outcome == service.OutcomeSuccessorEnqueued || outcome == service.OutcomeSlotDeferred {
+			newTasks = append(newTasks, newTask{task: task, outcome: outcome})
+		}
+		ackEvents = append(ackEvents, GrantAckEvent{
+			WorkspaceID: workspaceID,
+			CrID:        row.CrID,
+			RecordID:    row.ID,
+			Stage:       row.Stage,
+			Decision:    row.Decision,
+		})
+	}
+
+	if len(reasons) > 0 {
+		// FR-7 fail-closed: any unresolved target rolls back the whole batch.
+		rollbackTx(tx)
+		slog.Warn("approval continuation fail-closed", "reasons", reasons)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "approval continuation failed",
+			"reasons": reasons,
+		})
+		return
+	}
+
+	// Pre-commit FR-10 canonical callback: pure validation, zero side effects.
+	// An error here rolls back the batch and yields 5xx so the daemon retries.
+	for _, ev := range ackEvents {
+		if a.onGrantAck != nil {
+			if err := a.onGrantAck(ctx, ev); err != nil {
+				rollbackTx(tx)
+				slog.Warn("approval continuation onGrantAck rejected", "cr_id", ev.CrID, "stage", ev.Stage, "error", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error":   "approval continuation failed",
+					"reasons": []ackReason{{CrID: ev.CrID, Stage: ev.Stage, Reason: "ack-handler-failed"}},
+				})
+				return
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Warn("approval continuation commit failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ack failed"})
+		return
+	}
+
+	// Post-commit: broadcast the newly-created tasks (FR-11) and wake.
+	for _, nt := range newTasks {
+		if err := a.tasks.NotifyContinuationTaskEnqueued(ctx, nt.task); err != nil {
+			slog.Warn("approval continuation broadcast failed", "cr_id", nt.task.CrID, "error", err)
+		}
+	}
+	for _, ev := range ackEvents {
+		if a.onGrantAckCommitted != nil {
+			if err := a.onGrantAckCommitted(ctx, ev); err != nil {
+				// Committed: delivered_at is set, daemon will not redeliver. Log only.
+				slog.Error("approval continuation ack-wake failed", "cr_id", ev.CrID, "stage", ev.Stage, "reason", "ack-wake-failed", "error", err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// continuationTarget is the resolved FR-7 authority chain for one approval row.
+type continuationTarget struct {
+	agentID   pgtype.UUID
+	runtimeID pgtype.UUID
+	issueID   pgtype.UUID
+	squadID   pgtype.UUID
+	projectID pgtype.UUID
+	priority  int32
+}
+
+// resolveContinuationTarget walks the authority chain cr → issue → squad →
+// agent, locking each level before reading (FOR SHARE → FOR UPDATE), all
+// scoped to the authenticated workspace. Any missing level returns (nil,
+// reason) so the caller rolls back the whole ACK batch (FR-7 fail-closed —
+// never falls back to an arbitrary agent). Reasons are NFR-10 observability
+// codes (SDD §7.3). AIFIRST: CR-2026-052 TASK-04 (SDD §4.2, TD-BL-5/8/10).
+func resolveContinuationTarget(ctx context.Context, qtx *db.Queries, ws pgtype.UUID, row db.AckApprovalGrantsRow) (*continuationTarget, string) {
+	cr, err := qtx.GetCrShellIssueInWorkspaceForShare(ctx, db.GetCrShellIssueInWorkspaceForShareParams{
+		WorkspaceID: ws,
+		CrID:        row.CrID,
+	})
+	if err != nil {
+		return nil, "workspace-mismatch"
+	}
+	if !cr.ShellIssueID.Valid {
+		return nil, "issue-missing"
+	}
+	issue, err := qtx.LockIssueInWorkspaceForShare(ctx, db.LockIssueInWorkspaceForShareParams{
+		ID:          cr.ShellIssueID,
+		WorkspaceID: ws,
+	})
+	if err != nil {
+		return nil, "issue-missing"
+	}
+	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "squad" || !issue.AssigneeID.Valid {
+		return nil, "leader-missing"
+	}
+	squad, err := qtx.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{
+		ID:          issue.AssigneeID,
+		WorkspaceID: ws,
+	})
+	if err != nil || squad.ArchivedAt.Valid {
+		return nil, "leader-missing"
+	}
+	leader, err := qtx.GetAgentForUpdate(ctx, squad.LeaderID)
+	if err != nil {
+		return nil, "leader-missing"
+	}
+	if !leader.WorkspaceID.Valid || leader.WorkspaceID != ws || leader.ArchivedAt.Valid || !leader.RuntimeID.Valid || leader.Kind != "user" {
+		return nil, "leader-missing"
+	}
+	return &continuationTarget{
+		agentID:   leader.ID,
+		runtimeID: leader.RuntimeID,
+		issueID:   issue.ID,
+		squadID:   squad.ID,
+		projectID: issue.ProjectID,
+		priority:  priorityToIntIssue(issue.Priority),
+	}, ""
+}
+
+// priorityToIntIssue maps an issue.Priority text value to the agent_task_queue
+// priority int (parity with service.priorityToInt; duplicated here to avoid a
+// governance → service method dependency for a pure mapping).
+func priorityToIntIssue(p string) int32 {
+	switch p {
+	case "urgent":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func rollbackTx(tx pgx.Tx) {
+	if tx != nil {
+		_ = tx.Rollback(context.Background())
+	}
 }
