@@ -1528,6 +1528,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			})
 		}
 
+		// AIFIRST: CR-2026-053 TASK-05 (SDD §3.1) — task-scoped CR→Issue binding.
+		// Task-token only: the mat_ middleware stamps authoritative task/agent/
+		// workspace headers; the handler rejects every other actor source. No
+		// workspace in the path — the workspace comes from the token.
+		r.Post("/api/crs/{crID}/bind-current-task", h.HandleBindCurrentTask)
+
 		// AIFIRST: Runner Start endpoint (CR-2026-045). Auth middleware already
 		// resolved the task-token (mat_) binding; feature-off mounts no route.
 		if architectureRunner != nil {

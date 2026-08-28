@@ -74,8 +74,15 @@ export function CrGateCard({
 }
 
 // ─── Approval card (pending human_approval gate) ──────────────────────────
+// CR-2026-053 TASK-07 (FR-B6): exported so the stream view can render it
+// directly whenever cr.pending_stage is non-empty — even when no
+// human_approval/running gate node exists (the CR is at an approval gate but
+// the node projection is missing). Consumes the same fields as before
+// (cr.cr_id / cr.pending_stage / cr.can_approve / cr.evidence /
+// cr.evidence_digest / cr.pending_advance); approve/reject still go through
+// the existing API, no GateNode is fabricated.
 
-function ApprovalCard({
+export function ApprovalCard({
   cr,
   wsId,
   projectId,

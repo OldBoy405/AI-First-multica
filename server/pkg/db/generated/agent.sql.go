@@ -303,6 +303,55 @@ func (q *Queries) ArchiveAgentsByRuntime(ctx context.Context, arg ArchiveAgentsB
 	return items, nil
 }
 
+const bindCrShellIssueIfNull = `-- name: BindCrShellIssueIfNull :execrows
+UPDATE cr
+SET shell_issue_id = $2
+WHERE workspace_id = $1 AND cr_id = $3
+  AND (shell_issue_id IS NULL OR shell_issue_id = $2)
+`
+
+type BindCrShellIssueIfNullParams struct {
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	ShellIssueID pgtype.UUID `json:"shell_issue_id"`
+	CrID         string      `json:"cr_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — CAS write of cr.shell_issue_id
+// inside the bind transaction; same-value-replay semantics as
+// BindTaskCrIfNull (defense-in-depth WHERE clause, lock-verified by caller).
+func (q *Queries) BindCrShellIssueIfNull(ctx context.Context, arg BindCrShellIssueIfNullParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindCrShellIssueIfNull, arg.WorkspaceID, arg.ShellIssueID, arg.CrID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const bindTaskCrIfNull = `-- name: BindTaskCrIfNull :execrows
+UPDATE agent_task_queue
+SET cr_id = $2
+WHERE id = $1 AND agent_id = $3
+  AND (cr_id IS NULL OR cr_id = $2)
+`
+
+type BindTaskCrIfNullParams struct {
+	ID      pgtype.UUID `json:"id"`
+	CrID    pgtype.Text `json:"cr_id"`
+	AgentID pgtype.UUID `json:"agent_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — CAS write of task.cr_id inside
+// the bind transaction. The caller already holds the FOR UPDATE lock and
+// verified under lock that cr_id IS NULL or equals the target; the WHERE
+// clause is defense-in-depth only (NULL → value or same-value replay).
+func (q *Queries) BindTaskCrIfNull(ctx context.Context, arg BindTaskCrIfNullParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindTaskCrIfNull, arg.ID, arg.CrID, arg.AgentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const cancelAgentTask = `-- name: CancelAgentTask :one
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
@@ -3030,13 +3079,17 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, status, priority, context,
     originator_user_id, accountable_user_id, originator_source,
     delegated_from_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id,
-    cr_id, pipeline_node_run_id
+    cr_id, pipeline_node_run_id,
+    -- CR-2026-053 TASK-06 (FR-B12): reviewer tasks inherit issue/project context
+    -- from the source task row at insert time; the caller cannot supply them.
+    issue_id, project_id
 )
 SELECT
     a.id, a.runtime_id, 'queued', $3, $4,
     s.originator_user_id, s.accountable_user_id, s.originator_source,
     s.delegated_from_task_id, s.rule_version_id, s.trigger_evidence_kind, s.trigger_evidence_ref_id,
-    $5, $6
+    $5, $6,
+    s.issue_id, s.project_id
 FROM agent_task_queue s
 JOIN agent a
   ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
@@ -3046,6 +3099,10 @@ WHERE s.id = $7 AND s.agent_id = $2
   AND s.originator_source IS NOT NULL AND btrim(s.originator_source) <> ''
   AND s.originator_user_id IS NOT NULL
   AND s.accountable_user_id = s.originator_user_id
+  -- CR-2026-053 TASK-06 (FR-B12): a pipeline reviewer task without Issue
+  -- context is guaranteed to fail the bind pre-step (TASK_ISSUE_REQUIRED);
+  -- refuse to create it instead of producing a doomed task.
+  AND s.issue_id IS NOT NULL
 ON CONFLICT (pipeline_node_run_id)
     WHERE pipeline_node_run_id IS NOT NULL
       AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
@@ -7033,6 +7090,273 @@ func (q *Queries) LockAgentForAutopilotAssignment(ctx context.Context, arg LockA
 		&i.DisabledRuntimeSkills,
 		&i.ServiceTier,
 		&i.ConversationStarters,
+	)
+	return i, err
+}
+
+const lockAgentTaskForCrBind = `-- name: LockAgentTaskForCrBind :one
+SELECT atq.id, atq.agent_id, atq.issue_id, atq.status, atq.priority, atq.dispatched_at, atq.started_at, atq.completed_at, atq.result, atq.error, atq.created_at, atq.context, atq.runtime_id, atq.session_id, atq.work_dir, atq.trigger_comment_id, atq.chat_session_id, atq.autopilot_run_id, atq.attempt, atq.max_attempts, atq.parent_task_id, atq.failure_reason, atq.trigger_summary, atq.force_fresh_session, atq.is_leader_task, atq.wait_reason, atq.initiator_user_id, atq.handoff_note, atq.prepare_lease_expires_at, atq.squad_id, atq.runtime_mcp_overlay, atq.escalation_for_task_id, atq.fire_at, atq.originator_user_id, atq.runtime_connected_apps, atq.coalesced_comment_ids, atq.delivered_comment_ids, atq.chat_input_task_id, atq.chat_finalize_deferred_at, atq.originator_source, atq.delegated_from_task_id, atq.retry_of_task_id, atq.rerun_of_task_id, atq.rule_version_id, atq.trigger_evidence_kind, atq.trigger_evidence_ref_id, atq.accountable_user_id, atq.session_rollout_missing, atq.retired_session_id, atq.quick_actions_disabled, atq.regenerate_quick_actions_for, atq.branch_name, atq.durable_work_dir, atq.channel_context_revision, atq.cr_id, atq.pipeline_node_run_id, atq.project_id, atq.approval_workspace_id, a.workspace_id AS agent_workspace_id
+FROM agent_task_queue atq
+JOIN agent a ON a.id = atq.agent_id
+WHERE atq.id = $1 AND atq.agent_id = $2
+FOR UPDATE OF atq, a
+`
+
+type LockAgentTaskForCrBindParams struct {
+	ID      pgtype.UUID `json:"id"`
+	AgentID pgtype.UUID `json:"agent_id"`
+}
+
+type LockAgentTaskForCrBindRow struct {
+	ID                        pgtype.UUID        `json:"id"`
+	AgentID                   pgtype.UUID        `json:"agent_id"`
+	IssueID                   pgtype.UUID        `json:"issue_id"`
+	Status                    string             `json:"status"`
+	Priority                  int32              `json:"priority"`
+	DispatchedAt              pgtype.Timestamptz `json:"dispatched_at"`
+	StartedAt                 pgtype.Timestamptz `json:"started_at"`
+	CompletedAt               pgtype.Timestamptz `json:"completed_at"`
+	Result                    []byte             `json:"result"`
+	Error                     pgtype.Text        `json:"error"`
+	CreatedAt                 pgtype.Timestamptz `json:"created_at"`
+	Context                   []byte             `json:"context"`
+	RuntimeID                 pgtype.UUID        `json:"runtime_id"`
+	SessionID                 pgtype.Text        `json:"session_id"`
+	WorkDir                   pgtype.Text        `json:"work_dir"`
+	TriggerCommentID          pgtype.UUID        `json:"trigger_comment_id"`
+	ChatSessionID             pgtype.UUID        `json:"chat_session_id"`
+	AutopilotRunID            pgtype.UUID        `json:"autopilot_run_id"`
+	Attempt                   int32              `json:"attempt"`
+	MaxAttempts               int32              `json:"max_attempts"`
+	ParentTaskID              pgtype.UUID        `json:"parent_task_id"`
+	FailureReason             pgtype.Text        `json:"failure_reason"`
+	TriggerSummary            pgtype.Text        `json:"trigger_summary"`
+	ForceFreshSession         bool               `json:"force_fresh_session"`
+	IsLeaderTask              bool               `json:"is_leader_task"`
+	WaitReason                pgtype.Text        `json:"wait_reason"`
+	InitiatorUserID           pgtype.UUID        `json:"initiator_user_id"`
+	HandoffNote               pgtype.Text        `json:"handoff_note"`
+	PrepareLeaseExpiresAt     pgtype.Timestamptz `json:"prepare_lease_expires_at"`
+	SquadID                   pgtype.UUID        `json:"squad_id"`
+	RuntimeMcpOverlay         []byte             `json:"runtime_mcp_overlay"`
+	EscalationForTaskID       pgtype.UUID        `json:"escalation_for_task_id"`
+	FireAt                    pgtype.Timestamptz `json:"fire_at"`
+	OriginatorUserID          pgtype.UUID        `json:"originator_user_id"`
+	RuntimeConnectedApps      []byte             `json:"runtime_connected_apps"`
+	CoalescedCommentIds       []pgtype.UUID      `json:"coalesced_comment_ids"`
+	DeliveredCommentIds       []pgtype.UUID      `json:"delivered_comment_ids"`
+	ChatInputTaskID           pgtype.UUID        `json:"chat_input_task_id"`
+	ChatFinalizeDeferredAt    pgtype.Timestamptz `json:"chat_finalize_deferred_at"`
+	OriginatorSource          pgtype.Text        `json:"originator_source"`
+	DelegatedFromTaskID       pgtype.UUID        `json:"delegated_from_task_id"`
+	RetryOfTaskID             pgtype.UUID        `json:"retry_of_task_id"`
+	RerunOfTaskID             pgtype.UUID        `json:"rerun_of_task_id"`
+	RuleVersionID             pgtype.UUID        `json:"rule_version_id"`
+	TriggerEvidenceKind       pgtype.Text        `json:"trigger_evidence_kind"`
+	TriggerEvidenceRefID      pgtype.UUID        `json:"trigger_evidence_ref_id"`
+	AccountableUserID         pgtype.UUID        `json:"accountable_user_id"`
+	SessionRolloutMissing     bool               `json:"session_rollout_missing"`
+	RetiredSessionID          pgtype.Text        `json:"retired_session_id"`
+	QuickActionsDisabled      bool               `json:"quick_actions_disabled"`
+	RegenerateQuickActionsFor pgtype.UUID        `json:"regenerate_quick_actions_for"`
+	BranchName                pgtype.Text        `json:"branch_name"`
+	DurableWorkDir            pgtype.Text        `json:"durable_work_dir"`
+	ChannelContextRevision    pgtype.Int8        `json:"channel_context_revision"`
+	CrID                      pgtype.Text        `json:"cr_id"`
+	PipelineNodeRunID         pgtype.UUID        `json:"pipeline_node_run_id"`
+	ProjectID                 pgtype.UUID        `json:"project_id"`
+	ApprovalWorkspaceID       pgtype.UUID        `json:"approval_workspace_id"`
+	AgentWorkspaceID          pgtype.UUID        `json:"agent_workspace_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the task row (and its agent
+// row) FOR UPDATE for the CR-bind transaction. agent_task_queue has no
+// workspace_id column; tenant isolation comes from the JOIN to
+// agent.workspace_id (same pattern as GetAgentTaskInWorkspace). 0 rows → task
+// missing or task/agent mismatch (caller maps to TASK_CONTEXT_REQUIRED).
+func (q *Queries) LockAgentTaskForCrBind(ctx context.Context, arg LockAgentTaskForCrBindParams) (LockAgentTaskForCrBindRow, error) {
+	row := q.db.QueryRow(ctx, lockAgentTaskForCrBind, arg.ID, arg.AgentID)
+	var i LockAgentTaskForCrBindRow
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CrID,
+		&i.PipelineNodeRunID,
+		&i.ProjectID,
+		&i.ApprovalWorkspaceID,
+		&i.AgentWorkspaceID,
+	)
+	return i, err
+}
+
+const lockCrForCrBind = `-- name: LockCrForCrBind :one
+SELECT id, workspace_id, cr_id, title, status, owners, target_version, projected_commit, needs_reconcile, shell_issue_id, created_at, updated_at FROM cr
+WHERE workspace_id = $1 AND cr_id = $2
+FOR UPDATE
+`
+
+type LockCrForCrBindParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	CrID        string      `json:"cr_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the CR projection row FOR
+// UPDATE and scope it to the task's workspace. 0 rows → CR missing or
+// cross-workspace (caller maps to CR_NOT_FOUND).
+func (q *Queries) LockCrForCrBind(ctx context.Context, arg LockCrForCrBindParams) (Cr, error) {
+	row := q.db.QueryRow(ctx, lockCrForCrBind, arg.WorkspaceID, arg.CrID)
+	var i Cr
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CrID,
+		&i.Title,
+		&i.Status,
+		&i.Owners,
+		&i.TargetVersion,
+		&i.ProjectedCommit,
+		&i.NeedsReconcile,
+		&i.ShellIssueID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockIssueForCrBind = `-- name: LockIssueForCrBind :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at FROM issue
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE
+`
+
+type LockIssueForCrBindParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the issue row FOR UPDATE and
+// scope it to the task's workspace. 0 rows → issue missing or cross-workspace
+// (caller maps to TASK_ISSUE_REQUIRED).
+func (q *Queries) LockIssueForCrBind(ctx context.Context, arg LockIssueForCrBindParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, lockIssueForCrBind, arg.ID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+	)
+	return i, err
+}
+
+const lockProjectForCrBind = `-- name: LockProjectForCrBind :one
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority, start_date, due_date, settings FROM project
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE
+`
+
+type LockProjectForCrBindParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the project row FOR UPDATE
+// and scope it to the task's workspace. 0 rows → project missing or
+// cross-workspace (caller maps to TASK_PROJECT_MISMATCH).
+func (q *Queries) LockProjectForCrBind(ctx context.Context, arg LockProjectForCrBindParams) (Project, error) {
+	row := q.db.QueryRow(ctx, lockProjectForCrBind, arg.ID, arg.WorkspaceID)
+	var i Project
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Icon,
+		&i.Status,
+		&i.LeadType,
+		&i.LeadID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Priority,
+		&i.StartDate,
+		&i.DueDate,
+		&i.Settings,
 	)
 	return i, err
 }
