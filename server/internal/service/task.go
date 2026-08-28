@@ -369,8 +369,10 @@ type PipelineTaskSpec struct {
 // EnqueuePipelineTask enqueues a Runner pipeline-node task by copying the full
 // attribution snapshot from the trusted source task in one INSERT. It does not
 // re-classify attribution and never treats a logical node owner as the human.
-// Any guard failure (source task / executor agent / CR workspace mismatch)
-// inserts 0 rows and returns ErrRunnerAttributionInvalid.
+// Any guard failure (source task / executor agent / CR workspace mismatch,
+// or — CR-2026-053 TASK-06/FR-B12 — an issue-less source task) inserts 0 rows
+// and returns ErrRunnerAttributionInvalid; issue_id/project_id are inherited
+// from the source task row inside the INSERT, the caller cannot supply them.
 func (s *TaskService) EnqueuePipelineTask(ctx context.Context, spec PipelineTaskSpec) (db.AgentTaskQueue, error) {
 	contextJSON, err := json.Marshal(map[string]any{
 		"type":         "pipeline_node",
@@ -4241,6 +4243,277 @@ func (s *TaskService) AttributeTaskToCR(ctx context.Context, taskID pgtype.UUID,
 		// ignored (the daemon's self-report is not a security boundary).
 		slog.Debug("cr attribution skipped: cr_id not valid for this task's workspace", "task_id", util.UUIDToString(taskID), "cr_id", crID)
 	}
+}
+
+// CRBindResult is the success payload of BindCurrentTaskToCR (SDD §3.1):
+// the server-derived task/issue/project and whether any binding field
+// actually transitioned (same-value replay → changed=false, AC-B3).
+type CRBindResult struct {
+	CRID      string    `json:"cr_id"`
+	TaskID    pgtype.UUID `json:"task_id"`
+	IssueID   pgtype.UUID `json:"issue_id"`
+	ProjectID pgtype.UUID `json:"project_id"`
+	Changed   bool      `json:"changed"`
+}
+
+// CR-bind sentinel errors (FR-B3). The handler maps each to its HTTP status;
+// none of them ever increments a review attempt or becomes a business blocker
+// (they are technical failures, SDD §3.1).
+var (
+	ErrCRBindTaskContext       = errors.New("TASK_CONTEXT_REQUIRED")
+	ErrCRBindTaskIssueRequired = errors.New("TASK_ISSUE_REQUIRED")
+	ErrCRBindCRNotFound        = errors.New("CR_NOT_FOUND")
+	ErrCRBindTaskProjectMismatch = errors.New("TASK_PROJECT_MISMATCH")
+	ErrCRBindTaskCRConflict    = errors.New("TASK_CR_CONFLICT")
+	ErrCRBindCRIssueConflict   = errors.New("CR_ISSUE_CONFLICT")
+	ErrCRBindFailed            = errors.New("CR_BIND_FAILED")
+)
+
+// BindCurrentTaskToCR (CR-2026-053 TASK-05, SDD §4.1) is the task-scoped
+// CR→Issue binding transaction. All identity inputs are server-derived: the
+// caller passes only the actor triple from the mat_ task token (task/agent/
+// workspace) and the CR-ID the review Skill submits; Issue/Project are read
+// from the task row and database relationships — the caller cannot specify
+// them (FR-B1/NFR-4).
+//
+// Trust ceiling (FR-B11): the task token authoritatively proves task, agent
+// and workspace; issue/project derive from the task row and DB relations; the
+// CR-ID is still submitted by the Skill and only validated to live in the same
+// workspace. A malicious or mistaken task in the same workspace could
+// therefore bind an unbound CR to the wrong issue; CAS, independent reviewer
+// routing, structure tests and activity_log audit lower the probability and
+// provide accountability, but do NOT constitute cryptographic CR→Issue source
+// proof. Upgrade condition: only if a misbinding actually occurs or the risk
+// assessment escalates does the scheduler layer get to write task.cr_id
+// authoritatively.
+//
+// Lock order (single global order, all primary-key equality lookups, avoids
+// deadlocks): agent → task → issue → project → cr.
+func (s *TaskService) BindCurrentTaskToCR(ctx context.Context, taskID, agentID, actorWorkspaceID pgtype.UUID, crID string) (CRBindResult, error) {
+	if !taskID.Valid || !agentID.Valid || !actorWorkspaceID.Valid {
+		return CRBindResult{}, ErrCRBindTaskContext
+	}
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		slog.Error("cr bind: begin tx failed", "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// 1) Lock the task row via task→agent workspace join (agent_task_queue has
+	// no workspace_id column; tenant isolation comes from agent.workspace_id,
+	// same pattern as GetAgentTaskInWorkspace). Token↔DB workspace mismatch is
+	// fail-closed: TASK_CONTEXT_REQUIRED.
+	task, err := qtx.LockAgentTaskForCrBind(ctx, db.LockAgentTaskForCrBindParams{
+		ID:      taskID,
+		AgentID: agentID,
+	})
+	if err == pgx.ErrNoRows {
+		return CRBindResult{}, ErrCRBindTaskContext
+	}
+	if err != nil {
+		slog.Error("cr bind: lock task failed", "task_id", util.UUIDToString(taskID), "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+	if task.AgentWorkspaceID != actorWorkspaceID {
+		slog.Warn("cr bind: token workspace != agent workspace", "task_id", util.UUIDToString(taskID), "token_ws", util.UUIDToString(actorWorkspaceID), "db_ws", util.UUIDToString(task.AgentWorkspaceID))
+		return CRBindResult{}, ErrCRBindTaskContext
+	}
+	// Hard technical failure, not a business branch: an issue-less reviewer
+	// task means the creation path violated FR-B12. Fix the creation path and
+	// retry — never skip binding and write the canonical review (NFR-6).
+	if !task.IssueID.Valid {
+		return CRBindResult{}, ErrCRBindTaskIssueRequired
+	}
+
+	// 2) Lock the issue, scope it to the task's workspace.
+	issue, err := qtx.LockIssueForCrBind(ctx, db.LockIssueForCrBindParams{
+		ID:          task.IssueID,
+		WorkspaceID: task.AgentWorkspaceID,
+	})
+	if err == pgx.ErrNoRows {
+		return CRBindResult{}, ErrCRBindTaskIssueRequired
+	}
+	if err != nil {
+		slog.Error("cr bind: lock issue failed", "issue_id", util.UUIDToString(task.IssueID), "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+	if !issue.ProjectID.Valid {
+		return CRBindResult{}, ErrCRBindTaskProjectMismatch
+	}
+
+	// 3) Lock the project, verify workspace + task/issue/project closure.
+	project, err := qtx.LockProjectForCrBind(ctx, db.LockProjectForCrBindParams{
+		ID:          issue.ProjectID,
+		WorkspaceID: task.AgentWorkspaceID,
+	})
+	if err == pgx.ErrNoRows {
+		return CRBindResult{}, ErrCRBindTaskProjectMismatch
+	}
+	if err != nil {
+		slog.Error("cr bind: lock project failed", "project_id", util.UUIDToString(issue.ProjectID), "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+	if task.ProjectID.Valid && task.ProjectID != issue.ProjectID {
+		return CRBindResult{}, ErrCRBindTaskProjectMismatch
+	}
+
+	// 4) Lock the CR projection row, scope it to the task's workspace.
+	cr, err := qtx.LockCrForCrBind(ctx, db.LockCrForCrBindParams{
+		WorkspaceID: task.AgentWorkspaceID,
+		CrID:        crID,
+	})
+	if err == pgx.ErrNoRows {
+		return CRBindResult{}, ErrCRBindCRNotFound
+	}
+	if err != nil {
+		slog.Error("cr bind: lock cr failed", "cr_id", crID, "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+
+	// 5) CAS conflict checks — non-empty different values are rejected, never
+	// overwritten (NFR-2). Conflicts log cr_issue_bind_rejected (FR-B4) and
+	// commit zero binding writes.
+	taskHasOtherCR := task.CrID.Valid && task.CrID.String != crID
+	crHasOtherIssue := cr.ShellIssueID.Valid && cr.ShellIssueID != task.IssueID
+	if taskHasOtherCR || crHasOtherIssue {
+		reason := ""
+		if taskHasOtherCR {
+			reason = "task already bound to another CR"
+		} else {
+			reason = "CR already bound to another issue"
+		}
+		// CR-2026-053 review-code BLOCK-③ (FR-B4/NFR-5): the rejection audit
+		// row is part of the conflict handling, not a side effect. If it
+		// cannot be written, the conflict was NOT handled properly — fail
+		// closed with CR_BIND_FAILED and roll back (deferred tx.Rollback)
+		// instead of committing a silent, unaudited 409.
+		if err := s.logCrBindRejected(ctx, qtx, task, issue, project, cr, task.AgentWorkspaceID, agentID, crID, reason); err != nil {
+			return CRBindResult{}, ErrCRBindFailed
+		}
+		if err := tx.Commit(ctx); err != nil {
+			slog.Error("cr bind: audit commit failed", "error", err)
+			return CRBindResult{}, ErrCRBindFailed
+		}
+		if taskHasOtherCR {
+			return CRBindResult{}, ErrCRBindTaskCRConflict
+		}
+		return CRBindResult{}, ErrCRBindCRIssueConflict
+	}
+
+	// 6) Bindings: changed is decided from the lock-held old values, NOT from
+	// rows affected — the CAS WHERE matches both "NULL→value" and
+	// "same-value replay" (SDD §2.2). Same-value replay → changed=false, no
+	// new audit row, no refresh event (AC-B3).
+	taskChanged := !task.CrID.Valid
+	crChanged := !cr.ShellIssueID.Valid
+	changed := taskChanged || crChanged
+	if taskChanged {
+		if _, err := qtx.BindTaskCrIfNull(ctx, db.BindTaskCrIfNullParams{
+			ID:      task.ID,
+			AgentID: agentID,
+			CrID:    pgtype.Text{String: crID, Valid: true},
+		}); err != nil {
+			slog.Error("cr bind: update task.cr_id failed", "task_id", util.UUIDToString(task.ID), "error", err)
+			return CRBindResult{}, ErrCRBindFailed
+		}
+	}
+	if crChanged {
+		if _, err := qtx.BindCrShellIssueIfNull(ctx, db.BindCrShellIssueIfNullParams{
+			WorkspaceID: task.AgentWorkspaceID,
+			CrID:        crID,
+			ShellIssueID: task.IssueID,
+		}); err != nil {
+			slog.Error("cr bind: update cr.shell_issue_id failed", "cr_id", crID, "error", err)
+			return CRBindResult{}, ErrCRBindFailed
+		}
+	}
+	if changed {
+		if err := s.logCrBindBound(ctx, qtx, task, issue, project, cr, task.AgentWorkspaceID, agentID, crID); err != nil {
+			return CRBindResult{}, ErrCRBindFailed
+		}
+	}
+	// NFR-1: all three writes (task.cr_id, cr.shell_issue_id, activity_log)
+	// commit together; any failure above rolled back — no partial binding.
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("cr bind: commit failed", "error", err)
+		return CRBindResult{}, ErrCRBindFailed
+	}
+	return CRBindResult{
+		CRID:      crID,
+		TaskID:    task.ID,
+		IssueID:   task.IssueID,
+		ProjectID: issue.ProjectID,
+		Changed:   changed,
+	}, nil
+}
+
+func bindAuditDetails(workspaceID pgtype.UUID, task db.LockAgentTaskForCrBindRow, issue db.Issue, cr db.Cr, crID string, extra map[string]any) []byte {
+	projectID := pgtype.UUID{}
+	if issue.ProjectID.Valid {
+		projectID = issue.ProjectID
+	}
+	details := map[string]any{
+		"workspace_id": util.UUIDToString(workspaceID),
+		"issue_id":     util.UUIDToString(task.IssueID),
+		"project_id":   util.UUIDToString(projectID),
+		"task_id":      util.UUIDToString(task.ID),
+		"agent_id":     util.UUIDToString(task.AgentID),
+		"cr_id":        crID,
+	}
+	if cr.ShellIssueID.Valid {
+		details["cr_shell_issue_id"] = util.UUIDToString(cr.ShellIssueID)
+	}
+	if task.CrID.Valid {
+		details["task_cr_id"] = task.CrID.String
+	}
+	for k, v := range extra {
+		details[k] = v
+	}
+	b, err := json.Marshal(details)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
+// logCrBindBound writes the success audit row inside the bind transaction
+// (action=cr_issue_bound, NFR-5). Any failure rolls back the whole binding.
+func (s *TaskService) logCrBindBound(ctx context.Context, qtx *db.Queries, task db.LockAgentTaskForCrBindRow, issue db.Issue, project db.Project, cr db.Cr, workspaceID pgtype.UUID, agentID pgtype.UUID, crID string) error {
+	_, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: workspaceID,
+		IssueID:     task.IssueID,
+		ActorType:   pgtype.Text{String: "agent", Valid: true},
+		ActorID:     agentID,
+		Action:      "cr_issue_bound",
+		Details:     bindAuditDetails(workspaceID, task, issue, cr, crID, nil),
+	})
+	if err != nil {
+		slog.Error("cr bind: activity_log insert failed", "task_id", util.UUIDToString(task.ID), "cr_id", crID, "error", err)
+	}
+	return err
+}
+
+// logCrBindRejected writes the conflict audit row (action=cr_issue_bind_rejected,
+// FR-B4) — the caller then commits; zero binding writes, zero overwrite. Any
+// error is returned so the caller can fail closed with CR_BIND_FAILED and roll
+// back (a 409 without its audit row would misrepresent the conflict as handled,
+// violating FR-B4/NFR-5). Uses the existing activity_log table; no new audit
+// table.
+func (s *TaskService) logCrBindRejected(ctx context.Context, qtx *db.Queries, task db.LockAgentTaskForCrBindRow, issue db.Issue, project db.Project, cr db.Cr, workspaceID pgtype.UUID, agentID pgtype.UUID, crID, reason string) error {
+	_, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: workspaceID,
+		IssueID:     task.IssueID,
+		ActorType:   pgtype.Text{String: "agent", Valid: true},
+		ActorID:     agentID,
+		Action:      "cr_issue_bind_rejected",
+		Details:     bindAuditDetails(workspaceID, task, issue, cr, crID, map[string]any{"reason": reason}),
+	})
+	if err != nil {
+		slog.Error("cr bind: rejected audit insert failed", "task_id", util.UUIDToString(task.ID), "cr_id", crID, "error", err)
+	}
+	return err
 }
 
 func (s *TaskService) cancelDeferredEscalationsForTask(ctx context.Context, taskID pgtype.UUID) {

@@ -418,6 +418,10 @@ describe("TeamAgentStreamView", () => {
             nodeAt: "2026-01-01T00:00:03.000Z",
             nodeStatus: "blocked",
             nodeKind: "skill",
+            // A review-blocked CR is NOT at an approval gate: pending_stage
+            // is empty, so no current ApprovalCard is rendered for it
+            // (CR-2026-053 FR-B6) — only the blocked card stays.
+            pending_stage: "",
           }),
         ]}
         currentUserId="member-1"
@@ -437,6 +441,92 @@ describe("TeamAgentStreamView", () => {
       "project-chat-user-bubble",
       "cr-gate-blocked-card",
     ]);
+  });
+
+  // ── CR-2026-053 TASK-07 (FR-B6, AC-C1~C4): pending_stage non-empty renders
+  // the ONE current ApprovalCard even without a human_approval/running node. ──
+
+  it("renders one ApprovalCard when pending_stage is set and gate_nodes is empty (AC-C1)", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[]}
+        crs={[
+          gateCR({
+            cr_id: "CR-NODE-LESS",
+            nodeAt: "2026-01-01T00:00:00.000Z",
+            nodeStatus: "completed",
+            gate_nodes: [],
+          }),
+        ]}
+      />,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="cr-gate-approval-card"]').length,
+    ).toBe(1);
+  });
+
+  it("renders exactly ONE ApprovalCard when a human_approval/running node also exists (AC-C2)", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[]}
+        crs={[
+          gateCR({ cr_id: "CR-ONE", nodeAt: "2026-01-01T00:00:00.000Z", nodeStatus: "running" }),
+        ]}
+      />,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="cr-gate-approval-card"]').length,
+    ).toBe(1);
+  });
+
+  it("keeps blocked cards and history nodes while the current card is rendered (AC-C3)", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[]}
+        crs={[
+          gateCR({
+            cr_id: "CR-MIXED",
+            nodeAt: "2026-01-01T00:00:00.000Z",
+            nodeStatus: "blocked",
+            nodeKind: "skill",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="cr-gate-approval-card"]').length,
+    ).toBe(1);
+    expect(
+      container.querySelectorAll('[data-testid="cr-gate-blocked-card"]').length,
+    ).toBe(1);
+  });
+
+  it("renders no current ApprovalCard when pending_stage is empty (AC-C4)", () => {
+    const { container } = renderWithProviders(
+      <TeamAgentStreamView
+        {...streamBaseProps}
+        comments={[]}
+        tasks={[]}
+        crs={[
+          gateCR({
+            cr_id: "CR-NO-GATE",
+            nodeAt: "2026-01-01T00:00:00.000Z",
+            nodeStatus: "completed",
+            nodeKind: "skill",
+            pending_stage: "",
+          }),
+        ]}
+      />,
+    );
+    expect(
+      container.querySelectorAll('[data-testid="cr-gate-approval-card"]').length,
+    ).toBe(0);
   });
 });
 

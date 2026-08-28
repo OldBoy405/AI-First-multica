@@ -657,6 +657,12 @@ RETURNING *;
 -- projection. Any guard failure inserts 0 rows; the caller maps pgx.ErrNoRows
 -- to RUNNER_ATTRIBUTION_INVALID.
 --
+-- CR-2026-053 TASK-06 fix (FR-B12, review-code BLOCK-②): the source row is
+-- matched independently from the executor agent ($2), because the reviewer
+-- may differ from the source task's author. The source agent is still joined
+-- to $1 below so a task ID from another workspace cannot copy attribution or
+-- Issue/Project context across the tenant boundary.
+--
 -- A pipeline successor node is a systemic continuation of the same user
 -- intent, not a new attribution event (MUL-4302 §5): originator/accountable/
 -- source/delegation/rule/evidence are copied verbatim, and the logical node
@@ -665,22 +671,32 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, status, priority, context,
     originator_user_id, accountable_user_id, originator_source,
     delegated_from_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id,
-    cr_id, pipeline_node_run_id
+    cr_id, pipeline_node_run_id,
+    -- CR-2026-053 TASK-06 (FR-B12): reviewer tasks inherit issue/project context
+    -- from the source task row at insert time; the caller cannot supply them.
+    issue_id, project_id
 )
 SELECT
     a.id, a.runtime_id, 'queued', $3, $4,
     s.originator_user_id, s.accountable_user_id, s.originator_source,
     s.delegated_from_task_id, s.rule_version_id, s.trigger_evidence_kind, s.trigger_evidence_ref_id,
-    $5, $6
+    $5, $6,
+    s.issue_id, s.project_id
 FROM agent_task_queue s
+JOIN agent source_agent
+  ON source_agent.id = s.agent_id AND source_agent.workspace_id = $1
 JOIN agent a
   ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
 JOIN cr c
   ON c.workspace_id = $1 AND c.cr_id = $5
-WHERE s.id = $7 AND s.agent_id = $2
+WHERE s.id = $7
   AND s.originator_source IS NOT NULL AND btrim(s.originator_source) <> ''
   AND s.originator_user_id IS NOT NULL
   AND s.accountable_user_id = s.originator_user_id
+  -- CR-2026-053 TASK-06 (FR-B12): a pipeline reviewer task without Issue
+  -- context is guaranteed to fail the bind pre-step (TASK_ISSUE_REQUIRED);
+  -- refuse to create it instead of producing a doomed task.
+  AND s.issue_id IS NOT NULL
 ON CONFLICT (pipeline_node_run_id)
     WHERE pipeline_node_run_id IS NOT NULL
       AND status IN ('queued', 'deferred', 'dispatched', 'waiting_local_directory', 'running')
@@ -1102,6 +1118,61 @@ FROM agent a
 WHERE atq.id = $1
   AND atq.agent_id = a.id
   AND EXISTS (SELECT 1 FROM cr WHERE cr.cr_id = $2 AND cr.workspace_id = a.workspace_id);
+
+-- name: LockAgentTaskForCrBind :one
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the task row (and its agent
+-- row) FOR UPDATE for the CR-bind transaction. agent_task_queue has no
+-- workspace_id column; tenant isolation comes from the JOIN to
+-- agent.workspace_id (same pattern as GetAgentTaskInWorkspace). 0 rows → task
+-- missing or task/agent mismatch (caller maps to TASK_CONTEXT_REQUIRED).
+SELECT atq.*, a.workspace_id AS agent_workspace_id
+FROM agent_task_queue atq
+JOIN agent a ON a.id = atq.agent_id
+WHERE atq.id = $1 AND atq.agent_id = $2
+FOR UPDATE OF atq, a;
+
+-- name: LockIssueForCrBind :one
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the issue row FOR UPDATE and
+-- scope it to the task's workspace. 0 rows → issue missing or cross-workspace
+-- (caller maps to TASK_ISSUE_REQUIRED).
+SELECT * FROM issue
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE;
+
+-- name: LockProjectForCrBind :one
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the project row FOR UPDATE
+-- and scope it to the task's workspace. 0 rows → project missing or
+-- cross-workspace (caller maps to TASK_PROJECT_MISMATCH).
+SELECT * FROM project
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE;
+
+-- name: LockCrForCrBind :one
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — lock the CR projection row FOR
+-- UPDATE and scope it to the task's workspace. 0 rows → CR missing or
+-- cross-workspace (caller maps to CR_NOT_FOUND).
+SELECT * FROM cr
+WHERE workspace_id = $1 AND cr_id = $2
+FOR UPDATE;
+
+-- name: BindTaskCrIfNull :execrows
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — CAS write of task.cr_id inside
+-- the bind transaction. The caller already holds the FOR UPDATE lock and
+-- verified under lock that cr_id IS NULL or equals the target; the WHERE
+-- clause is defense-in-depth only (NULL → value or same-value replay).
+UPDATE agent_task_queue
+SET cr_id = $2
+WHERE id = $1 AND agent_id = $3
+  AND (cr_id IS NULL OR cr_id = $2);
+
+-- name: BindCrShellIssueIfNull :execrows
+-- AIFIRST: CR-2026-053 TASK-05 (SDD §4.1) — CAS write of cr.shell_issue_id
+-- inside the bind transaction; same-value-replay semantics as
+-- BindTaskCrIfNull (defense-in-depth WHERE clause, lock-verified by caller).
+UPDATE cr
+SET shell_issue_id = $2
+WHERE workspace_id = $1 AND cr_id = $3
+  AND (shell_issue_id IS NULL OR shell_issue_id = $2);
 
 -- name: MarkAgentTaskWaitingLocalDirectory :one
 -- Transitions a freshly-dispatched task into 'waiting_local_directory' while

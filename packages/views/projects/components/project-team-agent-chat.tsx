@@ -37,7 +37,7 @@ import {
   ChatInputCore,
   type ChatInputDraftAdapter,
 } from "../../chat/components/chat-input";
-import { CrGateCard } from "./cr-gate-card";
+import { ApprovalCard, CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { ProjectQueueBar } from "./project-queue-bar";
@@ -244,7 +244,26 @@ export function TeamAgentStreamView({
       });
     }
     for (const cr of crs) {
+      // CR-2026-053 TASK-07 (FR-B6): pending_stage non-empty renders the ONE
+      // current ApprovalCard directly — even when gate_nodes lacks a
+      // human_approval/running node (the CR is at an approval gate but the
+      // node projection is missing/empty). pending_stage empty → no current
+      // card; blocked/history nodes below keep rendering.
+      if (cr.pending_stage) {
+        merged.push({
+          key: `g:${cr.cr_id}:current`,
+          at: new Date(cr.updated_at).getTime(),
+          node: <ApprovalCard cr={cr} wsId={wsId} projectId={projectId} />,
+        });
+      }
       for (const node of cr.gate_nodes) {
+        // Skip the current human_approval/running node: the pending_stage
+        // branch above renders exactly one current approval card; without
+        // this skip, both paths would double-render. Blocked cards and
+        // completed/failed history keep showing (AC-C2/AC-C3).
+        if (node.kind === "human_approval" && node.status === "running") {
+          continue;
+        }
         const key = `g:${cr.cr_id}:${node.node_id}:${node.attempt}`;
         merged.push({
           key,
