@@ -6,6 +6,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -195,6 +196,73 @@ func TestBindCurrentTaskTaskWithoutIssue(t *testing.T) {
 	dbfx.QueryRow(t, `SELECT shell_issue_id FROM cr WHERE workspace_id = $1::uuid AND cr_id = $2`, testWorkspaceID, crID).Scan(&shellIssue)
 	if shellIssue.Valid {
 		t.Error("zero-binding-write violated: cr.shell_issue_id set")
+	}
+}
+
+func TestBindCurrentTaskProjectMismatch(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	fx := crBindFixture(t)
+	otherProjectID := dbfx.Project(t, "cr-bind-other-project")
+	dbfx.Exec(t, `UPDATE agent_task_queue SET project_id = $1::uuid WHERE id = $2::uuid`, otherProjectID, fx["taskID"])
+
+	w := httptest.NewRecorder()
+	testHandler.HandleBindCurrentTask(w, bindRequest(t, fx["taskID"], fx["agentID"], testWorkspaceID, fx["crID"]))
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeError(t, w); got != "TASK_PROJECT_MISMATCH" {
+		t.Errorf("error = %q, want TASK_PROJECT_MISMATCH", got)
+	}
+	var taskCR pgtype.Text
+	dbfx.QueryRow(t, `SELECT cr_id FROM agent_task_queue WHERE id = $1::uuid`, fx["taskID"]).Scan(&taskCR)
+	if taskCR.Valid {
+		t.Error("zero-binding-write violated: task.cr_id set on project mismatch")
+	}
+	if n := dbfx.Count(t, `SELECT count(*) FROM activity_log WHERE workspace_id = $1::uuid AND action = 'cr_issue_bound' AND issue_id = $2::uuid`, testWorkspaceID, fx["issueID"]); n != 0 {
+		t.Fatalf("cr_issue_bound audit rows = %d, want 0", n)
+	}
+}
+
+func TestBindCurrentTaskAuditFailureRollsBack(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	fx := crBindFixture(t)
+	suffix := strings.ReplaceAll(fx["issueID"], "-", "")[:12]
+	functionName := "fail_cr_bind_audit_" + suffix
+	triggerName := "fail_cr_bind_audit_" + suffix
+	dbfx.Cleanup(t, fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, functionName))
+	dbfx.Cleanup(t, fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON activity_log`, triggerName))
+	dbfx.Exec(t, fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'injected cr bind audit failure';
+		END;
+		$$`, functionName))
+	dbfx.Exec(t, fmt.Sprintf(`
+		CREATE TRIGGER %s BEFORE INSERT ON activity_log
+		FOR EACH ROW WHEN (NEW.action = 'cr_issue_bound' AND NEW.issue_id = '%s'::uuid)
+		EXECUTE FUNCTION %s()`, triggerName, fx["issueID"], functionName))
+
+	w := httptest.NewRecorder()
+	testHandler.HandleBindCurrentTask(w, bindRequest(t, fx["taskID"], fx["agentID"], testWorkspaceID, fx["crID"]))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeError(t, w); got != "CR_BIND_FAILED" {
+		t.Errorf("error = %q, want CR_BIND_FAILED", got)
+	}
+	var taskCR pgtype.Text
+	var shellIssue pgtype.UUID
+	dbfx.QueryRow(t, `SELECT cr_id FROM agent_task_queue WHERE id = $1::uuid`, fx["taskID"]).Scan(&taskCR)
+	dbfx.QueryRow(t, `SELECT shell_issue_id FROM cr WHERE workspace_id = $1::uuid AND cr_id = $2`, testWorkspaceID, fx["crID"]).Scan(&shellIssue)
+	if taskCR.Valid || shellIssue.Valid {
+		t.Fatalf("audit failure left partial binding: task_cr=%v shell_issue=%v", taskCR, shellIssue)
+	}
+	if n := dbfx.Count(t, `SELECT count(*) FROM activity_log WHERE workspace_id = $1::uuid AND action = 'cr_issue_bound' AND issue_id = $2::uuid`, testWorkspaceID, fx["issueID"]); n != 0 {
+		t.Fatalf("cr_issue_bound audit rows = %d, want 0", n)
 	}
 }
 

@@ -29,10 +29,10 @@ func pipelineTaskFixture(t *testing.T, withIssue bool) (sourceTaskID, executorAg
 	// fixture does not set either, so the fixture explicitly stamps the handler
 	// test runtime here instead of touching dbfx.Task.
 	sourceCols := testutil.Cols{
-		"runtime_id":           handlerTestRuntimeID(t),
-		"originator_source":    "direct_human",
-		"originator_user_id":   testUserID,
-		"accountable_user_id":  testUserID,
+		"runtime_id":             handlerTestRuntimeID(t),
+		"originator_source":      "direct_human",
+		"originator_user_id":     testUserID,
+		"accountable_user_id":    testUserID,
 		"delegated_from_task_id": nil,
 	}
 	if withIssue {
@@ -54,7 +54,7 @@ func pipelineTaskFixture(t *testing.T, withIssue bool) (sourceTaskID, executorAg
 		ON CONFLICT (id) DO NOTHING`, testWorkspaceID, crID, testUserID)
 	dbfx.Exec(t, `INSERT INTO pipeline_node_run (id, run_id, node_id, kind, seq, status)
 		VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'::uuid, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'::uuid, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'::uuid, 'skill', 0, 'running')
-		ON CONFLICT (id) DO NOTHING`, )
+		ON CONFLICT (id) DO NOTHING`)
 	return sourceTaskID, executorAgentID, issueID, projectID, crID
 }
 
@@ -123,5 +123,63 @@ func TestCreatePipelineTaskIssueInheritNegative(t *testing.T) {
 	after := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE agent_id = $1::uuid`, executorAgentID)
 	if after != before {
 		t.Errorf("agent_task_queue rows = %d → %d, want no new row", before, after)
+	}
+}
+
+func TestCreatePipelineTaskRejectsCrossWorkspaceSource(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	foreignWorkspaceID := dbfx.Workspace(t, "cr-pipe-foreign", "cr-pipe-foreign")
+	foreign := testutil.New(testPool, foreignWorkspaceID, testUserID)
+	foreignRuntimeID := foreign.Runtime(t, "cr-pipe-foreign-runtime")
+	foreignProjectID := foreign.Project(t, "cr-pipe-foreign-project")
+	foreignIssueID := foreign.Issue(t, "cr-pipe-foreign-issue", testutil.Cols{"project_id": foreignProjectID})
+	foreignAgentID := foreign.Agent(t, "cr-pipe-foreign-agent", foreignRuntimeID)
+	foreignTaskID := foreign.Task(t, foreignAgentID, testutil.Cols{
+		"runtime_id":          foreignRuntimeID,
+		"originator_source":   "direct_human",
+		"originator_user_id":  testUserID,
+		"accountable_user_id": testUserID,
+		"issue_id":            foreignIssueID,
+		"project_id":          foreignProjectID,
+	})
+
+	executorAgentID := dbfx.Agent(t, "cr-pipe-cross-workspace-executor", handlerTestRuntimeID(t))
+	crID := "CR-PIPE-CROSS-WORKSPACE"
+	runID := "cccccccc-cccc-4ccc-8ccc-ccccccccccc1"
+	nodeID := "cccccccc-cccc-4ccc-8ccc-ccccccccccc2"
+	nodeRunID := "cccccccc-cccc-4ccc-8ccc-ccccccccccc3"
+	dbfx.Exec(t, `INSERT INTO cr (workspace_id, cr_id, status) VALUES ($1::uuid, $2, 'developing')
+		ON CONFLICT (workspace_id, cr_id) DO NOTHING`, testWorkspaceID, crID)
+	dbfx.Exec(t, `INSERT INTO pipeline_run (id, workspace_id, pipeline_id, cr_id, started_by, status)
+		VALUES ($1::uuid, $2::uuid, 'code-implementation', $3, $4::uuid, 'running')
+		ON CONFLICT (id) DO NOTHING`, runID, testWorkspaceID, crID, testUserID)
+	dbfx.Exec(t, `INSERT INTO pipeline_node_run (id, run_id, node_id, kind, seq, status)
+		VALUES ($1::uuid, $2::uuid, $3::uuid, 'skill', 0, 'running')
+		ON CONFLICT (id) DO NOTHING`, nodeRunID, runID, nodeID)
+	dbfx.Cleanup(t, `DELETE FROM cr WHERE workspace_id = $1::uuid AND cr_id = $2`, testWorkspaceID, crID)
+	dbfx.Cleanup(t, `DELETE FROM pipeline_run WHERE id = $1::uuid`, runID)
+	dbfx.Cleanup(t, `DELETE FROM pipeline_node_run WHERE id = $1::uuid`, nodeRunID)
+	dbfx.Cleanup(t, `DELETE FROM agent_task_queue WHERE pipeline_node_run_id = $1::uuid`, nodeRunID)
+
+	_, err := testHandler.TaskService.EnqueuePipelineTask(ctx, service.PipelineTaskSpec{
+		WorkspaceID:     util.MustParseUUID(testWorkspaceID),
+		CrID:            crID,
+		RunID:           util.MustParseUUID(runID),
+		NodeID:          util.MustParseUUID(nodeID),
+		NodeRunID:       util.MustParseUUID(nodeRunID),
+		PipelineID:      "code-implementation",
+		Attempt:         1,
+		Prompt:          "cross-workspace source must be rejected",
+		SourceTaskID:    util.MustParseUUID(foreignTaskID),
+		ExecutorAgentID: util.MustParseUUID(executorAgentID),
+	})
+	if !errors.Is(err, service.ErrRunnerAttributionInvalid) {
+		t.Fatalf("err = %v, want ErrRunnerAttributionInvalid", err)
+	}
+	if got := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE pipeline_node_run_id = $1::uuid`, nodeRunID); got != 0 {
+		t.Fatalf("cross-workspace pipeline tasks = %d, want 0", got)
 	}
 }

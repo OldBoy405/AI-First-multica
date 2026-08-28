@@ -3091,6 +3091,8 @@ SELECT
     $5, $6,
     s.issue_id, s.project_id
 FROM agent_task_queue s
+JOIN agent source_agent
+  ON source_agent.id = s.agent_id AND source_agent.workspace_id = $1
 JOIN agent a
   ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
 JOIN cr c
@@ -3129,11 +3131,10 @@ type CreatePipelineTaskParams struct {
 // to RUNNER_ATTRIBUTION_INVALID.
 //
 // CR-2026-053 TASK-06 fix (FR-B12, review-code BLOCK-②): the source row is
-// matched by s.id only — NOT s.agent_id = $2. The executor agent ($2) is the
-// independent reviewer who takes over the pipeline node and may differ from
-// the source task's author agent (that is the whole point of FR-B12's
-// independent reviewer path); requiring s.agent_id = $2 made a cross-agent
-// review node insert 0 rows.
+// matched independently from the executor agent ($2), because the reviewer
+// may differ from the source task's author. The source agent is still joined
+// to $1 below so a task ID from another workspace cannot copy attribution or
+// Issue/Project context across the tenant boundary.
 //
 // A pipeline successor node is a systemic continuation of the same user
 // intent, not a new attribution event (MUL-4302 §5): originator/accountable/
