@@ -76,10 +76,14 @@ func (h *Handler) HandleBindCurrentTask(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Transaction committed. Publish the existing cr:updated event so the
-	// project gates query re-renders (NFR-5); a failed publish is logged,
-	// never rolled back — the frontend re-queries on its own cadence and the
-	// realtime layer invalidates gates queries on this event (SDD §7.3).
-	h.publishCRUpdated(r, util.UUIDToString(workspaceID), crID)
+	// project gates query re-renders (NFR-5) — but only when the bind actually
+	// changed state. Same-value replay (changed=false) must not emit a refresh
+	// event (SDD §4.1 / AC-B3); a failed publish is logged, never rolled back —
+	// the frontend re-queries on its own cadence and the realtime layer
+	// invalidates gates queries on this event (SDD §7.3).
+	if result.Changed {
+		h.publishCRUpdated(r, util.UUIDToString(workspaceID), crID)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"cr_id":      result.CRID,

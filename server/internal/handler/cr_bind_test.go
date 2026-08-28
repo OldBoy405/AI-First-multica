@@ -13,7 +13,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // crBindFixture seeds the rows a successful bind needs: agent → task (with
@@ -107,7 +109,16 @@ func TestBindCurrentTaskReplayChangedFalse(t *testing.T) {
 	}
 	fx := crBindFixture(t)
 
+	// AC-B3 / review-code BLOCK-① regression: cr:updated refresh events must
+	// be emitted only when the bind changed state (changed=true); the
+	// same-value replay (changed=false) must publish no event.
+	var updated []events.Event
+	testHandler.Bus.Subscribe(protocol.EventCRUpdated, func(e events.Event) {
+		updated = append(updated, e)
+	})
+
 	for i := 0; i < 2; i++ {
+		updated = nil
 		w := httptest.NewRecorder()
 		testHandler.HandleBindCurrentTask(w, bindRequest(t, fx["taskID"], fx["agentID"], testWorkspaceID, fx["crID"]))
 		if w.Code != http.StatusOK {
@@ -118,6 +129,14 @@ func TestBindCurrentTaskReplayChangedFalse(t *testing.T) {
 		// AC-B3: same-value replay → changed=false, binding intact.
 		if i == 1 && out["changed"] != false {
 			t.Errorf("replay changed = %v, want false", out["changed"])
+		}
+		// First bind changed=true → exactly one cr:updated refresh event.
+		if i == 0 && len(updated) != 1 {
+			t.Errorf("first bind published %d cr:updated events, want 1", len(updated))
+		}
+		// Replay changed=false → no refresh event (SDD §4.1 / AC-B3).
+		if i == 1 && len(updated) != 0 {
+			t.Errorf("replay published %d cr:updated events, want 0 (changed=false must not refresh)", len(updated))
 		}
 	}
 	// No duplicate success audit on replay.
