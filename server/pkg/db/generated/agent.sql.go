@@ -3095,7 +3095,7 @@ JOIN agent a
   ON a.id = $2 AND a.workspace_id = $1 AND a.archived_at IS NULL AND a.runtime_id IS NOT NULL
 JOIN cr c
   ON c.workspace_id = $1 AND c.cr_id = $5
-WHERE s.id = $7 AND s.agent_id = $2
+WHERE s.id = $7
   AND s.originator_source IS NOT NULL AND btrim(s.originator_source) <> ''
   AND s.originator_user_id IS NOT NULL
   AND s.accountable_user_id = s.originator_user_id
@@ -3127,6 +3127,13 @@ type CreatePipelineTaskParams struct {
 // runtime-bound agents, and the CR must exist in the same workspace's cr
 // projection. Any guard failure inserts 0 rows; the caller maps pgx.ErrNoRows
 // to RUNNER_ATTRIBUTION_INVALID.
+//
+// CR-2026-053 TASK-06 fix (FR-B12, review-code BLOCK-②): the source row is
+// matched by s.id only — NOT s.agent_id = $2. The executor agent ($2) is the
+// independent reviewer who takes over the pipeline node and may differ from
+// the source task's author agent (that is the whole point of FR-B12's
+// independent reviewer path); requiring s.agent_id = $2 made a cross-agent
+// review node insert 0 rows.
 //
 // A pipeline successor node is a systemic continuation of the same user
 // intent, not a new attribution event (MUL-4302 §5): originator/accountable/

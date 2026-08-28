@@ -23,10 +23,16 @@ func pipelineTaskFixture(t *testing.T, withIssue bool) (sourceTaskID, executorAg
 	projectID = dbfx.Project(t, "cr-pipe-project")
 	issueID = dbfx.Issue(t, "cr-pipe-issue", testutil.Cols{"project_id": projectID})
 	sourceAgentID := dbfx.Agent(t, "cr-pipe-source-agent", "")
+	// cr_pipeline_task_test.go fix (review-code BLOCK-④): migration 251's
+	// agent_task_queue_active_requires_runtime CHECK requires every queued row
+	// to carry a runtime_id (or a terminal completed_at); the shared dbfx.Task
+	// fixture does not set either, so the fixture explicitly stamps the handler
+	// test runtime here instead of touching dbfx.Task.
 	sourceCols := testutil.Cols{
-		"originator_source":     "direct_human",
-		"originator_user_id":    testUserID,
-		"accountable_user_id":   testUserID,
+		"runtime_id":           handlerTestRuntimeID(t),
+		"originator_source":    "direct_human",
+		"originator_user_id":   testUserID,
+		"accountable_user_id":  testUserID,
 		"delegated_from_task_id": nil,
 	}
 	if withIssue {
@@ -38,6 +44,17 @@ func pipelineTaskFixture(t *testing.T, withIssue bool) (sourceTaskID, executorAg
 	crID = "CR-PIPE-TEST-01"
 	dbfx.Exec(t, `INSERT INTO cr (workspace_id, cr_id, status) VALUES ($1::uuid, $2, 'developing')
 		ON CONFLICT (workspace_id, cr_id) DO NOTHING`, testWorkspaceID, crID)
+	// agent_task_queue.pipeline_node_run_id is an FK to pipeline_node_run(id)
+	// (migration 437), itself FK'd to pipeline_run(id): the positive test's
+	// EnqueuePipelineTask insert needs both projection rows to exist, so the
+	// fixture seeds them with the test's deterministic run/node/node-run ids.
+	// (review-code BLOCK-④ fix: real-DB run surfaced this missing seed.)
+	dbfx.Exec(t, `INSERT INTO pipeline_run (id, workspace_id, pipeline_id, cr_id, started_by, status)
+		VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'::uuid, $1::uuid, 'code-implementation', $2, $3::uuid, 'running')
+		ON CONFLICT (id) DO NOTHING`, testWorkspaceID, crID, testUserID)
+	dbfx.Exec(t, `INSERT INTO pipeline_node_run (id, run_id, node_id, kind, seq, status)
+		VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'::uuid, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'::uuid, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'::uuid, 'skill', 0, 'running')
+		ON CONFLICT (id) DO NOTHING`, )
 	return sourceTaskID, executorAgentID, issueID, projectID, crID
 }
 

@@ -24,7 +24,13 @@ func crBindFixture(t *testing.T) map[string]string {
 	projectID := dbfx.Project(t, "cr-bind-project")
 	issueID := dbfx.Issue(t, "cr-bind-issue", testutil.Cols{"project_id": projectID})
 	agentID := dbfx.Agent(t, "cr-bind-agent", "")
+	// cr_bind_test.go fix (review-code BLOCK-④): migration 251's
+	// agent_task_queue_active_requires_runtime CHECK requires every queued row
+	// to carry a runtime_id (or a terminal completed_at); the shared dbfx.Task
+	// fixture does not set either, so the fixture explicitly stamps the handler
+	// test runtime here instead of touching dbfx.Task.
 	taskID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": handlerTestRuntimeID(t),
 		"issue_id":   issueID,
 		"project_id": projectID,
 	})
@@ -151,7 +157,8 @@ func TestBindCurrentTaskTaskWithoutIssue(t *testing.T) {
 		t.Skip("database not available")
 	}
 	agentID := dbfx.Agent(t, "cr-bind-agent-noissue", "")
-	taskID := dbfx.Task(t, agentID) // issue_id NULL
+	// runtime_id stamped explicitly (migration 251 CHECK; see crBindFixture).
+	taskID := dbfx.Task(t, agentID, testutil.Cols{"runtime_id": handlerTestRuntimeID(t)}) // issue_id NULL
 	crID := "CR-BIND-TEST-NOISSUE"
 	dbfx.Exec(t, `INSERT INTO cr (workspace_id, cr_id, status) VALUES ($1::uuid, $2, 'developing')
 		ON CONFLICT (workspace_id, cr_id) DO NOTHING`, testWorkspaceID, crID)
@@ -251,7 +258,8 @@ func TestBindCurrentTaskCrossWorkspaceToken(t *testing.T) {
 	projectID := dbfx.Project(t, "cr-bind-project-xws", testutil.Cols{"workspace_id": otherWS})
 	issueID := dbfx.Issue(t, "cr-bind-issue-xws", testutil.Cols{"workspace_id": otherWS, "project_id": projectID})
 	agentID := dbfx.Agent(t, "cr-bind-agent-xws", "", testutil.Cols{"workspace_id": otherWS})
-	taskID := dbfx.Task(t, agentID, testutil.Cols{"issue_id": issueID, "project_id": projectID})
+	// runtime_id stamped explicitly (migration 251 CHECK; see crBindFixture).
+	taskID := dbfx.Task(t, agentID, testutil.Cols{"runtime_id": handlerTestRuntimeID(t), "issue_id": issueID, "project_id": projectID})
 	crID := "CR-BIND-TEST-XWS"
 	dbfx.Exec(t, `INSERT INTO cr (workspace_id, cr_id, status) VALUES ($1::uuid, $2, 'developing')
 		ON CONFLICT (workspace_id, cr_id) DO NOTHING`, otherWS, crID)

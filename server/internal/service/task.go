@@ -4384,7 +4384,14 @@ func (s *TaskService) BindCurrentTaskToCR(ctx context.Context, taskID, agentID, 
 		} else {
 			reason = "CR already bound to another issue"
 		}
-		s.logCrBindRejected(ctx, qtx, task, issue, project, cr, task.AgentWorkspaceID, agentID, crID, reason)
+		// CR-2026-053 review-code BLOCK-③ (FR-B4/NFR-5): the rejection audit
+		// row is part of the conflict handling, not a side effect. If it
+		// cannot be written, the conflict was NOT handled properly — fail
+		// closed with CR_BIND_FAILED and roll back (deferred tx.Rollback)
+		// instead of committing a silent, unaudited 409.
+		if err := s.logCrBindRejected(ctx, qtx, task, issue, project, cr, task.AgentWorkspaceID, agentID, crID, reason); err != nil {
+			return CRBindResult{}, ErrCRBindFailed
+		}
 		if err := tx.Commit(ctx); err != nil {
 			slog.Error("cr bind: audit commit failed", "error", err)
 			return CRBindResult{}, ErrCRBindFailed
@@ -4489,9 +4496,12 @@ func (s *TaskService) logCrBindBound(ctx context.Context, qtx *db.Queries, task 
 }
 
 // logCrBindRejected writes the conflict audit row (action=cr_issue_bind_rejected,
-// FR-B4) then commits — zero binding writes, zero overwrite. Uses the existing
-// activity_log table; no new audit table.
-func (s *TaskService) logCrBindRejected(ctx context.Context, qtx *db.Queries, task db.LockAgentTaskForCrBindRow, issue db.Issue, project db.Project, cr db.Cr, workspaceID pgtype.UUID, agentID pgtype.UUID, crID, reason string) {
+// FR-B4) — the caller then commits; zero binding writes, zero overwrite. Any
+// error is returned so the caller can fail closed with CR_BIND_FAILED and roll
+// back (a 409 without its audit row would misrepresent the conflict as handled,
+// violating FR-B4/NFR-5). Uses the existing activity_log table; no new audit
+// table.
+func (s *TaskService) logCrBindRejected(ctx context.Context, qtx *db.Queries, task db.LockAgentTaskForCrBindRow, issue db.Issue, project db.Project, cr db.Cr, workspaceID pgtype.UUID, agentID pgtype.UUID, crID, reason string) error {
 	_, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
 		WorkspaceID: workspaceID,
 		IssueID:     task.IssueID,
@@ -4503,6 +4513,7 @@ func (s *TaskService) logCrBindRejected(ctx context.Context, qtx *db.Queries, ta
 	if err != nil {
 		slog.Error("cr bind: rejected audit insert failed", "task_id", util.UUIDToString(task.ID), "cr_id", crID, "error", err)
 	}
+	return err
 }
 
 func (s *TaskService) cancelDeferredEscalationsForTask(ctx context.Context, taskID pgtype.UUID) {
