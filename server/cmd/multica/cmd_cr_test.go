@@ -6,20 +6,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 // AIFIRST: CR-2026-053 TASK-08 (SDD §3.3) — thin-wrapper CLI tests. The
 // command must relay exactly the CR-ID + task token to the binding endpoint
 // and pass the structured result through; it must not construct any identity
-// body fields.
-
-func newCrBindTestCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "bind-current-task"}
-	cmd.Flags().String("output", "", "")
-	return cmd
-}
+// body fields. Tests exercise the REAL crBindCurrentTaskCmd (flag
+// registration included) — a synthetic command with hand-registered flags
+// masked the missing --output registration.
 
 func TestRunCrBindCurrentTaskSuccess(t *testing.T) {
 	const crID = "CR-2026-053"
@@ -49,7 +43,7 @@ func TestRunCrBindCurrentTaskSuccess(t *testing.T) {
 	setCLITestServerEnv(t, srv.URL)
 	t.Setenv("MULTICA_TOKEN", "mat_test-token")
 
-	cmd := newCrBindTestCmd()
+	cmd := crBindCurrentTaskCmd
 	_ = cmd.Flags().Set("output", "json")
 	out, err := captureStdout(t, func() error { return runCrBindCurrentTask(cmd, []string{crID}) })
 	if err != nil {
@@ -75,7 +69,7 @@ func TestRunCrBindCurrentTaskReplayChangedFalse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"cr_id": crID, "task_id": "22222222-2222-4222-8222-222222222222",
-			"issue_id": "33333333-3333-4333-8333-333333333333",
+			"issue_id":   "33333333-3333-4333-8333-333333333333",
 			"project_id": "44444444-4444-4444-8444-444444444444",
 			"changed":    false,
 		})
@@ -84,7 +78,7 @@ func TestRunCrBindCurrentTaskReplayChangedFalse(t *testing.T) {
 	setCLITestServerEnv(t, srv.URL)
 	t.Setenv("MULTICA_TOKEN", "mat_test-token")
 
-	cmd := newCrBindTestCmd()
+	cmd := crBindCurrentTaskCmd
 	_ = cmd.Flags().Set("output", "json")
 	out, err := captureStdout(t, func() error { return runCrBindCurrentTask(cmd, []string{crID}) })
 	if err != nil {
@@ -109,7 +103,7 @@ func TestRunCrBindCurrentTaskConflictError(t *testing.T) {
 	setCLITestServerEnv(t, srv.URL)
 	t.Setenv("MULTICA_TOKEN", "mat_test-token")
 
-	cmd := newCrBindTestCmd()
+	cmd := crBindCurrentTaskCmd
 	err := runCrBindCurrentTask(cmd, []string{crID})
 	if err == nil {
 		t.Fatalf("expected a conflict error")

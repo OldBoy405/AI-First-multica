@@ -23,6 +23,10 @@ var crCmd = &cobra.Command{
 
 func init() {
 	crCmd.AddCommand(crBindCurrentTaskCmd)
+	// --output must be registered here (not only in tests): the unit tests
+	// used to build a synthetic command with the flag, hiding the gap — the
+	// real command rejected `--output json` with "unknown flag".
+	crBindCurrentTaskCmd.Flags().String("output", "json", "Output format: table or json")
 }
 
 var crBindCurrentTaskCmd = &cobra.Command{
