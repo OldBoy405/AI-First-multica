@@ -146,28 +146,26 @@ func TestReplayTerminalReportsOnceSuccessAndPermanentRemove(t *testing.T) {
 	}
 }
 
-func TestReplayTerminalReportsOnceTransientStopsRound(t *testing.T) {
+func TestReplayTerminalReportsOnceTransientKeepsWorkerAlive(t *testing.T) {
 	d, h, _, stop := newTerminalReportFixture(t)
 	defer stop()
 	h.completeStatus["sick"] = 500
 	d.terminalRetry.enqueue(terminalTaskReport{kind: terminalTaskReportComplete, taskID: "sick"})
 	d.terminalRetry.enqueue(terminalTaskReport{kind: terminalTaskReportComplete, taskID: "healthy"})
-	if d.replayTerminalReportsOnce(context.Background()) {
-		t.Fatal("round with a transient error must stop")
+	if !d.replayTerminalReportsOnce(context.Background()) {
+		t.Fatal("transient failure must stop only the current round, not the replay worker")
 	}
 	if pendingSize(d) != 2 {
 		t.Fatalf("pending size = %d, want 2 (transient retained, others untouched)", pendingSize(d))
 	}
-	// Heal the endpoint: both entries must drain on later rounds.
+
+	// A later round is still available after the transient failure.
 	h.completeStatus["sick"] = 0
-	for i := 0; i < 2 && pendingSize(d) != 0; i++ {
-		d.replayTerminalReportsOnce(context.Background())
+	if !d.replayTerminalReportsOnce(context.Background()) {
+		t.Fatal("replay worker must continue after a transient round")
 	}
 	if pendingSize(d) != 0 {
-		t.Fatalf("pending size = %d, want 0 after healing", pendingSize(d))
-	}
-	if _, ok := pendingEntry(t, d, "sick"); ok {
-		t.Fatal("sick entry must be removed after successful replay")
+		t.Fatalf("pending size = %d, want 0 after the next round", pendingSize(d))
 	}
 }
 

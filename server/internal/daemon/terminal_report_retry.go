@@ -198,9 +198,8 @@ func (d *Daemon) deliverTerminalTaskReport(ctx context.Context, report terminalT
 }
 
 // terminalReplayLoop runs the single 30-second replay worker until the daemon
-// root context is cancelled. Shutdown performs no extra drain: entries still
-// pending when the loop stops are dropped with the process, and existing
-// orphan recovery converges tasks the daemon never reached again.
+// root context is cancelled. A transient delivery failure ends only the current
+// round; the next ticker starts another snapshot round.
 func (d *Daemon) terminalReplayLoop(ctx context.Context) {
 	ticker := time.NewTicker(terminalReportReplayPeriod)
 	defer ticker.Stop()
@@ -222,6 +221,9 @@ func (d *Daemon) terminalReplayLoop(ctx context.Context) {
 // value); the first transient failure keeps the entry, logs the safe error
 // and stops the round so an unhealthy endpoint is not hammered until the
 // next fixed period.
+// replayTerminalReportsOnce returns false only when the worker should stop
+// because its root context is cancelled. A transient delivery failure stops
+// the current round but leaves the worker alive for the next fixed tick.
 func (d *Daemon) replayTerminalReportsOnce(ctx context.Context) bool {
 	for _, report := range d.terminalRetry.snapshot() {
 		if ctx.Err() != nil {
@@ -238,7 +240,7 @@ func (d *Daemon) replayTerminalReportsOnce(ctx context.Context) bool {
 			return false
 		case isTransientError(err):
 			logTerminalReplay("retry-later", report.taskID, report.kind, err)
-			return false
+			return true
 		default:
 			d.terminalRetry.removeIfUnchanged(report)
 			logTerminalReplay("dropped", report.taskID, report.kind, err)
