@@ -518,6 +518,10 @@ type Daemon struct {
 
 	cancelFunc context.CancelFunc // set by Run(); called by triggerRestart
 	rootCtx    context.Context    // set by Run(); used by long-running recoveries that must survive per-runtime ctx cancellation
+	// AIFIRST: CR-2026-054 TASK-06 — zero-value-ready process-local replay
+	// set for terminal reports that exhausted the finite retry on a transient
+	// error. The single replay goroutine is owned by the daemon root context.
+	terminalRetry terminalReportRetry
 	// restartMu guards restartBinary. Two goroutines can reach triggerRestart —
 	// the server-triggered handleUpdate and the autoUpdateLoop — and
 	// trySelfReload reads RestartBinary() from the latter to avoid racing the
@@ -5628,18 +5632,25 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 // parent deadlines: daemon shutdown cancels the root context before pollLoop's
 // 30-second drain, but terminal callbacks must still use that remaining window.
 // The explicit timeout keeps this detached work bounded during normal runs.
+//
+// AIFIRST: CR-2026-054 TASK-06 — on a final transient error the immutable
+// report is enqueued for the process-local replay loop (first-wins, one entry
+// per task) and the returned error is wrapped in terminalReportFailure so
+// structured logs stay sanitized. The wrapper's Error() still feeds the
+// existing complete→fail fallback; permanent errors are never enqueued.
 func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTaskReport) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), terminalTaskReportTimeout)
 	defer cancel()
 
-	switch report.kind {
-	case terminalTaskReportComplete:
-		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
-	case terminalTaskReportFail:
-		return d.client.FailTask(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.branchName, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
-	default:
-		return fmt.Errorf("unsupported terminal task report kind %d", report.kind)
+	err := d.deliverTerminalTaskReport(ctx, report)
+	if err == nil {
+		return nil
 	}
+	class := classifyTerminalError(err)
+	if class == terminalReportErrorTransient && d.terminalRetry.enqueue(copyImmutable(report)) {
+		d.terminalRetry.once.Do(func() { go d.terminalReplayLoop(d.recoveryContext()) })
+	}
+	return &terminalReportFailure{cause: err, taskID: report.taskID, kind: report.kind, class: class}
 }
 
 // gcMetaForTask classifies a finished task and produces a GCMeta of the right
