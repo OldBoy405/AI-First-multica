@@ -11,6 +11,61 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adoptLegacyProjectChatIssue = `-- name: AdoptLegacyProjectChatIssue :one
+UPDATE issue
+SET origin_id = $2
+WHERE id = $1
+  AND workspace_id = $3
+  AND origin_type = 'project_chat'
+  AND origin_id IS NULL
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at
+`
+
+type AdoptLegacyProjectChatIssueParams struct {
+	ID          pgtype.UUID `json:"id"`
+	OriginID    pgtype.UUID `json:"origin_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// CR-2026-056 (SDD §2.1): claim a legacy origin_id-NULL container row for a
+// session. CAS on origin_id IS NULL so a concurrent claim cannot be
+// overwritten; zero rows means someone else claimed it first.
+func (q *Queries) AdoptLegacyProjectChatIssue(ctx context.Context, arg AdoptLegacyProjectChatIssueParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, adoptLegacyProjectChatIssue, arg.ID, arg.OriginID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+	)
+	return i, err
+}
+
 const childIssueProgress = `-- name: ChildIssueProgress :many
 SELECT parent_issue_id,
        COUNT(*)::bigint AS total,

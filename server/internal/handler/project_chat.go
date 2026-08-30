@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,17 +16,37 @@ import (
 )
 
 // ProjectChatResponse is the entry payload for a project's Team Agent group
-// chat (CR-2026-006): the hidden container issue that anchors the message
-// stream, plus the agent the project has bound as its Team Agent (may be empty
-// when unconfigured — the frontend then renders the owner/admin setup CTA).
+// chat (CR-2026-056): the active session and its resolved config. IssueID is
+// null until a container is bound (first send or explicit POST container). A
+// project without a Team Agent returns an empty session_id / team_agent_id so
+// the frontend keeps rendering its setup CTA.
 type ProjectChatResponse struct {
-	IssueID     string `json:"issue_id"`
-	TeamAgentID string `json:"team_agent_id,omitempty"`
+	SessionID           string  `json:"session_id"`
+	IssueID             *string `json:"issue_id"`
+	TeamAgentID         string  `json:"team_agent_id"`
+	Model               string  `json:"model"`
+	ThinkingLevel       string  `json:"thinking_level"`
+	ModelSource         string  `json:"model_source"`
+	ThinkingLevelSource string  `json:"thinking_level_source"`
 }
 
-// GetProjectChat resolves (lazily creating on first use) the project's hidden
-// Team Agent chat container issue and returns it together with the configured
-// Team Agent id. GET /api/projects/{id}/chat.
+// projectChatViewResponse adapts the service view to the wire shape.
+func projectChatViewResponse(v *service.ProjectChatSessionView) ProjectChatResponse {
+	return ProjectChatResponse{
+		SessionID:           v.SessionID,
+		IssueID:             v.IssueID,
+		TeamAgentID:         v.TeamAgentID,
+		Model:               v.Model,
+		ThinkingLevel:       v.ThinkingLevel,
+		ModelSource:         string(v.ModelSource),
+		ThinkingLevelSource: string(v.ThinkingLevelSource),
+	}
+}
+
+// GetProjectChat resolves (lazily creating on first use) the project's active
+// Team Agent chat session (CR-2026-056, SDD §4.1) and returns it together
+// with the configured Team Agent id and resolved config. GET
+// /api/projects/{id}/chat. It never creates the container issue (AC-11).
 func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
 	if !ok {
@@ -52,18 +73,139 @@ func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	issue, err := h.IssueService.EnsureProjectChatIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	view, err := h.IssueService.EnsureProjectChatSession(r.Context(), project.WorkspaceID, project.ID, callerUUID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve project chat")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ProjectChatResponse{
-		IssueID:     uuidToString(issue.ID),
-		TeamAgentID: projectTeamAgentID(project.Settings),
-	})
+	writeJSON(w, http.StatusOK, projectChatViewResponse(view))
 }
 
+// PatchProjectChatConfigRequest is the body of PATCH
+// /api/projects/{id}/chat/config (SDD §3.1). The model / thinking_level fields
+// are three-state: omitted = keep, JSON null or empty string = clear the
+// override, non-empty string = set.
+type PatchProjectChatConfigRequest struct {
+	SessionID     string          `json:"session_id"`
+	Model         json.RawMessage `json:"model"`
+	ThinkingLevel json.RawMessage `json:"thinking_level"`
+}
+
+// PatchProjectChatConfig applies a three-state config patch to the active
+// Team Agent chat session (owner/admin only, AC-6).
+func (h *Handler) PatchProjectChatConfig(w http.ResponseWriter, r *http.Request) {
+	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: projectUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var body PatchProjectChatConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	sessionUUID, err := util.ParseUUID(body.SessionID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	modelPatch, err := parseChatConfigFieldPatch(body.Model)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "model must be a string or null")
+		return
+	}
+	thinkingPatch, err := parseChatConfigFieldPatch(body.ThinkingLevel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "thinking_level must be a string or null")
+		return
+	}
+
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	// Resolve the provider string for the bound agent's runtime ahead of the
+	// service call (validation input only; the service re-checks the binding
+	// under the advisory).
+	session, err := h.Queries.GetProjectChatSessionByID(r.Context(), db.GetProjectChatSessionByIDParams{
+		ID: sessionUUID, WorkspaceID: project.WorkspaceID, ProjectID: project.ID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+		ID: session.AgentID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "team agent not found")
+		return
+	}
+	provider, pok := h.resolveAgentProvider(r, project.WorkspaceID, agent.RuntimeID)
+	if !pok {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "cannot resolve the team agent's runtime provider")
+		return
+	}
+
+	view, err := h.IssueService.UpdateProjectChatSessionConfig(r.Context(),
+		project.WorkspaceID, project.ID, sessionUUID, callerUUID, provider, modelPatch, thinkingPatch)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrTeamAgentNotConfigured):
+			writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+		case errors.Is(err, service.ErrForbiddenChatConfig):
+			writeErrorCode(w, http.StatusForbidden, "forbidden_chat_config", "chat config requires owner or admin")
+		case errors.Is(err, service.ErrChatSessionNotFound):
+			writeError(w, http.StatusNotFound, "chat session not found")
+		case errors.Is(err, service.ErrChatSessionClosedOrChanged):
+			writeErrorCode(w, http.StatusConflict, "chat_session_closed_or_changed", "session closed or the project's Team Agent changed")
+		case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+			writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update chat config")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, projectChatViewResponse(view))
+}
+
+// parseChatConfigFieldPatch folds the raw JSON body value into the
+// three-state patch (SDD FR-6). An absent key stays absent; null and the
+// empty string both mean "clear".
+func parseChatConfigFieldPatch(raw json.RawMessage) (service.ChatConfigFieldPatch, error) {
+	if len(raw) == 0 {
+		return service.ChatConfigFieldPatch{}, nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return service.ChatConfigFieldPatch{Present: true, Clear: true}, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return service.ChatConfigFieldPatch{}, err
+	}
+	if s == "" {
+		return service.ChatConfigFieldPatch{Present: true, Clear: true}, nil
+	}
+	return service.ChatConfigFieldPatch{Present: true, Value: s}, nil
+}
 // ProjectDiscussionResponse is the entry payload for a project's Discussion
 // tab (CR-2026-009): the hidden container issue that anchors the pure-human,
 // agent-free message stream. CR-2026-012 adds the optional Discussion

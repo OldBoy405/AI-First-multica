@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/events"
-	"github.com/multica-ai/multica/server/internal/issueposition"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -119,49 +118,9 @@ func (s *IssueService) ensureContainerIssue(
 		return db.Issue{}, fmt.Errorf("recheck %s issue: %w", originType, err)
 	}
 
-	number, err := qtx.IncrementIssueCounter(ctx, workspaceID)
+	issue, err := createContainerIssueInTx(ctx, qtx, tx, workspaceID, projectID, callerID, originType, title, pgtype.UUID{})
 	if err != nil {
-		return db.Issue{}, fmt.Errorf("increment issue counter: %w", err)
-	}
-	position, err := issueposition.NextTopPosition(ctx, tx, workspaceID, "todo")
-	if err != nil {
-		return db.Issue{}, fmt.Errorf("next top position: %w", err)
-	}
-
-	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
-		WorkspaceID: workspaceID,
-		Title:       title,
-		Description: pgtype.Text{},
-		Status:      "todo",
-		// CR-2026-006 (TSUG-002): 'medium' maps to priority tier 2 via
-		// priorityToInt. Every group-chat task enqueues off the chat container
-		// issue and inherits its priority, so pinning it at medium keeps
-		// project chat on par with 1:1 chat (also fixed at 2) — otherwise
-		// 'none'(=0) would let 1:1 chat perpetually jump ahead of group chat on
-		// the same agent. Owner/admin preemption (tier 100) still outranks it.
-		// The Discussion container never enqueues anything (CR-2026-009 red
-		// line), so this value is inert for it — kept identical for one fewer
-		// branch, not because it means anything there.
-		Priority:     "medium",
-		AssigneeType: pgtype.Text{},
-		AssigneeID:   pgtype.UUID{},
-		// The container has no meaningful author; attribute it to the member
-		// who first opened it. It is never surfaced, so this only affects the
-		// (also hidden) issue's own creator record.
-		CreatorType:   "member",
-		CreatorID:     callerID,
-		ParentIssueID: pgtype.UUID{},
-		Position:      position,
-		StartDate:     pgtype.Date{},
-		DueDate:       pgtype.Date{},
-		Number:        number,
-		ProjectID:     projectID,
-		OriginType:    pgtype.Text{String: originType, Valid: true},
-		OriginID:      pgtype.UUID{},
-		Stage:         pgtype.Int4{},
-	})
-	if err != nil {
-		return db.Issue{}, fmt.Errorf("create %s issue: %w", originType, err)
+		return db.Issue{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.Issue{}, fmt.Errorf("commit %s issue: %w", originType, err)

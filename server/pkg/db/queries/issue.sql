@@ -607,6 +607,18 @@ WHERE workspace_id = $1 AND project_id = $2
   AND origin_id IS NULL
 ORDER BY created_at ASC, id ASC;
 
+-- name: AdoptLegacyProjectChatIssue :one
+-- CR-2026-056 (SDD §2.1): claim a legacy origin_id-NULL container row for a
+-- session. CAS on origin_id IS NULL so a concurrent claim cannot be
+-- overwritten; zero rows means someone else claimed it first.
+UPDATE issue
+SET origin_id = $2
+WHERE id = $1
+  AND workspace_id = $3
+  AND origin_type = 'project_chat'
+  AND origin_id IS NULL
+RETURNING *;
+
 -- name: GetProjectDiscussionIssue :one
 -- CR-2026-009: fetch the hidden per-project Discussion container issue.
 -- At most one row exists per project (partial unique index issue_project_discussion_unique).
