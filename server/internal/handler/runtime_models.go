@@ -74,6 +74,12 @@ type ModelListRequest struct {
 	// the synthetic cache-hit response.
 	Cached   bool       `json:"cached,omitempty"`
 	CachedAt *time.Time `json:"cached_at,omitempty"`
+	// Fallback marks a completed report whose models are a static stand-in
+	// substituted after discovery failed (MUL-5549), not the runtime's real
+	// catalog. CR-2026-056: the chat-config validation path must reject a
+	// fallback report (SDD §4.3), so the flag is persisted alongside the
+	// record instead of being dropped at report time.
+	Fallback bool `json:"fallback,omitempty"`
 }
 
 // ModelEntry mirrors agent.Model for the wire. `Default` tags the
@@ -153,7 +159,7 @@ type ModelListStore interface {
 	// PopPending handles "queue empty after probe" by returning nil.
 	HasPending(ctx context.Context, runtimeID string) (bool, error)
 	PopPending(ctx context.Context, runtimeID string) (*ModelListRequest, error)
-	Complete(ctx context.Context, id string, models []ModelEntry, supported bool) error
+	Complete(ctx context.Context, id string, models []ModelEntry, supported, fallback bool) error
 	Fail(ctx context.Context, id string, errMsg string) error
 }
 
@@ -271,7 +277,7 @@ func (s *InMemoryModelListStore) PopPending(_ context.Context, runtimeID string)
 	return oldest, nil
 }
 
-func (s *InMemoryModelListStore) Complete(_ context.Context, id string, models []ModelEntry, supported bool) error {
+func (s *InMemoryModelListStore) Complete(_ context.Context, id string, models []ModelEntry, supported, fallback bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -279,6 +285,7 @@ func (s *InMemoryModelListStore) Complete(_ context.Context, id string, models [
 		req.Status = ModelListCompleted
 		req.Models = models
 		req.Supported = supported
+		req.Fallback = fallback
 		req.UpdatedAt = time.Now()
 	}
 	return nil
@@ -498,7 +505,7 @@ func (h *Handler) ReportModelListResult(w http.ResponseWriter, r *http.Request) 
 		if body.Supported != nil {
 			supported = *body.Supported
 		}
-		if err := h.ModelListStore.Complete(r.Context(), requestID, body.Models, supported); err != nil {
+		if err := h.ModelListStore.Complete(r.Context(), requestID, body.Models, supported, body.Fallback); err != nil {
 			// Surface the store failure as 5xx so the daemon can retry instead
 			// of swallowing the report (leaves the request stuck in running
 			// until the server-side timeout, which is exactly the "looks OK

@@ -477,6 +477,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		h.InvitationRateLimiters = handler.NewRedisInvitationRateLimiters(rdb, invitationRateLimits)
 	}
 
+	// Chat-config catalog port (CR-2026-056): must be wired after the model
+	// list store and catalog cache are finalized (in-memory or Redis).
+	h.WireChatCatalog()
+
 	// Channel engine (MUL-3620): the platform-agnostic inbound runtime.
 	// Built UNCONDITIONALLY — it drives any channel.Channel, not just
 	// Feishu, so it must not depend on the Lark master key (a future

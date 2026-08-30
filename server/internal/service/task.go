@@ -59,6 +59,10 @@ type TaskService struct {
 	// stale dispatched task. It removes the unconditional reclaim UPDATE from
 	// idle claim polls while missing/error states preserve the DB fallback.
 	ReclaimCheck *ReclaimCheckCache
+	// ChatCatalog is the handler-implemented catalog source for chat-config
+	// validation on the Private Ask send path (CR-2026-056, SDD §4.3). Wired
+	// by cmd/server/router.go via Handler.WireChatCatalog.
+	ChatCatalog ChatCatalogPort
 	// Composio computes the per-task MCP overlay (Stage 3 of the Composio
 	// epic, MUL-3721) — the integration's "current user's connected apps
 	// → MCP session URL" hook called from each Enqueue* path. Optional: a

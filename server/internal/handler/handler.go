@@ -224,6 +224,9 @@ type Handler struct {
 	// (stale-while-revalidate, MUL-5444). Nil-safe: every call site treats a nil
 	// cache as a permanent miss and falls back to the full discovery flow.
 	ModelCatalogCache ModelCatalogCache
+	// ChatCatalog is the catalog source wired into the services that validate
+	// chat configs (CR-2026-056, SDD §4.3). Built by WireChatCatalog.
+	ChatCatalog *ChatCatalogPort
 	// Metrics is the shared business-metrics collector built by main.go.
 	// May be nil in tests / self-hosted with the metrics listener disabled;
 	// every Record* method is nil-safe and obsmetrics.RecordEvent treats a
