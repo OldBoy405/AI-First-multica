@@ -289,6 +289,7 @@ func TestMergeForward_EndToEndClaimCarriesMergedStructure(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
+	wireChatCatalogPort()
 	fx := newDCE2EFixture(t)
 	ctx := context.Background()
 	discussionID := fx.DiscussionIssueID
@@ -334,8 +335,8 @@ func TestMergeForward_EndToEndClaimCarriesMergedStructure(t *testing.T) {
 	}
 	var claimResp struct {
 		Task *struct {
-			ID                  string `json:"id"`
-			TriggerCommentID    string `json:"trigger_comment_id"`
+			ID                    string `json:"id"`
+			TriggerCommentID      string `json:"trigger_comment_id"`
 			TriggerCommentContent string `json:"trigger_comment_content"`
 		} `json:"task"`
 	}

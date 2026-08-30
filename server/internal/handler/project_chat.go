@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,17 +16,37 @@ import (
 )
 
 // ProjectChatResponse is the entry payload for a project's Team Agent group
-// chat (CR-2026-006): the hidden container issue that anchors the message
-// stream, plus the agent the project has bound as its Team Agent (may be empty
-// when unconfigured — the frontend then renders the owner/admin setup CTA).
+// chat (CR-2026-056): the active session and its resolved config. IssueID is
+// null until a container is bound (first send or explicit POST container). A
+// project without a Team Agent returns an empty session_id / team_agent_id so
+// the frontend keeps rendering its setup CTA.
 type ProjectChatResponse struct {
-	IssueID     string `json:"issue_id"`
-	TeamAgentID string `json:"team_agent_id,omitempty"`
+	SessionID           string  `json:"session_id"`
+	IssueID             *string `json:"issue_id"`
+	TeamAgentID         string  `json:"team_agent_id"`
+	Model               string  `json:"model"`
+	ThinkingLevel       string  `json:"thinking_level"`
+	ModelSource         string  `json:"model_source"`
+	ThinkingLevelSource string  `json:"thinking_level_source"`
 }
 
-// GetProjectChat resolves (lazily creating on first use) the project's hidden
-// Team Agent chat container issue and returns it together with the configured
-// Team Agent id. GET /api/projects/{id}/chat.
+// projectChatViewResponse adapts the service view to the wire shape.
+func projectChatViewResponse(v *service.ProjectChatSessionView) ProjectChatResponse {
+	return ProjectChatResponse{
+		SessionID:           v.SessionID,
+		IssueID:             v.IssueID,
+		TeamAgentID:         v.TeamAgentID,
+		Model:               v.Model,
+		ThinkingLevel:       v.ThinkingLevel,
+		ModelSource:         string(v.ModelSource),
+		ThinkingLevelSource: string(v.ThinkingLevelSource),
+	}
+}
+
+// GetProjectChat resolves (lazily creating on first use) the project's active
+// Team Agent chat session (CR-2026-056, SDD §4.1) and returns it together
+// with the configured Team Agent id and resolved config. GET
+// /api/projects/{id}/chat. It never creates the container issue (AC-11).
 func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
 	if !ok {
@@ -52,16 +73,138 @@ func (h *Handler) GetProjectChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	issue, err := h.IssueService.EnsureProjectChatIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	view, err := h.IssueService.EnsureProjectChatSession(r.Context(), project.WorkspaceID, project.ID, callerUUID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve project chat")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ProjectChatResponse{
-		IssueID:     uuidToString(issue.ID),
-		TeamAgentID: projectTeamAgentID(project.Settings),
+	writeJSON(w, http.StatusOK, projectChatViewResponse(view))
+}
+
+// PatchProjectChatConfigRequest is the body of PATCH
+// /api/projects/{id}/chat/config (SDD §3.1). The model / thinking_level fields
+// are three-state: omitted = keep, JSON null or empty string = clear the
+// override, non-empty string = set.
+type PatchProjectChatConfigRequest struct {
+	SessionID     string          `json:"session_id"`
+	Model         json.RawMessage `json:"model"`
+	ThinkingLevel json.RawMessage `json:"thinking_level"`
+}
+
+// PatchProjectChatConfig applies a three-state config patch to the active
+// Team Agent chat session (owner/admin only, AC-6).
+func (h *Handler) PatchProjectChatConfig(w http.ResponseWriter, r *http.Request) {
+	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: projectUUID, WorkspaceID: wsUUID,
 	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var body PatchProjectChatConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	sessionUUID, err := util.ParseUUID(body.SessionID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	modelPatch, err := parseChatConfigFieldPatch(body.Model)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "model must be a string or null")
+		return
+	}
+	thinkingPatch, err := parseChatConfigFieldPatch(body.ThinkingLevel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "thinking_level must be a string or null")
+		return
+	}
+
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	// Resolve the provider string for the bound agent's runtime ahead of the
+	// service call (validation input only; the service re-checks the binding
+	// under the advisory).
+	session, err := h.Queries.GetProjectChatSessionByID(r.Context(), db.GetProjectChatSessionByIDParams{
+		ID: sessionUUID, WorkspaceID: project.WorkspaceID, ProjectID: project.ID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+		ID: session.AgentID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "team agent not found")
+		return
+	}
+	provider, pok := h.resolveAgentProvider(r, project.WorkspaceID, agent.RuntimeID)
+	if !pok {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "cannot resolve the team agent's runtime provider")
+		return
+	}
+
+	view, err := h.IssueService.UpdateProjectChatSessionConfig(r.Context(),
+		project.WorkspaceID, project.ID, sessionUUID, callerUUID, provider, modelPatch, thinkingPatch)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrTeamAgentNotConfigured):
+			writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+		case errors.Is(err, service.ErrForbiddenChatConfig):
+			writeErrorCode(w, http.StatusForbidden, "forbidden_chat_config", "chat config requires owner or admin")
+		case errors.Is(err, service.ErrChatSessionNotFound):
+			writeError(w, http.StatusNotFound, "chat session not found")
+		case errors.Is(err, service.ErrChatSessionClosedOrChanged):
+			writeErrorCode(w, http.StatusConflict, "chat_session_closed_or_changed", "session closed or the project's Team Agent changed")
+		case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+			writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update chat config")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, projectChatViewResponse(view))
+}
+
+// parseChatConfigFieldPatch folds the raw JSON body value into the
+// three-state patch (SDD FR-6). An absent key stays absent; null and the
+// empty string both mean "clear".
+func parseChatConfigFieldPatch(raw json.RawMessage) (service.ChatConfigFieldPatch, error) {
+	if len(raw) == 0 {
+		return service.ChatConfigFieldPatch{}, nil
+	}
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return service.ChatConfigFieldPatch{Present: true, Clear: true}, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return service.ChatConfigFieldPatch{}, err
+	}
+	if s == "" {
+		return service.ChatConfigFieldPatch{Present: true, Clear: true}, nil
+	}
+	return service.ChatConfigFieldPatch{Present: true, Value: s}, nil
 }
 
 // ProjectDiscussionResponse is the entry payload for a project's Discussion
@@ -151,6 +294,13 @@ func projectTeamAgentSetting(settings []byte, key string) string {
 // to its creator (all /api/chat/sessions/{id}/* endpoints enforce
 // creator-only access; the realtime layer delivers its events per-user).
 //
+// CR-2026-056 (SDD §3.2, BLOCK-004): get-or-create writes the base_* snapshot
+// in the SAME INSERT as the row (the Team Agent's defaults at creation time;
+// never a post-hoc UPDATE). The response appends session_id (== the row id,
+// the same UUID) plus the four resolved chat-config fields — display only,
+// no §4.3 validation, and existing rows are never written (legacy rows with
+// base_* NULL resolve as agent_default, FR-11/AC-19).
+//
 // Errors: 409 team_agent_not_configured when the project has no Team Agent
 // bound (the frontend renders the same setup CTA as the Team Agent pane).
 func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) {
@@ -179,63 +329,93 @@ func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-		ProjectID: project.ID, CreatorID: callerUUID,
-	})
-	if err == nil {
-		writeJSON(w, http.StatusOK, chatSessionToResponse(session))
-		return
-	}
-	if !isNotFound(err) {
-		writeError(w, http.StatusInternalServerError, "failed to resolve private chat session")
-		return
-	}
-
 	teamAgentID := projectTeamAgentID(project.Settings)
-	if teamAgentID == "" {
-		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
-		return
-	}
-	agentUUID, err := util.ParseUUID(teamAgentID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
-		return
-	}
-
-	session, err = h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
-		WorkspaceID: project.WorkspaceID,
-		AgentID:     agentUUID,
-		CreatorID:   callerUUID,
-		Title:       "Private Ask",
-		ProjectID:   project.ID,
-	})
-	if err != nil {
-		// Concurrent get-or-create (two tabs opening the pane at once): the
-		// partial unique index collapses the race; the loser reselects.
-		if isUniqueViolation(err) {
-			session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-				ProjectID: project.ID, CreatorID: callerUUID,
-			})
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create private chat session")
+	var agentUUID pgtype.UUID
+	if teamAgentID != "" {
+		var perr error
+		agentUUID, perr = util.ParseUUID(teamAgentID)
+		if perr != nil {
+			writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, chatSessionToResponse(session))
+
+	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+		ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		if !isNotFound(err) {
+			writeError(w, http.StatusInternalServerError, "failed to resolve private chat session")
+			return
+		}
+		// Existing sessions still resolve when the binding was removed; only
+		// the get-or-create path needs a bound Team Agent (baseline shape).
+		if teamAgentID == "" {
+			writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+			return
+		}
+		agent, err := h.Queries.GetAgent(r.Context(), agentUUID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load private chat agent")
+			return
+		}
+		// BLOCK-004: the snapshot is consumed by the INSERT itself.
+		baseModel, baseThinking := service.SnapshotAgentDefaults(agent)
+		session, err = h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
+			WorkspaceID:       project.WorkspaceID,
+			AgentID:           agentUUID,
+			CreatorID:         callerUUID,
+			Title:             "Private Ask",
+			ProjectID:         project.ID,
+			BaseModel:         baseModel,
+			BaseThinkingLevel: baseThinking,
+		})
+		if err != nil {
+			// Concurrent get-or-create (two tabs opening the pane at once): the
+			// partial unique index collapses the race; the loser reselects.
+			// The winner row's own INSERT snapshot is authoritative then.
+			if isUniqueViolation(err) {
+				session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+					ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
+				})
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to create private chat session")
+				return
+			}
+		}
+	}
+
+	// Display resolution (SDD §4.2, no §4.3 validation): the session's own
+	// agent provides the agent_default fallback for legacy rows.
+	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load private chat agent")
+		return
+	}
+	resolved := service.ResolveChatConfig(
+		session.BaseModel, session.ModelOverride, agent.Model,
+		session.BaseThinkingLevel, session.ThinkingLevelOverride, agent.ThinkingLevel,
+	)
+	writeJSON(w, http.StatusOK, h.privateChatSessionResponse(session, resolved))
 }
 
 // SendProjectChatMessageRequest is the body of POST /api/projects/{id}/chat/messages.
 type SendProjectChatMessageRequest struct {
-	Content string `json:"content"`
-	// AttachmentIDs optionally binds newly uploaded files to the chat comment
-	// (CR-2026-012 FR-8: the Team Agent pane composer reuses ChatInputCore's
-	// upload flow). Older clients omit the field; behavior is unchanged then.
+	// SessionID is REQUIRED (SDD §3.1): the active session the message is
+	// posted into and the anchor for the container bind.
+	SessionID string `json:"session_id"`
+	Content   string `json:"content"`
+	// AttachmentIDs optionally binds newly uploaded draft files to the chat
+	// comment inside the same send transaction (TASK-07 / §4.5). Older clients
+	// omit the field; behavior is unchanged then.
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 }
 
 // SendProjectChatMessageResponse is returned on a successful send.
 type SendProjectChatMessageResponse struct {
+	SessionID string `json:"session_id"`
+	IssueID   string `json:"issue_id"`
 	CommentID string `json:"comment_id"`
 	TaskID    string `json:"task_id"`
 }
@@ -243,12 +423,13 @@ type SendProjectChatMessageResponse struct {
 // SendProjectChatMessage posts a member's message to the project's Team Agent
 // group chat and enqueues a run for the bound agent. POST /api/projects/{id}/chat/messages.
 //
-// Errors: 409 when no Team Agent is configured; 403 presenter_required when an
-// active presenter holds single-writer control and the caller is neither the
-// presenter nor owner/admin (CR-2026-010); 429 project_queue_full when the
-// shared queue is at capacity (front-load reject or the inner-guard race —
-// TSUG-001); 502 for any other enqueue failure (retryable, the comment is
-// rolled back before returning).
+// Errors: 400 invalid_model_or_thinking_level (§4.3, pre-transaction — nothing
+// persisted); 403 presenter_required when an active presenter holds
+// single-writer control and the caller is neither the presenter nor
+// owner/admin (CR-2026-010); 404 chat_session_not_found; 409
+// team_agent_not_configured / chat_session_closed_or_changed /
+// attachment_already_bound; 429 project_queue_full; 502 enqueue_failed for
+// any other failure (the whole send transaction was rolled back).
 func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
 	if !ok {
@@ -271,6 +452,11 @@ func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "content is required")
 		return
 	}
+	sessionUUID, err := util.ParseUUID(req.SessionID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
 	attachmentIDs, ok := parseUUIDSliceOrBadRequest(w, req.AttachmentIDs, "attachment_ids")
 	if !ok {
 		return
@@ -283,15 +469,66 @@ func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-
-	teamAgentID := projectTeamAgentID(project.Settings)
-	if teamAgentID == "" {
-		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	agentUUID, err := util.ParseUUID(teamAgentID)
+
+	result, err := h.IssueService.SendProjectChatMessage(r.Context(),
+		project.WorkspaceID, project.ID, sessionUUID, callerUUID, req.Content, attachmentIDs)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
+		writeProjectChatSendError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, SendProjectChatMessageResponse{
+		SessionID: result.SessionID,
+		IssueID:   result.IssueID,
+		CommentID: result.CommentID,
+		TaskID:    result.TaskID,
+	})
+}
+
+// PostProjectChatContainerRequest is the body of POST
+// /api/projects/{id}/chat/container (SDD §3.1). The idempotency key IS the
+// session_id — no Idempotency-Key header required.
+type PostProjectChatContainerRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// PostProjectChatContainer explicitly binds the container issue for an active
+// session (FR-10/FR-4). Success = 200 with the GET shape and a non-null
+// issue_id; a repeat call returns the same issue (idempotent). Validation
+// failure (§4.3 or presenter) leaves the session unbound — no issue created.
+func (h *Handler) PostProjectChatContainer(w http.ResponseWriter, r *http.Request) {
+	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
+	if !ok {
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var body PostProjectChatContainerRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	sessionUUID, err := util.ParseUUID(body.SessionID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+	project, err := h.Queries.GetProjectInWorkspace(r.Context(), db.GetProjectInWorkspaceParams{
+		ID: projectUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
 	callerUUID, err := util.ParseUUID(userID)
@@ -300,41 +537,83 @@ func (h *Handler) SendProjectChatMessage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	issue, err := h.IssueService.EnsureProjectChatIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	// Provider resolution mirrors PatchProjectChatConfig: validation input
+	// only; the service re-checks the binding under the advisory.
+	session, err := h.Queries.GetProjectChatSessionByID(r.Context(), db.GetProjectChatSessionByIDParams{
+		ID: sessionUUID, WorkspaceID: project.WorkspaceID, ProjectID: project.ID,
+	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve project chat")
+		writeError(w, http.StatusNotFound, "chat session not found")
+		return
+	}
+	agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+		ID: session.AgentID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "team agent not found")
+		return
+	}
+	provider, pok := h.resolveAgentProvider(r, project.WorkspaceID, agent.RuntimeID)
+	if !pok {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "cannot resolve the team agent's runtime provider")
 		return
 	}
 
-	comment, task, err := h.TaskService.SendProjectChatMessage(r.Context(), issue, agentUUID, callerUUID, req.Content)
+	_, view, err := h.IssueService.EnsureProjectChatContainer(r.Context(),
+		project.WorkspaceID, project.ID, sessionUUID, callerUUID, provider)
 	if err != nil {
 		var presenterRequired *service.ErrPresenterRequired
-		if errors.As(err, &presenterRequired) {
+		switch {
+		case errors.As(err, &presenterRequired):
 			writePresenterRequired(w, presenterRequired)
-			return
+		case errors.Is(err, service.ErrTeamAgentNotConfigured):
+			writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+		case errors.Is(err, service.ErrChatSessionNotFound):
+			writeError(w, http.StatusNotFound, "chat session not found")
+		case errors.Is(err, service.ErrChatSessionClosedOrChanged):
+			writeErrorCode(w, http.StatusConflict, "chat_session_closed_or_changed", "session closed or the project's Team Agent changed")
+		case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+			writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to bind chat container")
 		}
-		var full *service.ErrProjectQueueFull
-		if errors.As(err, &full) {
-			writeProjectQueueFull(w, full)
-			return
-		}
-		// Any other failure: the comment was already rolled back in the
-		// service. Signal a retryable send failure.
-		writeErrorCode(w, http.StatusBadGateway, "enqueue_failed", "failed to dispatch message to Team Agent")
 		return
 	}
+	writeJSON(w, http.StatusOK, projectChatViewResponse(view))
+}
 
-	// Bind uploaded attachments only after the send fully succeeded — a
-	// rolled-back comment (enqueue failure) must not leave linked files
-	// dangling off a ghost message.
-	if len(attachmentIDs) > 0 {
-		h.linkAttachmentsByIDs(r.Context(), comment.ID, issue.ID, attachmentIDs)
+// writeProjectChatSendError maps the shared send-kernel error contract to the
+// wire (SDD §3.1/§3.3): presenter 403, queue full 429, config 400, session
+// 404/409, unconfigured 409, attachment conflict 409, anything else 502
+// enqueue_failed (the send transaction already rolled everything back).
+func writeProjectChatSendError(w http.ResponseWriter, err error) {
+	var presenterRequired *service.ErrPresenterRequired
+	if errors.As(err, &presenterRequired) {
+		writePresenterRequired(w, presenterRequired)
+		return
 	}
-
-	writeJSON(w, http.StatusCreated, SendProjectChatMessageResponse{
-		CommentID: uuidToString(comment.ID),
-		TaskID:    uuidToString(task.ID),
-	})
+	var full *service.ErrProjectQueueFull
+	if errors.As(err, &full) {
+		writeProjectQueueFull(w, full)
+		return
+	}
+	switch {
+	case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+		writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
+	case errors.Is(err, service.ErrChatSessionNotFound):
+		writeErrorCode(w, http.StatusNotFound, "chat_session_not_found", "chat session not found")
+	case errors.Is(err, service.ErrChatSessionClosedOrChanged):
+		writeErrorCode(w, http.StatusConflict, "chat_session_closed_or_changed", "session closed or the project's Team Agent changed")
+	case errors.Is(err, service.ErrTeamAgentNotConfigured):
+		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+	case errors.Is(err, service.ErrAttachmentAlreadyBound):
+		writeErrorCode(w, http.StatusConflict, "attachment_already_bound", "a draft attachment is already bound")
+	default:
+		// Any other failure: the transaction already rolled the comment,
+		// container bind, task and attachments back. Signal a retryable send
+		// failure.
+		writeErrorCode(w, http.StatusBadGateway, "enqueue_failed", "failed to dispatch message to Team Agent")
+	}
 }
 
 // writePresenterRequired returns 403 with the active presenter's user id so
@@ -363,14 +642,18 @@ const mergeForwardMaxComments = 50
 
 // MergeForwardDiscussion forwards a member's multi-select of Discussion
 // messages to the project Team Agent as ONE merged message + ONE task
-// (CR-2026-012 DD-7/DD-8). POST /api/projects/{id}/chat/merge-forward.
+// (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12). POST /api/projects/{id}/chat/merge-forward.
+//
+// The request carries no session_id: the active session is ensured (created
+// on first use) inside the service, and the send kernel's lock-internal
+// checks surface a concurrent rebind as 409. The success body carries the
+// ensured session_id and the bound issue_id on top of the existing
+// comment/task fields (SDD §3.1).
 //
 // Errors: 400 invalid_comment_selection (empty / over cap / any comment
 // outside this project's Discussion container; malformed ids get the generic
-// 400 from parseUUIDSliceOrBadRequest); 403 presenter_required; 409
-// team_agent_not_configured; 429 project_queue_full; 502 enqueue_failed
-// (comment already compensated away) — the same mapping as
-// SendProjectChatMessage, whose kernel this endpoint reuses.
+// 400 from parseUUIDSliceOrBadRequest); the rest matches
+// SendProjectChatMessage's shared kernel mapping.
 func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
 	if !ok {
@@ -412,17 +695,6 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
-
-	teamAgentID := projectTeamAgentID(project.Settings)
-	if teamAgentID == "" {
-		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
-		return
-	}
-	agentUUID, err := util.ParseUUID(teamAgentID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
-		return
-	}
 	callerUUID, err := util.ParseUUID(userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid user id")
@@ -455,32 +727,17 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 		comments = append(comments, comment)
 	}
 
-	chatIssue, err := h.IssueService.EnsureProjectChatIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	result, err := h.IssueService.MergeForwardDiscussion(r.Context(),
+		project.WorkspaceID, project.ID, callerUUID, comments, req.RegisterCR)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve project chat")
-		return
-	}
-
-	comment, task, err := h.TaskService.MergeForwardDiscussion(r.Context(), chatIssue, agentUUID, callerUUID, comments, req.RegisterCR)
-	if err != nil {
-		var presenterRequired *service.ErrPresenterRequired
-		if errors.As(err, &presenterRequired) {
-			writePresenterRequired(w, presenterRequired)
-			return
-		}
-		var full *service.ErrProjectQueueFull
-		if errors.As(err, &full) {
-			writeProjectQueueFull(w, full)
-			return
-		}
-		// Any other failure: the merged comment was already rolled back in the
-		// service. Signal a retryable send failure.
-		writeErrorCode(w, http.StatusBadGateway, "enqueue_failed", "failed to dispatch merged discussion to Team Agent")
+		writeProjectChatSendError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, SendProjectChatMessageResponse{
-		CommentID: uuidToString(comment.ID),
-		TaskID:    uuidToString(task.ID),
+		SessionID: result.SessionID,
+		IssueID:   result.IssueID,
+		CommentID: result.CommentID,
+		TaskID:    result.TaskID,
 	})
 }

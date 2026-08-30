@@ -613,6 +613,10 @@ func main() {
 	// Source-context cleanup is object-store work, so it gets its own goroutine
 	// instead of a slot in the runtime sweep tick.
 	go runSourceContextSweeper(sweepCtx, taskSvc)
+	// Chat draft TTL sweeper (CR-2026-056): unbound composer drafts older than
+	// 168h. Its own 1h ticker beside the runtime sweeper; nil storage keeps
+	// every candidate for the next tick.
+	go runChatDraftAttachmentSweeper(sweepCtx, pool, queries, h.Storage)
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	if autopilotSvc.QuotaEnabled() {

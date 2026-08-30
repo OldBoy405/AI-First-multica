@@ -53,6 +53,81 @@ func (q *Queries) BindChatAttachmentsToMessage(ctx context.Context, arg BindChat
 	return items, nil
 }
 
+const bindUnboundDraftAttachments = `-- name: BindUnboundDraftAttachments :many
+UPDATE attachment
+SET issue_id = $1,
+    comment_id = $2,
+    task_id = $3
+WHERE workspace_id = $4
+  AND id = ANY($5::uuid[])
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND uploader_type = $6
+  AND uploader_id = $7
+RETURNING id, workspace_id, issue_id, comment_id, uploader_type, uploader_id, filename, url, content_type, size_bytes, created_at, chat_session_id, chat_message_id, task_id, source_context_id
+`
+
+type BindUnboundDraftAttachmentsParams struct {
+	IssueID       pgtype.UUID   `json:"issue_id"`
+	CommentID     pgtype.UUID   `json:"comment_id"`
+	TaskID        pgtype.UUID   `json:"task_id"`
+	WorkspaceID   pgtype.UUID   `json:"workspace_id"`
+	AttachmentIds []pgtype.UUID `json:"attachment_ids"`
+	UploaderType  string        `json:"uploader_type"`
+	UploaderID    pgtype.UUID   `json:"uploader_id"`
+}
+
+// CR-2026-056 (SDD §2.5): on already-locked rows, write the bind targets.
+// The WHERE still requires all five targets empty, no source context, and the
+// uploader to match the sender; zero rows => 409 attachment_already_bound.
+func (q *Queries) BindUnboundDraftAttachments(ctx context.Context, arg BindUnboundDraftAttachmentsParams) ([]Attachment, error) {
+	rows, err := q.db.Query(ctx, bindUnboundDraftAttachments,
+		arg.IssueID,
+		arg.CommentID,
+		arg.TaskID,
+		arg.WorkspaceID,
+		arg.AttachmentIds,
+		arg.UploaderType,
+		arg.UploaderID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Attachment{}
+	for rows.Next() {
+		var i Attachment
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.CommentID,
+			&i.UploaderType,
+			&i.UploaderID,
+			&i.Filename,
+			&i.Url,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.CreatedAt,
+			&i.ChatSessionID,
+			&i.ChatMessageID,
+			&i.TaskID,
+			&i.SourceContextID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countUnboundChatAttachmentsForTask = `-- name: CountUnboundChatAttachmentsForTask :one
 SELECT COUNT(*) FROM attachment
 WHERE workspace_id = $1
@@ -335,6 +410,33 @@ WHERE workspace_id = $1
 func (q *Queries) DeleteSourceContextAttachmentsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteSourceContextAttachmentsByWorkspace, workspaceID)
 	return err
+}
+
+const deleteUnboundDraftAttachment = `-- name: DeleteUnboundDraftAttachment :one
+DELETE FROM attachment
+WHERE id = $1 AND workspace_id = $2
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+RETURNING id
+`
+
+type DeleteUnboundDraftAttachmentParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// CR-2026-056 (SDD §2.5): sweeper-only delete of still-unbound draft rows.
+// Never reuse DeleteAttachment here: it only excludes source_context_id and
+// would also remove rows already bound to an issue/comment.
+func (q *Queries) DeleteUnboundDraftAttachment(ctx context.Context, arg DeleteUnboundDraftAttachmentParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, deleteUnboundDraftAttachment, arg.ID, arg.WorkspaceID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const detachAttachmentsFromUserChatMessageByTask = `-- name: DetachAttachmentsFromUserChatMessageByTask :many
@@ -1090,6 +1192,42 @@ func (q *Queries) ListSourceContextIssueAttachments(ctx context.Context, arg Lis
 	return items, nil
 }
 
+const listUnboundDraftAttachmentCandidates = `-- name: ListUnboundDraftAttachmentCandidates :many
+SELECT id FROM attachment
+WHERE issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+ORDER BY id
+LIMIT $1::int
+`
+
+// CR-2026-056 (SDD §4.10): lock-free candidate scan for the 1h draft TTL
+// sweeper. The age predicate is strict: a row created exactly 168h ago is
+// retained this round (AC-28).
+func (q *Queries) ListUnboundDraftAttachmentCandidates(ctx context.Context, maxPerTick int32) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listUnboundDraftAttachmentCandidates, maxPerTick)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAttachmentsForIssueLink = `-- name: LockAttachmentsForIssueLink :many
 SELECT id FROM attachment
 WHERE workspace_id = $1
@@ -1110,6 +1248,89 @@ type LockAttachmentsForIssueLinkParams struct {
 // lock order as DeleteAttachment and cannot deadlock with it.
 func (q *Queries) LockAttachmentsForIssueLink(ctx context.Context, arg LockAttachmentsForIssueLinkParams) ([]pgtype.UUID, error) {
 	rows, err := q.db.Query(ctx, lockAttachmentsForIssueLink, arg.WorkspaceID, arg.AttachmentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockUnboundDraftAttachmentCandidate = `-- name: LockUnboundDraftAttachmentCandidate :one
+SELECT id, workspace_id, issue_id, comment_id, uploader_type, uploader_id, filename, url, content_type, size_bytes, created_at, chat_session_id, chat_message_id, task_id, source_context_id FROM attachment
+WHERE id = $1
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+FOR UPDATE SKIP LOCKED
+`
+
+// CR-2026-056 (SDD §4.10): per-candidate locked re-read. SKIP LOCKED lets
+// concurrent sweeper ticks skip an already-claimed row, and the send path's
+// BindUnboundDraftAttachments locks the same rows (attachment-id-ascending),
+// so a row bound between the scan and this lock makes the predicate miss.
+func (q *Queries) LockUnboundDraftAttachmentCandidate(ctx context.Context, id pgtype.UUID) (Attachment, error) {
+	row := q.db.QueryRow(ctx, lockUnboundDraftAttachmentCandidate, id)
+	var i Attachment
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.UploaderType,
+		&i.UploaderID,
+		&i.Filename,
+		&i.Url,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.TaskID,
+		&i.SourceContextID,
+	)
+	return i, err
+}
+
+const lockUnboundDraftAttachments = `-- name: LockUnboundDraftAttachments :many
+SELECT id FROM attachment
+WHERE workspace_id = $1
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND id = ANY($2::uuid[])
+ORDER BY id
+FOR UPDATE
+`
+
+type LockUnboundDraftAttachmentsParams struct {
+	WorkspaceID   pgtype.UUID   `json:"workspace_id"`
+	AttachmentIds []pgtype.UUID `json:"attachment_ids"`
+}
+
+// CR-2026-056 (SDD §2.5): lock chat-composer draft rows (all five bind
+// targets empty + no source context) before the send transaction binds them.
+// Same attachment-id-ascending lock order as LockAttachmentsForIssueLink so
+// no attachment mutation path can deadlock with another.
+func (q *Queries) LockUnboundDraftAttachments(ctx context.Context, arg LockUnboundDraftAttachmentsParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, lockUnboundDraftAttachments, arg.WorkspaceID, arg.AttachmentIds)
 	if err != nil {
 		return nil, err
 	}

@@ -10,7 +10,35 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/util"
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
+
+// testChatCatalogPort is a static in-process ChatCatalogPort for handler
+// tests: a one-model claude catalog on both the cache and live paths. The
+// real port is only wired in cmd/server (Handler.WireChatCatalog); handler
+// tests that drive the §4.3 validation install this one on the shared
+// handler's services (idempotent — wiring twice is harmless).
+type testChatCatalogPort struct{}
+
+func (*testChatCatalogPort) CacheLoad(context.Context, string) (agent.Catalog, bool, error) {
+	return agent.Catalog{Models: []agent.Model{{ID: "claude-opus-5", Default: true}}}, true, nil
+}
+
+func (*testChatCatalogPort) LiveLoad(context.Context, string) (agent.Catalog, error) {
+	return agent.Catalog{Models: []agent.Model{{ID: "claude-opus-5", Default: true}}}, nil
+}
+
+// wireChatCatalogPort installs the static test catalog on the shared test
+// handler's IssueService and TaskService so send/container/merge-forward
+// requests can pass §4.3.
+func wireChatCatalogPort() {
+	if testHandler == nil {
+		return
+	}
+	port := &testChatCatalogPort{}
+	testHandler.IssueService.ChatCatalog = port
+	testHandler.TaskService.ChatCatalog = port
+}
 
 // mergeForwardFixture wires a project with a bound Team Agent plus its
 // Discussion container, so merge-forward selections can be validated and
@@ -24,6 +52,7 @@ type mergeForwardFixture struct {
 func newMergeForwardFixture(t *testing.T, label string, settingsExtra map[string]any) mergeForwardFixture {
 	t.Helper()
 	ctx := context.Background()
+	wireChatCatalogPort()
 
 	// Agent names are unique per workspace — every fixture needs its own label.
 	teamAgentID := createHandlerTestAgent(t, "merge-forward team agent "+label, []byte("{}"))
@@ -49,6 +78,7 @@ func newMergeForwardFixture(t *testing.T, label string, settingsExtra map[string
 		testPool.Exec(context.Background(), `DELETE FROM project_presenter_grant WHERE project_id = $1`, projectID)
 		testPool.Exec(context.Background(), `DELETE FROM attachment WHERE issue_id IN (SELECT id FROM issue WHERE project_id = $1)`, projectID)
 		testPool.Exec(context.Background(), `DELETE FROM issue WHERE project_id = $1`, projectID)
+		testPool.Exec(context.Background(), `DELETE FROM project_chat_session WHERE project_id = $1`, projectID)
 		testPool.Exec(context.Background(), `DELETE FROM project WHERE id = $1`, projectID)
 	})
 
@@ -396,9 +426,11 @@ func TestMergeForwardDiscussion_QueueFull429NoGhost(t *testing.T) {
 	}
 }
 
-// TestSendProjectChatMessage_AttachmentIDs pins the thin send endpoint's
-// attachment extension (FR-8 backend prerequisite): attachment_ids bind to
-// the created chat comment; omitting the field leaves behavior unchanged.
+// TestSendProjectChatMessage_AttachmentIDs pins the messages endpoint's
+// session_id + draft-attachment contract (TASK-07 / §4.5): a draft
+// attachment (all five bind targets empty) is bound to the created comment
+// INSIDE the send transaction; omitting attachment_ids leaves behavior
+// unchanged; a missing session_id rejects; malformed ids get the generic 400.
 func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -406,20 +438,24 @@ func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 	fx := newMergeForwardFixture(t, "attachments", nil)
 	ctx := context.Background()
 
-	// Resolve the chat container up front so the seeded attachment can hang
-	// on it (LinkAttachmentsToComment matches on issue_id).
-	chatIssue, err := testHandler.IssueService.EnsureProjectChatIssue(ctx, util.MustParseUUID(testWorkspaceID), util.MustParseUUID(fx.ProjectID), util.MustParseUUID(testUserID))
+	// Ensure the active session (what GET does) — messages requires its id.
+	view, err := testHandler.IssueService.EnsureProjectChatSession(ctx, util.MustParseUUID(testWorkspaceID), util.MustParseUUID(fx.ProjectID), util.MustParseUUID(testUserID))
 	if err != nil {
-		t.Fatalf("ensure chat container: %v", err)
+		t.Fatalf("ensure chat session: %v", err)
 	}
+
+	// A composer-uploaded DRAFT attachment: all five bind targets empty.
 	var attachmentID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO attachment (workspace_id, issue_id, uploader_type, uploader_id, filename, url, content_type, size_bytes)
-		VALUES ($1, $2, 'member', $3, 'spec.pdf', 'https://cdn.test/spec.pdf', 'application/pdf', 1024)
+		INSERT INTO attachment (workspace_id, uploader_type, uploader_id, filename, url, content_type, size_bytes)
+		VALUES ($1, 'member', $2, 'spec.pdf', 'https://cdn.test/spec.pdf', 'application/pdf', 1024)
 		RETURNING id::text
-	`, testWorkspaceID, uuidToString(chatIssue.ID), testUserID).Scan(&attachmentID); err != nil {
-		t.Fatalf("seed attachment: %v", err)
+	`, testWorkspaceID, testUserID).Scan(&attachmentID); err != nil {
+		t.Fatalf("seed draft attachment: %v", err)
 	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM attachment WHERE id = $1`, attachmentID)
+	})
 
 	send := func(body map[string]any) *httptest.ResponseRecorder {
 		t.Helper()
@@ -430,8 +466,13 @@ func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 		return rr
 	}
 
-	// With attachment_ids: the attachment links to the created comment.
-	rr := send(map[string]any{"content": "see the attached spec", "attachment_ids": []string{attachmentID}})
+	// With session_id + attachment_ids: 201 with the full id set; the draft
+	// binds to the created comment inside the send transaction.
+	rr := send(map[string]any{
+		"session_id":     view.SessionID,
+		"content":        "see the attached spec",
+		"attachment_ids": []string{attachmentID},
+	})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -439,16 +480,25 @@ func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	var linkedComment *string
-	if err := testPool.QueryRow(ctx, `SELECT comment_id::text FROM attachment WHERE id = $1`, attachmentID).Scan(&linkedComment); err != nil {
+	if resp.SessionID != view.SessionID {
+		t.Fatalf("session_id = %q, want request value %q", resp.SessionID, view.SessionID)
+	}
+	if resp.IssueID == "" || resp.CommentID == "" || resp.TaskID == "" {
+		t.Fatalf("send response missing ids: %+v", resp)
+	}
+	var linkedComment, linkedIssue, linkedTask *string
+	if err := testPool.QueryRow(ctx, `SELECT comment_id::text, issue_id::text, task_id::text FROM attachment WHERE id = $1`, attachmentID).
+		Scan(&linkedComment, &linkedIssue, &linkedTask); err != nil {
 		t.Fatalf("query attachment link: %v", err)
 	}
 	if linkedComment == nil || *linkedComment != resp.CommentID {
-		got := "<nil>"
-		if linkedComment != nil {
-			got = *linkedComment
-		}
-		t.Fatalf("attachment comment_id = %s, want %s", got, resp.CommentID)
+		t.Fatalf("attachment comment_id = %v, want %s", linkedComment, resp.CommentID)
+	}
+	if linkedIssue == nil || *linkedIssue != resp.IssueID {
+		t.Fatalf("attachment issue_id = %v, want %s", linkedIssue, resp.IssueID)
+	}
+	if linkedTask == nil || *linkedTask != resp.TaskID {
+		t.Fatalf("attachment task_id = %v, want %s", linkedTask, resp.TaskID)
 	}
 
 	// Simulate the daemon claiming+completing the first task: the one-pending-
@@ -459,13 +509,9 @@ func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 	}
 
 	// Without the field: unchanged behavior, the attachment stays untouched.
-	rr = send(map[string]any{"content": "a plain follow-up"})
+	rr = send(map[string]any{"session_id": view.SessionID, "content": "a plain follow-up"})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
-	}
-	var resp2 SendProjectChatMessageResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp2); err != nil {
-		t.Fatalf("decode response: %v", err)
 	}
 	if err := testPool.QueryRow(ctx, `SELECT comment_id::text FROM attachment WHERE id = $1`, attachmentID).Scan(&linkedComment); err != nil {
 		t.Fatalf("query attachment link: %v", err)
@@ -474,9 +520,15 @@ func TestSendProjectChatMessage_AttachmentIDs(t *testing.T) {
 		t.Fatalf("attachment must stay linked to the FIRST comment, got %v", linkedComment)
 	}
 
+	// Missing session_id → 400.
+	rr = send(map[string]any{"content": "no session id"})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without session_id, got %d: %s", rr.Code, rr.Body.String())
+	}
+
 	// Malformed attachment_ids → 400 and nothing persisted.
 	before, _ := chatPaneState(t, fx.ProjectID)
-	rr = send(map[string]any{"content": "bad attachments", "attachment_ids": []string{"not-a-uuid"}})
+	rr = send(map[string]any{"session_id": view.SessionID, "content": "bad attachments", "attachment_ids": []string{"not-a-uuid"}})
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for malformed attachment_ids, got %d: %s", rr.Code, rr.Body.String())
 	}

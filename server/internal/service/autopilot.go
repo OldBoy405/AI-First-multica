@@ -988,7 +988,7 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 	var reportChatID pgtype.UUID
 	if ap.Title == orgAdminAutopilotTitle && ap.ProjectID.Valid && autopilotAttr.AccountableUserID.Valid {
 		chat, chatErr := s.Queries.GetProjectChatSessionForCreator(ctx, db.GetProjectChatSessionForCreatorParams{
-			ProjectID: ap.ProjectID, CreatorID: autopilotAttr.AccountableUserID,
+			ProjectID: ap.ProjectID, CreatorID: autopilotAttr.AccountableUserID, WorkspaceID: ap.WorkspaceID,
 		})
 		if errors.Is(chatErr, pgx.ErrNoRows) {
 			chat, chatErr = s.Queries.CreateChatSession(ctx, db.CreateChatSessionParams{

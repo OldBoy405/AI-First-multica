@@ -215,6 +215,7 @@
       "status_error": "失敗",
       "status_interrupted": "中断",
       "model_label": "モデル",
+      "thinking_label": "思考レベル",
       "runtime_guide": "先に設定でローカル Agent を起動してください",
       "model_update_failed": "モデルの更新に失敗しました。もう一度お試しください",
       "stop": "停止",
@@ -243,6 +244,8 @@
       "stop_failed": "停止に失敗しました。再試行してください。",
       "model_follows_team_agent": "モデルは Team Agent の設定に従います"
     },
+    "config_unavailable": "チャット設定を読み込めません。再読み込みしてください。",
+    "config_retry": "再試行",
     "presenter": {
       "label": "プレゼンター",
       "current": "現在のプレゼンター: {{name}}",

@@ -13,24 +13,24 @@ import {
 import {
   projectChatDraftKey,
   projectChatOptions,
+  projectKeys,
   projectPrivateChatOptions,
   useProjectChatStore,
 } from "@multica/core/projects";
+import type { PrivateAskChat } from "@multica/core/api/schemas";
 import { useAgentPresenceDetail } from "@multica/core/agents";
 import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { agentListOptions } from "@multica/core/workspace/queries";
+import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes";
 import type { Attachment } from "@multica/core/types";
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from "@multica/ui/components/ui/tooltip";
+import { Button } from "@multica/ui/components/ui/button";
 import { ChatMessageList } from "../../chat/components/chat-message-list";
 import {
   ChatInputCore,
   type ChatInputDraftAdapter,
 } from "../../chat/components/chat-input";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
+import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
 import { useT } from "../../i18n";
 
 // ─── Private Ask pane (CR-2026-008 TASK-04) ───────────────────────────────
@@ -95,6 +95,24 @@ export function ProjectPrivateAsk({
         <p className="text-xs text-muted-foreground">
           {t(($) => $.chat.private.load_failed)}
         </p>
+        <PrivateAskRetryButton wsId={wsId} projectId={projectId} />
+      </Centered>
+    );
+  }
+
+  // AC-27 hard degradation: the schema fallback wipes session_id — the pane
+  // turns read-only (no picker, no PATCH, no send) until a fresh GET
+  // succeeds (BLOCK-007: session_id is the PATCH/send credential).
+  if (session.session_id === "") {
+    return (
+      <Centered>
+        <p
+          data-testid="private-ask-config-unavailable"
+          className="text-xs text-muted-foreground"
+        >
+          {t(($) => $.chat.config_unavailable)}
+        </p>
+        <PrivateAskRetryButton wsId={wsId} projectId={projectId} />
       </Centered>
     );
   }
@@ -103,9 +121,37 @@ export function ProjectPrivateAsk({
     <PrivateAskSession
       projectId={projectId}
       wsId={wsId}
-      sessionId={session.id}
+      sessionId={session.session_id}
       agentId={session.agent_id}
+      model={session.model}
+      thinkingLevel={session.thinking_level}
     />
+  );
+}
+
+// Retry affordance for a failed/degraded Private Ask GET (AC-27): one
+// explicit refetch of the get-or-create query.
+function PrivateAskRetryButton({
+  wsId,
+  projectId,
+}: {
+  wsId: string;
+  projectId: string;
+}) {
+  const { t } = useT("projects");
+  const qc = useQueryClient();
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      data-testid="private-ask-config-retry"
+      onClick={() => {
+        void qc.invalidateQueries({ queryKey: projectKeys.privateChat(wsId, projectId) });
+      }}
+    >
+      {t(($) => $.chat.config_retry)}
+    </Button>
   );
 }
 
@@ -122,11 +168,15 @@ function PrivateAskSession({
   wsId,
   sessionId,
   agentId,
+  model,
+  thinkingLevel,
 }: {
   projectId: string;
   wsId: string;
   sessionId: string;
   agentId: string;
+  model: string;
+  thinkingLevel: string;
 }) {
   const { t } = useT("projects");
   const { data: messages = [] } = useQuery(chatMessagesOptions(sessionId));
@@ -170,6 +220,8 @@ function PrivateAskSession({
         wsId={wsId}
         sessionId={sessionId}
         agentId={agentId}
+        model={model}
+        thinkingLevel={thinkingLevel}
         pendingTaskId={pendingTask?.task_id ?? null}
         pendingMessage={pendingMessage}
         setPendingMessage={setPendingMessage}
@@ -215,6 +267,8 @@ function PrivateAskComposer({
   wsId,
   sessionId,
   agentId,
+  model,
+  thinkingLevel,
   pendingTaskId,
   pendingMessage,
   setPendingMessage,
@@ -223,6 +277,9 @@ function PrivateAskComposer({
   wsId: string;
   sessionId: string;
   agentId: string;
+  /** Effective model/thinking for THIS session (CR-2026-056 §3.2). */
+  model: string;
+  thinkingLevel: string;
   pendingTaskId: string | null;
   pendingMessage: string | null;
   setPendingMessage: (message: string | null) => void;
@@ -241,6 +298,60 @@ function PrivateAskComposer({
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
     void qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
+  };
+
+  // ─── Session-config pickers (CR-2026-056 FR-3/FR-12, BLOCK-007) ────────
+  // The pane's own session now owns its effective model/thinking level:
+  // PATCH /api/chat/sessions/{id}/config with session_id (the pane's own
+  // session — creator-only, so every visible session is the caller's). The
+  // model picker still needs the agent's runtime + catalog for choices.
+  const chatKey = projectPrivateChatOptions(wsId, projectId).queryKey;
+  const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const agent = agents.find((a) => a.id === agentId) ?? null;
+  const { data: runtimes = [] } = useQuery({
+    ...runtimeListOptions(wsId),
+    enabled: !!agent,
+  });
+  const runtime = agent?.runtime_id
+    ? runtimes.find((r) => r.id === agent.runtime_id) ?? null
+    : null;
+  const runtimeOnline = runtime?.status === "online";
+  const modelsQuery = useQuery(
+    runtimeModelsOptions(runtimeOnline ? agent?.runtime_id ?? null : null),
+  );
+  const thinkingLevels = useMemo(() => {
+    const entry = (modelsQuery.data?.models ?? []).find((m) => m.id === model);
+    return entry?.thinking?.supported_levels ?? [];
+  }, [modelsQuery.data, model]);
+
+  const persistModel = async (next: string) => {
+    if (!sessionId) return;
+    const prev = model;
+    qc.setQueryData<PrivateAskChat>(chatKey, (old) => (old ? { ...old, model: next } : old));
+    try {
+      await api.patchChatSessionConfig(sessionId, { model: next });
+      qc.invalidateQueries({ queryKey: chatKey });
+    } catch {
+      qc.setQueryData<PrivateAskChat>(chatKey, (old) => (old ? { ...old, model: prev } : old));
+      toast.error(t(($) => $.chat.stream.model_update_failed));
+    }
+  };
+
+  const persistThinking = async (next: string) => {
+    if (!sessionId) return;
+    const prev = thinkingLevel;
+    qc.setQueryData<PrivateAskChat>(chatKey, (old) =>
+      old ? { ...old, thinking_level: next } : old,
+    );
+    try {
+      await api.patchChatSessionConfig(sessionId, { thinking_level: next });
+      qc.invalidateQueries({ queryKey: chatKey });
+    } catch {
+      qc.setQueryData<PrivateAskChat>(chatKey, (old) =>
+        old ? { ...old, thinking_level: prev } : old,
+      );
+      toast.error(t(($) => $.chat.stream.model_update_failed));
+    }
   };
 
   const handleSend = async (
@@ -287,29 +398,40 @@ function PrivateAskComposer({
           </div>
         </div>
       )}
-      {/* Read-only model badge (SDD-SUG-003): the model follows the Team
-          Agent's configuration; Private Ask deliberately offers no editing
-          entry point (a personal pane must not mutate the shared agent). */}
+      {/* CR-2026-056 FR-3/FR-12: writable session-config pickers replace the
+          read-only badge — the pane's session owns its own model/thinking
+          (creator-only), never the Team Agent session or the agent row. */}
       <div
         data-testid="private-ask-model-row"
         className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
       >
         <span className="shrink-0">{t(($) => $.chat.stream.model_label)}</span>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <span data-testid="private-ask-model-readonly">
-                <PrivateAskModelBadge wsId={wsId} agentId={agentId} />
-              </span>
-            }
+        {agent ? (
+          <ModelPicker
+            runtimeId={agent.runtime_id}
+            runtimeOnline={!!runtimeOnline}
+            value={model}
+            canEdit
+            onChange={persistModel}
           />
-          <TooltipContent side="top">
-            {t(($) => $.chat.private.model_follows_team_agent)}
-          </TooltipContent>
-        </Tooltip>
+        ) : null}
+        {thinkingLevels.length > 0 && (
+          <span
+            data-testid="private-ask-thinking-picker"
+            className="flex items-center gap-1"
+          >
+            <span className="shrink-0">{t(($) => $.chat.stream.thinking_label)}</span>
+            <ThinkingPicker
+              value={thinkingLevel}
+              levels={thinkingLevels}
+              canEdit
+              onChange={persistThinking}
+            />
+          </span>
+        )}
       </div>
       {/* CR-2026-012 FR-8: rich composer (attachments + member-only @
-          mentions). Stop button / model badge stay untouched above. */}
+          mentions). Stop button / model picker stay untouched above. */}
       <div data-testid="private-ask-composer">
         <ChatInputCore
           draftAdapter={draftAdapter}
@@ -322,30 +444,5 @@ function PrivateAskComposer({
         />
       </div>
     </div>
-  );
-}
-
-// Thin wrapper so the read-only ModelPicker resolves the agent's current
-// model + runtime the same way the Team Agent composer does.
-function PrivateAskModelBadge({
-  wsId,
-  agentId,
-}: {
-  wsId: string;
-  agentId: string;
-}) {
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const presence = useAgentPresenceDetail(wsId, agentId);
-  const agent = agents.find((a) => a.id === agentId);
-  if (!agent) return null;
-  const runtimeOnline = presence !== "loading" && presence.availability === "online";
-  return (
-    <ModelPicker
-      runtimeId={agent.runtime_id}
-      runtimeOnline={runtimeOnline}
-      value={agent.model ?? ""}
-      canEdit={false}
-      onChange={() => {}}
-    />
   );
 }

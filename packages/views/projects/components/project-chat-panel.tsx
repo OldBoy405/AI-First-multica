@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Lock, MessagesSquare, Users, X } from "lucide-react";
 import { toast } from "sonner";
-import { projectChatOptions, projectPresenterOptions } from "@multica/core/projects/queries";
+import { projectChatOptions, projectKeys, projectPresenterOptions } from "@multica/core/projects/queries";
 import {
   useProjectChatStore,
   useSetProjectTeamAgent,
@@ -266,8 +266,31 @@ function TeamAgentPane({
   // Explicit non-empty-string checks rather than truthy/falsy: both fields
   // default to "" (never undefined) once `chat` itself has loaded, and "" is
   // the actual "not configured yet" sentinel, not just a falsy placeholder.
-  const configured =
-    chat !== undefined && chat.team_agent_id !== "" && chat.issue_id !== "";
+  // CR-2026-056 (AC-11/§3.1): issue_id may be null before the first send —
+  // the session itself anchors "configured", not the container.
+  //
+  // Hard degradation (AC-27, review BLOCK-002) is recognized FIRST: the
+  // schema fallback (EMPTY_PROJECT_CHAT) carries `degraded: true`, and a
+  // failed fetch leaves `chat` undefined. Both mean the config cannot be
+  // trusted — admin AND member get the read-only unavailable state with a
+  // retry, never the TeamAgentSetupPicker write entry. The unconfigured
+  // state (parsed backend response, team_agent_id "") keeps its existing
+  // admin CTA / member notice split.
+  if (chat === undefined || chat.degraded === true) {
+    return (
+      <CenteredState>
+        <p
+          data-testid="project-chat-config-unavailable"
+          className="text-xs text-muted-foreground"
+        >
+          {t(($) => $.chat.config_unavailable)}
+        </p>
+        <RetryChatConfigButton wsId={wsId} projectId={projectId} />
+      </CenteredState>
+    );
+  }
+
+  const configured = chat.team_agent_id !== "" && chat.session_id !== "";
 
   if (!configured) {
     return canConfigure ? (
@@ -290,6 +313,7 @@ function TeamAgentPane({
         >
           {t(($) => $.chat.unconfigured_member)}
         </p>
+        <RetryChatConfigButton wsId={wsId} projectId={projectId} />
       </CenteredState>
     );
   }
@@ -297,13 +321,42 @@ function TeamAgentPane({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ProjectTeamAgentChat
-        issueId={chat.issue_id}
+        issueId={chat.issue_id ?? ""}
+        sessionId={chat.session_id}
         projectId={projectId}
         wsId={wsId}
         teamAgentId={chat.team_agent_id}
         canConfigure={canConfigure}
       />
     </div>
+  );
+}
+
+// Retry affordance for a hard-degraded chat context (AC-27): the GET schema
+// fallback carries `degraded: true` (or the fetch failed outright), so the
+// pane renders the read-only unavailable state for everyone — one explicit
+// retry refetches the GET.
+function RetryChatConfigButton({
+  wsId,
+  projectId,
+}: {
+  wsId: string;
+  projectId: string;
+}) {
+  const { t } = useT("projects");
+  const qc = useQueryClient();
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      data-testid="project-chat-config-retry"
+      onClick={() => {
+        void qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+      }}
+    >
+      {t(($) => $.chat.config_retry)}
+    </Button>
   );
 }
 

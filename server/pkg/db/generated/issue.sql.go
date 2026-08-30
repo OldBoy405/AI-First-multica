@@ -11,6 +11,61 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adoptLegacyProjectChatIssue = `-- name: AdoptLegacyProjectChatIssue :one
+UPDATE issue
+SET origin_id = $2
+WHERE id = $1
+  AND workspace_id = $3
+  AND origin_type = 'project_chat'
+  AND origin_id IS NULL
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at
+`
+
+type AdoptLegacyProjectChatIssueParams struct {
+	ID          pgtype.UUID `json:"id"`
+	OriginID    pgtype.UUID `json:"origin_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// CR-2026-056 (SDD §2.1): claim a legacy origin_id-NULL container row for a
+// session. CAS on origin_id IS NULL so a concurrent claim cannot be
+// overwritten; zero rows means someone else claimed it first.
+func (q *Queries) AdoptLegacyProjectChatIssue(ctx context.Context, arg AdoptLegacyProjectChatIssueParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, adoptLegacyProjectChatIssue, arg.ID, arg.OriginID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+	)
+	return i, err
+}
+
 const childIssueProgress = `-- name: ChildIssueProgress :many
 SELECT parent_issue_id,
        COUNT(*)::bigint AS total,
@@ -849,9 +904,76 @@ func (q *Queries) GetIssueInWorkspace(ctx context.Context, arg GetIssueInWorkspa
 	return i, err
 }
 
+const getLegacyUnboundProjectChatIssue = `-- name: GetLegacyUnboundProjectChatIssue :many
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at FROM issue
+WHERE workspace_id = $1 AND project_id = $2
+  AND origin_type = 'project_chat'
+  AND origin_id IS NULL
+ORDER BY created_at ASC, id ASC
+`
+
+type GetLegacyUnboundProjectChatIssueParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ProjectID   pgtype.UUID `json:"project_id"`
+}
+
+// CR-2026-056 (SDD §2.1): upgrade-era container rows written before sessions
+// existed carry origin_id NULL. The adoption predicate requires exactly 0 or
+// 1 such row; the caller asserts len(rows) <= 1 before adopting.
+func (q *Queries) GetLegacyUnboundProjectChatIssue(ctx context.Context, arg GetLegacyUnboundProjectChatIssueParams) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, getLegacyUnboundProjectChatIssue, arg.WorkspaceID, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
+			&i.Metadata,
+			&i.Stage,
+			&i.Properties,
+			&i.Revision,
+			&i.LastActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getProjectChatIssue = `-- name: GetProjectChatIssue :one
 SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at FROM issue
 WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_chat'
+ORDER BY created_at ASC, id ASC
+LIMIT 1
 `
 
 type GetProjectChatIssueParams struct {
@@ -860,7 +982,11 @@ type GetProjectChatIssueParams struct {
 }
 
 // CR-2026-006: fetch the hidden per-project Team Agent chat container issue.
-// At most one row exists per project (partial unique index issue_project_chat_unique).
+// CR-2026-056 (BLOCK-017): migration 479 retired issue_project_chat_unique, so
+// a project may hold several project_chat rows across session history. A
+// stable double-key ORDER BY keeps :one deterministic even on equal
+// created_at; only the forwarding path (RouteDiscussionToTeamAgent) still
+// calls this query (SDD §4.13).
 func (q *Queries) GetProjectChatIssue(ctx context.Context, arg GetProjectChatIssueParams) (Issue, error) {
 	row := q.db.QueryRow(ctx, getProjectChatIssue, arg.ProjectID, arg.WorkspaceID)
 	var i Issue

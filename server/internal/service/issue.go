@@ -40,6 +40,10 @@ type IssueService struct {
 	// Metrics as "PostHog only", so leaving it unset is safe.
 	Metrics     *obsmetrics.BusinessMetrics
 	TaskService *TaskService
+	// ChatCatalog is the handler-implemented catalog source for chat-config
+	// validation (CR-2026-056, SDD §4.3). Wired by cmd/server/router.go via
+	// Handler.WireChatCatalog; nil only in tests that never validate configs.
+	ChatCatalog ChatCatalogPort
 }
 
 func NewIssueService(q *db.Queries, tx TxStarter, bus *events.Bus, ac analytics.Client, ts *TaskService) *IssueService {

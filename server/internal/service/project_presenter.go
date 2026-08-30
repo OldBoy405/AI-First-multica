@@ -420,15 +420,20 @@ func (s *TaskService) recordPresenterActivity(ctx context.Context, project db.Pr
 		detailsJSON = []byte("{}")
 	}
 
-	issue, err := s.Queries.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{
-		ProjectID: project.ID, WorkspaceID: project.WorkspaceID,
+	// CR-2026-056 (SDD §9 #35): presenter activity hangs on the ACTIVE
+	// session's bound container (project_chat_session.issue_id), not on the
+	// project's earliest project_chat issue — after a rebind that one belongs
+	// to a closed session's timeline. An unbound session skips recording,
+	// matching the previous "issue not found" behavior.
+	session, err := s.Queries.GetActiveProjectChatSession(ctx, db.GetActiveProjectChatSessionParams{
+		WorkspaceID: project.WorkspaceID, ProjectID: project.ID,
 	})
-	if err != nil {
-		slog.Warn("presenter activity skipped: project chat issue not found",
+	if err != nil || !session.IssueID.Valid {
+		slog.Warn("presenter activity skipped: no active bound chat session",
 			"project_id", util.UUIDToString(project.ID), "action", action, "error", err)
 	} else if activity, err := s.Queries.CreateActivity(ctx, db.CreateActivityParams{
 		WorkspaceID: project.WorkspaceID,
-		IssueID:     issue.ID,
+		IssueID:     session.IssueID,
 		ActorType:   pgtype.Text{String: "member", Valid: true},
 		ActorID:     actorID,
 		Action:      action,
@@ -446,7 +451,7 @@ func (s *TaskService) recordPresenterActivity(ctx context.Context, project db.Pr
 			ActorType:   "member",
 			ActorID:     util.UUIDToString(actorID),
 			Payload: map[string]any{
-				"issue_id": util.UUIDToString(issue.ID),
+				"issue_id": util.UUIDToString(session.IssueID),
 				"entry": map[string]any{
 					"type":       "activity",
 					"id":         util.UUIDToString(activity.ID),

@@ -656,7 +656,7 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 		return false, err
 	}
 	models := catalog.Models
-	target := modelIDForCapabilityLookup(providerType, model)
+	target := ModelIDForCapabilityLookup(providerType, model)
 	if target == "" {
 		// Default model = the entry the catalog marks as Default. If no
 		// entry is flagged, fall through to the no-match return; that
@@ -688,6 +688,42 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 			}
 		}
 		return false, nil
+	}
+	return false, nil
+}
+
+// StaticCatalog adapts an already-loaded Catalog to the loader shape
+// ValidateThinkingLevelWith expects. It performs no I/O and never fails; do
+// not pass a Catalog directly where a loader is required.
+func StaticCatalog(c Catalog) func() (Catalog, error) {
+	return func() (Catalog, error) { return c, nil }
+}
+
+// ValidateChatConfig validates a session-level chat-config pair (model +
+// thinking level) against one already-loaded catalog. It is the single
+// validation entry point for chat configs (CR-2026-056): the thinking level
+// goes through ValidateThinkingLevelWith over the same catalog, so both
+// checks share one rule set (empty value accepted; codex empty-model
+// fail-closed; unknown model fails closed). An empty model is a legal
+// runtime-default sentinel and is not required to be a catalog entry; a
+// non-empty model must resolve via ModelIDForCapabilityLookup to a known
+// catalog model ID.
+func ValidateChatConfig(catalog Catalog, providerType, model, thinking string) (bool, error) {
+	thinkingOK, err := ValidateThinkingLevelWith(StaticCatalog(catalog), providerType, model, thinking)
+	if err != nil {
+		return false, err
+	}
+	if !thinkingOK {
+		return false, nil
+	}
+	if model == "" {
+		return true, nil
+	}
+	target := ModelIDForCapabilityLookup(providerType, model)
+	for _, m := range catalog.Models {
+		if m.ID == target {
+			return true, nil
+		}
 	}
 	return false, nil
 }

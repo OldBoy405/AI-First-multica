@@ -477,6 +477,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		h.InvitationRateLimiters = handler.NewRedisInvitationRateLimiters(rdb, invitationRateLimits)
 	}
 
+	// Chat-config catalog port (CR-2026-056): must be wired after the model
+	// list store and catalog cache are finalized (in-memory or Redis).
+	h.WireChatCatalog()
+
 	// Channel engine (MUL-3620): the platform-agnostic inbound runtime.
 	// Built UNCONDITIONALLY — it drives any channel.Channel, not just
 	// Feishu, so it must not depend on the Lark master key (a future
@@ -2002,6 +2006,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/", h.DeleteProject)
 					r.Get("/queue-status", h.GetProjectQueueStatus)
 					r.Get("/chat", h.GetProjectChat)
+					r.Patch("/chat/config", h.PatchProjectChatConfig)
+					r.Post("/chat/container", h.PostProjectChatContainer)
 					r.Post("/chat/messages", h.SendProjectChatMessage)
 					// CR-2026-012 DD-7: merge-forward a multi-select of Discussion
 					// messages into one Team Agent task (same send kernel as above).
@@ -2315,6 +2321,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Route("/{sessionId}", func(r chi.Router) {
 					r.Get("/", h.GetChatSession)
 					r.Patch("/", h.UpdateChatSession)
+					// Private Ask config patch (CR-2026-056, SDD §3.2): the
+					// session id is the path segment; no session_id body field.
+					r.Patch("/config", h.PatchChatSessionConfig)
 					r.Patch("/pin", h.SetChatSessionPinned)
 					r.Patch("/archive", h.SetChatSessionArchived)
 					r.Delete("/", h.DeleteChatSession)

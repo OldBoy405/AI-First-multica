@@ -1,17 +1,23 @@
 -- name: CreateChatSession :one
 -- project_id is NULL for the global 1:1 chat and non-NULL for a project's
 -- Private Ask session (CR-2026-008). Existing callers pass the zero value.
-INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id, id)
-VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()))
+-- CR-2026-056: base_model/base_thinking_level snapshot the creating Team
+-- Agent's defaults at INSERT time (SDD §2.2, BLOCK-004). Existing callers
+-- leave them NULL (narg zero value) and behave byte-for-byte as before; only
+-- the Private Ask get-or-create passes the current agent defaults.
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id, id, base_model, base_thinking_level)
+VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()), sqlc.narg('base_model'), sqlc.narg('base_thinking_level'))
 RETURNING *;
 
 -- name: GetProjectChatSessionForCreator :one
 -- Private Ask get-or-create lookup: the latest active session for a
--- (project, creator) pair. The partial unique index
--- chat_session_project_creator_active_unique guarantees at most one row
--- matches; ORDER BY is a belt-and-braces tiebreak, not a correctness need.
+-- (workspace, project, creator) triple (CR-2026-056 Hard Invariant 1:
+-- workspace_id is authoritative; never filter by project/creator alone).
+-- The partial unique index chat_session_project_creator_active_unique
+-- guarantees at most one row matches; ORDER BY is a belt-and-braces
+-- tiebreak, not a correctness need.
 SELECT * FROM chat_session
-WHERE project_id = $1 AND creator_id = $2 AND status = 'active'
+WHERE project_id = $1 AND creator_id = $2 AND workspace_id = $3 AND status = 'active'
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -30,6 +36,36 @@ WHERE id = $1;
 -- name: GetChatSessionInWorkspace :one
 SELECT * FROM chat_session
 WHERE id = $1 AND workspace_id = $2;
+
+-- name: LockChatSessionInWorkspace :one
+-- CR-2026-056 (BLOCK-008): row lock + authoritative workspace re-read in one
+-- step. Private Ask PATCH and send use only this workspace-scoped locked read;
+-- the workspace-less GetChatSession must not be used for config mutation.
+SELECT * FROM chat_session
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE;
+
+-- name: PatchChatSessionConfig :one
+-- CR-2026-056: Private Ask config write. Concrete override values are
+-- resolved by the caller from the three-state PATCH payload (omitted = keep
+-- current, null = clear, value = set) while holding LockChatSessionInWorkspace.
+UPDATE chat_session
+SET model_override = $3,
+    thinking_level_override = $4,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $2
+RETURNING *;
+
+-- name: BackfillChatSessionBaseIfNull :one
+-- CR-2026-056 (FR-11): first PATCH/send on a legacy Private Ask session
+-- writes the current Team Agent defaults into base_* only where still NULL;
+-- never overwrites an existing snapshot. Idempotent within the caller's
+-- session-row transaction.
+UPDATE chat_session
+SET base_model = COALESCE(base_model, $3),
+    base_thinking_level = COALESCE(base_thinking_level, $4)
+WHERE id = $1 AND workspace_id = $2
+RETURNING *;
 
 -- name: GetPublicChatSessionInWorkspace :one
 -- A channel command is a durable control-plane record, not a public chat turn.
@@ -1080,7 +1116,7 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
     initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
     runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
-    fire_at, channel_context_revision, id
+    fire_at, channel_context_revision, context, id
 )
 SELECT
     $1, $2, NULL,
@@ -1096,6 +1132,7 @@ SELECT
     sqlc.narg(trigger_evidence_ref_id),
     sqlc.narg('fire_at')::timestamptz,
     sqlc.narg('channel_context_revision')::bigint,
+    sqlc.narg('context'),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 WHERE lock_task_owner_rows($1, NULL, $2)
 RETURNING *;

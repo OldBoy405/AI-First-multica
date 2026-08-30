@@ -215,6 +215,7 @@
       "status_error": "실패",
       "status_interrupted": "중단됨",
       "model_label": "모델",
+      "thinking_label": "사고 레벨",
       "runtime_guide": "먼저 설정에서 로컬 Agent를 실행하세요",
       "model_update_failed": "모델 업데이트에 실패했습니다. 다시 시도해 주세요",
       "stop": "중지",
@@ -243,6 +244,8 @@
       "stop_failed": "중지하지 못했습니다. 다시 시도해 주세요.",
       "model_follows_team_agent": "모델은 Team Agent 설정을 따릅니다"
     },
+    "config_unavailable": "채팅 설정을 불러올 수 없습니다. 다시 시도해 주세요.",
+    "config_retry": "재시도",
     "presenter": {
       "label": "발표자",
       "current": "현재 발표자: {{name}}",

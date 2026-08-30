@@ -185,6 +185,57 @@ WHERE workspace_id = sqlc.arg(workspace_id)
 ORDER BY id
 FOR UPDATE;
 
+-- name: LockUnboundDraftAttachments :many
+-- CR-2026-056 (SDD §2.5): lock chat-composer draft rows (all five bind
+-- targets empty + no source context) before the send transaction binds them.
+-- Same attachment-id-ascending lock order as LockAttachmentsForIssueLink so
+-- no attachment mutation path can deadlock with another.
+SELECT id FROM attachment
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND id = ANY(sqlc.arg(attachment_ids)::uuid[])
+ORDER BY id
+FOR UPDATE;
+
+-- name: BindUnboundDraftAttachments :many
+-- CR-2026-056 (SDD §2.5): on already-locked rows, write the bind targets.
+-- The WHERE still requires all five targets empty, no source context, and the
+-- uploader to match the sender; zero rows => 409 attachment_already_bound.
+UPDATE attachment
+SET issue_id = sqlc.arg(issue_id),
+    comment_id = sqlc.arg(comment_id),
+    task_id = sqlc.arg(task_id)
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND id = ANY(sqlc.arg(attachment_ids)::uuid[])
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND uploader_type = sqlc.arg(uploader_type)
+  AND uploader_id = sqlc.arg(uploader_id)
+RETURNING *;
+
+-- name: DeleteUnboundDraftAttachment :one
+-- CR-2026-056 (SDD §2.5): sweeper-only delete of still-unbound draft rows.
+-- Never reuse DeleteAttachment here: it only excludes source_context_id and
+-- would also remove rows already bound to an issue/comment.
+DELETE FROM attachment
+WHERE id = $1 AND workspace_id = $2
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+RETURNING id;
+
 -- name: LinkAttachmentsToIssue :one
 WITH linked AS (
   UPDATE attachment
@@ -266,3 +317,34 @@ ORDER BY id;
 DELETE FROM attachment
 WHERE workspace_id = sqlc.arg(workspace_id)
   AND source_context_id IS NOT NULL;
+
+-- name: ListUnboundDraftAttachmentCandidates :many
+-- CR-2026-056 (SDD §4.10): lock-free candidate scan for the 1h draft TTL
+-- sweeper. The age predicate is strict: a row created exactly 168h ago is
+-- retained this round (AC-28).
+SELECT id FROM attachment
+WHERE issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+ORDER BY id
+LIMIT @max_per_tick::int;
+
+-- name: LockUnboundDraftAttachmentCandidate :one
+-- CR-2026-056 (SDD §4.10): per-candidate locked re-read. SKIP LOCKED lets
+-- concurrent sweeper ticks skip an already-claimed row, and the send path's
+-- BindUnboundDraftAttachments locks the same rows (attachment-id-ascending),
+-- so a row bound between the scan and this lock makes the predicate miss.
+SELECT * FROM attachment
+WHERE id = $1
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+FOR UPDATE SKIP LOCKED;
