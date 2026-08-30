@@ -180,7 +180,7 @@ func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) 
 	}
 
 	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-		ProjectID: project.ID, CreatorID: callerUUID,
+		ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
 	})
 	if err == nil {
 		writeJSON(w, http.StatusOK, chatSessionToResponse(session))
@@ -214,7 +214,7 @@ func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) 
 		// partial unique index collapses the race; the loser reselects.
 		if isUniqueViolation(err) {
 			session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-				ProjectID: project.ID, CreatorID: callerUUID,
+				ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
 			})
 		}
 		if err != nil {

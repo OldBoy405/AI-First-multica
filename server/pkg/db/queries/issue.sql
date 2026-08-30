@@ -587,9 +587,25 @@ RETURNING id, workspace_id, creator_type, creator_id, first_executed_at;
 
 -- name: GetProjectChatIssue :one
 -- CR-2026-006: fetch the hidden per-project Team Agent chat container issue.
--- At most one row exists per project (partial unique index issue_project_chat_unique).
+-- CR-2026-056 (BLOCK-017): migration 479 retired issue_project_chat_unique, so
+-- a project may hold several project_chat rows across session history. A
+-- stable double-key ORDER BY keeps :one deterministic even on equal
+-- created_at; only the forwarding path (RouteDiscussionToTeamAgent) still
+-- calls this query (SDD §4.13).
 SELECT * FROM issue
-WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_chat';
+WHERE project_id = $1 AND workspace_id = $2 AND origin_type = 'project_chat'
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
+
+-- name: GetLegacyUnboundProjectChatIssue :many
+-- CR-2026-056 (SDD §2.1): upgrade-era container rows written before sessions
+-- existed carry origin_id NULL. The adoption predicate requires exactly 0 or
+-- 1 such row; the caller asserts len(rows) <= 1 before adopting.
+SELECT * FROM issue
+WHERE workspace_id = $1 AND project_id = $2
+  AND origin_type = 'project_chat'
+  AND origin_id IS NULL
+ORDER BY created_at ASC, id ASC;
 
 -- name: GetProjectDiscussionIssue :one
 -- CR-2026-009: fetch the hidden per-project Discussion container issue.
