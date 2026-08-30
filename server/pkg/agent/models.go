@@ -410,7 +410,7 @@ func ModelKnownIncompatibleWithProvider(providerType, model string) bool {
 	if !ok {
 		return false
 	}
-	if accepted[modelIDForCapabilityLookup(providerType, model)] {
+	if accepted[ModelIDForCapabilityLookup(providerType, model)] {
 		return false
 	}
 	return isRuntimeSpecificModelID(model)
@@ -422,12 +422,12 @@ func ModelKnownIncompatibleWithProvider(providerType, model string) bool {
 // effort catalog only when the modifier is syntactically a context size.
 var claudeContextWindowTagRe = regexp.MustCompile(`\[[1-9][0-9]*[km]\]$`)
 
-// modelIDForCapabilityLookup returns the catalog identity for a runtime-native
+// ModelIDForCapabilityLookup returns the catalog identity for a runtime-native
 // model string. It never changes the value persisted on the agent or passed to
 // the provider CLI. Claude context-window variants share their base model's
 // capabilities; every other provider and malformed/unknown modifier retains
 // exact-match behavior.
-func modelIDForCapabilityLookup(providerType, model string) string {
+func ModelIDForCapabilityLookup(providerType, model string) string {
 	if providerType != "claude" {
 		return model
 	}
