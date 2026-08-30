@@ -5,10 +5,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, CheckCircle2, Copy, Loader2, Mic, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multica/core/api";
+import type { ProjectChat } from "@multica/core/api/schemas";
 import { issueKeys } from "@multica/core/issues/queries";
 import { taskMessagesOptions } from "@multica/core/chat/queries";
 import {
   projectChatDraftKey,
+  projectChatOptions,
   projectGatesOptions,
   projectPresenterOptions,
   projectQueueStatusOptions,
@@ -23,8 +25,7 @@ import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { agentListOptions } from "@multica/core/workspace/queries";
 import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes";
-import { useAgentPermissions } from "@multica/core/permissions";
-import type { Agent, AgentTask, Attachment, TimelineEntry } from "@multica/core/types";
+import type { AgentTask, Attachment, TimelineEntry } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
@@ -39,6 +40,7 @@ import {
 } from "../../chat/components/chat-input";
 import { ApprovalCard, CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
+import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { ProjectQueueBar } from "./project-queue-bar";
 import { useTimeAgo } from "../../i18n/use-time-ago";
@@ -67,12 +69,16 @@ const PRESENTER_NOTICE_ACTIONS = new Set([
 
 export function ProjectTeamAgentChat({
   issueId,
+  sessionId,
   projectId,
   wsId,
   teamAgentId,
   canConfigure,
 }: {
+  /** The chat container issue id — "" until the first send binds one (AC-11). */
   issueId: string;
+  /** The active session id — anchors PATCH/send (CR-2026-056 §3.1). */
+  sessionId: string;
   projectId: string;
   wsId: string;
   /** The configured Team Agent's agent id — drives the model selector. */
@@ -81,6 +87,10 @@ export function ProjectTeamAgentChat({
 }) {
   const { t } = useT("projects");
   const userId = useAuthStore((s) => s.user?.id);
+  // AC-11: before the first send there is no container issue — the timeline
+  // and task list stay empty (no container-scoped fetches) while the
+  // composer stays fully usable.
+  const hasContainer = issueId !== "";
   // WS `comment:created` already writes new comments straight into this cache.
   const { timeline } = useIssueTimeline(issueId, userId);
   // Same cache key + WS `task:*` invalidation as ExecutionLogSection, so agent
@@ -89,6 +99,7 @@ export function ProjectTeamAgentChat({
     queryKey: issueKeys.tasks(issueId),
     queryFn: () => api.listTasksByIssue(issueId),
     staleTime: 30_000,
+    enabled: hasContainer,
   });
 
   const comments = useMemo(
@@ -161,6 +172,7 @@ export function ProjectTeamAgentChat({
         projectId={projectId}
         wsId={wsId}
         issueId={issueId}
+        sessionId={sessionId}
         teamAgentId={teamAgentId}
         canConfigure={canConfigure}
       />
@@ -640,17 +652,20 @@ export function TeamAgentComposer({
   projectId,
   wsId,
   issueId,
+  sessionId,
   teamAgentId,
   canConfigure,
 }: {
   projectId: string;
   wsId: string;
-  /** The chat container issue id — upload scope for composer attachments. */
+  /** The chat container issue id — "" until the first send binds one. */
   issueId: string;
+  /** The active session id — anchors PATCH/send (CR-2026-056 §3.1). */
+  sessionId: string;
   /** The configured Team Agent's agent id, when the panel has one. */
   teamAgentId?: string;
-  /** Owner/admin — backend exempts them from the full-queue lock, so the
-   *  composer never enters the disabled state for them. */
+  /** Owner/admin — the session-config PATCH gate (AC-6); also exempts them
+   *  from the full-queue lock. */
   canConfigure: boolean;
 }) {
   const { t } = useT("projects");
@@ -660,17 +675,25 @@ export function TeamAgentComposer({
   const { mutateAsync, isPending } = useSendProjectChatMessage(wsId, projectId);
   const { uploadWithToast } = useFileUpload(api, (err) => toast.error(err.message));
 
+  // CR-2026-056 §4.11 (AC-1/AC-2): uploads are drafts until the send
+  // transaction binds them — the composer stops sending issueId (TASK-09
+  // backend tolerance), so an unbound container never blocks an upload.
   const handleComposerUpload = useCallback(
-    (file: File) => uploadWithToast(file, { issueId }),
+    (file: File) => uploadWithToast(file, issueId !== "" ? { issueId } : {}),
     [uploadWithToast, issueId],
   );
 
-  // ─── Model selector state (CR-2026-006 TASK-05, TSUG-003) ───────────────
-  // The selector binds the Team Agent AGENT's `model` field, not a per-message
-  // override (the daemon reads agent.Model at claim time and ignores task-level
-  // overrides). Two disabled states are kept distinct per TSUG-003, decided in
-  // order: permission first (can this user edit the agent at all?), then
-  // runtime availability (did the daemon report any models?).
+  // ─── Session-config state (CR-2026-056 §3.1/§4.11) ─────────────────────
+  // The effective model/thinking level now lives on the ACTIVE SESSION, not
+  // on the agent row: the pane reads the chat context (already cached by the
+  // panel) and persists through PATCH /chat/config — `api.updateAgent` must
+  // never run from the chat path (AC-1). The hard-degradation sentinel
+  // (session_id "") can't reach here: the panel gates mounting on it, and
+  // every write below refuses an empty session_id anyway.
+  const { data: chat } = useQuery(projectChatOptions(wsId, projectId));
+  const chatModel = chat?.model ?? "";
+  const chatThinking = chat?.thinking_level ?? "";
+
   const { data: agents = [] } = useQuery({
     ...agentListOptions(wsId),
     enabled: !!teamAgentId,
@@ -678,10 +701,6 @@ export function TeamAgentComposer({
   const agent = teamAgentId
     ? agents.find((a) => a.id === teamAgentId) ?? null
     : null;
-  // Reuse the exact agent edit-permission rule the inspector uses — being a
-  // project owner/admin (`canConfigure`) does NOT imply edit rights on an
-  // agent someone else owns.
-  const { canEdit } = useAgentPermissions(agent, wsId);
 
   const { data: runtimes = [] } = useQuery({
     ...runtimeListOptions(wsId),
@@ -702,22 +721,37 @@ export function TeamAgentComposer({
   // Only gate send on runtime once we actually have an agent to check.
   const runtimeBlocked = agent != null && !runtimeReady;
 
+  // Thinking levels for the CURRENT effective model (AC-2): same catalog
+  // shape the agent inspector consumes; an empty set renders nothing.
+  const thinkingLevels = useMemo(() => {
+    const entry = (modelsQuery.data?.models ?? []).find((m) => m.id === chatModel);
+    return entry?.thinking?.supported_levels ?? [];
+  }, [modelsQuery.data, chatModel]);
+
+  const chatKey = projectChatOptions(wsId, projectId).queryKey;
+
   const persistModel = async (model: string) => {
-    if (!agent) return;
-    const key = agentListOptions(wsId).queryKey;
-    const prev = agent.model ?? "";
-    // Optimistic field patch (CLAUDE.md: predictable, same screen, trivial
-    // rollback) so the chip flips immediately, matching agent-detail-page.
-    qc.setQueryData<Agent[]>(key, (old) =>
-      old?.map((a) => (a.id === agent.id ? { ...a, model } : a)),
-    );
+    if (!sessionId) return;
+    const prev = chatModel;
+    qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, model } : old));
     try {
-      await api.updateAgent(agent.id, { model });
-      qc.invalidateQueries({ queryKey: key });
+      await api.patchProjectChatConfig(projectId, { model });
+      qc.invalidateQueries({ queryKey: chatKey });
     } catch {
-      qc.setQueryData<Agent[]>(key, (old) =>
-        old?.map((a) => (a.id === agent.id ? { ...a, model: prev } : a)),
-      );
+      qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, model: prev } : old));
+      toast.error(t(($) => $.chat.stream.model_update_failed));
+    }
+  };
+
+  const persistThinking = async (level: string) => {
+    if (!sessionId) return;
+    const prev = chatThinking;
+    qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, thinking_level: level } : old));
+    try {
+      await api.patchProjectChatConfig(projectId, { thinking_level: level });
+      qc.invalidateQueries({ queryKey: chatKey });
+    } catch {
+      qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, thinking_level: prev } : old));
       toast.error(t(($) => $.chat.stream.model_update_failed));
     }
   };
@@ -779,10 +813,10 @@ export function TeamAgentComposer({
     commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
   ): Promise<boolean> => {
     const trimmed = content.trim();
-    if (!trimmed || locked || runtimeBlocked) return false;
+    if (!trimmed || locked || runtimeBlocked || !sessionId) return false;
     setPendingMessage(trimmed);
     try {
-      await mutateAsync({ content: trimmed, attachmentIds });
+      await mutateAsync({ sessionId, content: trimmed, attachmentIds });
       // Success → clear draft + attachment slot through the adapter.
       commitInput();
       return true;
@@ -883,16 +917,16 @@ export function TeamAgentComposer({
           className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
         >
           <span className="shrink-0">{t(($) => $.chat.stream.model_label)}</span>
-          {/* Order (TSUG-003): permission gates interactivity; a non-editor
-              always gets the read-only badge — never the runtime guide — so
-              "you can't change this" is never misread as "the environment is
-              broken". Runtime availability then decides the editor's content. */}
-          {!canEdit.allowed ? (
+          {/* CR-2026-056 §4.11 (AC-6): the session-config PATCH gate is
+              owner/admin — a plain member always gets the read-only badge;
+              runtime availability then decides the editor's content. The
+              value shown is the SESSION's effective model, not agent.model. */}
+          {!canConfigure ? (
             <span data-testid="project-chat-model-readonly">
               <ModelPicker
                 runtimeId={agent.runtime_id}
                 runtimeOnline={!!runtimeOnline}
-                value={agent.model ?? ""}
+                value={chatModel}
                 canEdit={false}
                 onChange={() => {}}
               />
@@ -902,7 +936,7 @@ export function TeamAgentComposer({
               <ModelPicker
                 runtimeId={agent.runtime_id}
                 runtimeOnline={!!runtimeOnline}
-                value={agent.model ?? ""}
+                value={chatModel}
                 canEdit
                 onChange={persistModel}
               />
@@ -910,6 +944,20 @@ export function TeamAgentComposer({
           ) : (
             <span data-testid="project-chat-model-runtime-guide">
               {t(($) => $.chat.stream.runtime_guide)}
+            </span>
+          )}
+          {thinkingLevels.length > 0 && (
+            <span
+              data-testid="project-chat-thinking-picker"
+              className="flex items-center gap-1"
+            >
+              <span className="shrink-0">{t(($) => $.chat.stream.thinking_label)}</span>
+              <ThinkingPicker
+                value={chatThinking}
+                levels={thinkingLevels}
+                canEdit={canConfigure}
+                onChange={persistThinking}
+              />
             </span>
           )}
         </div>

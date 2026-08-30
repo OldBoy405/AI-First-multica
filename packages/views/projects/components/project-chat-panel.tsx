@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Lock, MessagesSquare, Users, X } from "lucide-react";
 import { toast } from "sonner";
-import { projectChatOptions, projectPresenterOptions } from "@multica/core/projects/queries";
+import { projectChatOptions, projectKeys, projectPresenterOptions } from "@multica/core/projects/queries";
 import {
   useProjectChatStore,
   useSetProjectTeamAgent,
@@ -266,8 +266,11 @@ function TeamAgentPane({
   // Explicit non-empty-string checks rather than truthy/falsy: both fields
   // default to "" (never undefined) once `chat` itself has loaded, and "" is
   // the actual "not configured yet" sentinel, not just a falsy placeholder.
+  // CR-2026-056 (AC-11/§3.1): issue_id may be null before the first send —
+  // the session itself anchors "configured", not the container. A hard
+  // degradation (empty session_id) lands in the same branch, read-only.
   const configured =
-    chat !== undefined && chat.team_agent_id !== "" && chat.issue_id !== "";
+    chat !== undefined && chat.team_agent_id !== "" && chat.session_id !== "";
 
   if (!configured) {
     return canConfigure ? (
@@ -290,6 +293,7 @@ function TeamAgentPane({
         >
           {t(($) => $.chat.unconfigured_member)}
         </p>
+        <RetryChatConfigButton wsId={wsId} projectId={projectId} />
       </CenteredState>
     );
   }
@@ -297,13 +301,41 @@ function TeamAgentPane({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ProjectTeamAgentChat
-        issueId={chat.issue_id}
+        issueId={chat.issue_id ?? ""}
+        sessionId={chat.session_id}
         projectId={projectId}
         wsId={wsId}
         teamAgentId={chat.team_agent_id}
         canConfigure={canConfigure}
       />
     </div>
+  );
+}
+
+// Retry affordance for a hard-degraded chat context (AC-27): the GET schema
+// fallback wipes session_id, so the member state doubles as the
+// "config unavailable" state — one explicit retry refetches the GET.
+function RetryChatConfigButton({
+  wsId,
+  projectId,
+}: {
+  wsId: string;
+  projectId: string;
+}) {
+  const { t } = useT("projects");
+  const qc = useQueryClient();
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      data-testid="project-chat-config-retry"
+      onClick={() => {
+        void qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });
+      }}
+    >
+      {t(($) => $.chat.config_retry)}
+    </Button>
   );
 }
 

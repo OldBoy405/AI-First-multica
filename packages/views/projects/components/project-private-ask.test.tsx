@@ -14,6 +14,7 @@ const TEST_RESOURCES = { en: { common: enCommon, projects: enProjects } };
 const mocks = vi.hoisted(() => ({
   getProjectChat: vi.fn(),
   getProjectPrivateChat: vi.fn(),
+  patchChatSessionConfig: vi.fn(),
   listChatMessages: vi.fn(),
   getPendingChatTask: vi.fn(),
   sendChatMessage: vi.fn(),
@@ -24,11 +25,24 @@ vi.mock("@multica/core/api", () => ({
   api: {
     getProjectChat: (...a: unknown[]) => mocks.getProjectChat(...a),
     getProjectPrivateChat: (...a: unknown[]) => mocks.getProjectPrivateChat(...a),
+    patchChatSessionConfig: (...a: unknown[]) => mocks.patchChatSessionConfig(...a),
     listChatMessages: (...a: unknown[]) => mocks.listChatMessages(...a),
     getPendingChatTask: (...a: unknown[]) => mocks.getPendingChatTask(...a),
     sendChatMessage: (...a: unknown[]) => mocks.sendChatMessage(...a),
     cancelTaskById: (...a: unknown[]) => mocks.cancelTaskById(...a),
   },
+}));
+
+vi.mock("@multica/core/runtimes", () => ({
+  runtimeListOptions: () => ({
+    queryKey: ["runtimes", "test"],
+    queryFn: () => [{ id: "rt-1", status: "online" }],
+  }),
+  runtimeModelsOptions: (rid: string | null) => ({
+    queryKey: ["models", rid],
+    queryFn: () => ({ models: [{ id: "claude-1", label: "Claude 1" }], supported: true }),
+    enabled: !!rid,
+  }),
 }));
 
 vi.mock("@multica/core/agents", () => ({
@@ -61,8 +75,16 @@ vi.mock("../../chat/components/chat-message-list", () => ({
 }));
 
 vi.mock("../../agents/components/inspector/model-picker", () => ({
-  ModelPicker: (props: { value: string; canEdit: boolean }) => (
-    <span data-testid="stub-model-picker" data-value={props.value} data-canedit={String(props.canEdit)} />
+  ModelPicker: (props: { value: string; canEdit: boolean; onChange?: (m: string) => void }) => (
+    <button
+      type="button"
+      data-testid="stub-model-picker"
+      data-value={props.value}
+      data-canedit={String(props.canEdit)}
+      onClick={() => props.onChange?.("claude-2")}
+    >
+      {props.value}
+    </button>
   ),
 }));
 
@@ -153,7 +175,17 @@ function renderPane() {
   );
 }
 
-const SESSION = { id: "sess-1", agent_id: "agent-1", creator_id: "user-1", status: "active" };
+const SESSION = {
+  id: "sess-1",
+  session_id: "sess-1",
+  agent_id: "agent-1",
+  creator_id: "user-1",
+  status: "active",
+  model: "claude-1",
+  thinking_level: "",
+  model_source: "session_default",
+  thinking_level_source: "session_default",
+};
 
 describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
   beforeEach(() => {
@@ -197,10 +229,37 @@ describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
     await waitFor(() =>
       expect(screen.getByText(enProjects.chat.greetings.private_ask)).toBeTruthy(),
     );
-    // Read-only model badge with the Team Agent's model (SDD-SUG-003).
-    const badge = await screen.findByTestId("stub-model-picker");
-    expect(badge.getAttribute("data-value")).toBe("claude-1");
-    expect(badge.getAttribute("data-canedit")).toBe("false");
+    // Writable session-config picker (FR-3/FR-12) bound to the session's own
+    // effective model — not the Team Agent's agent row.
+    const picker = await screen.findByTestId("stub-model-picker");
+    expect(picker.getAttribute("data-value")).toBe("claude-1");
+    expect(picker.getAttribute("data-canedit")).toBe("true");
+  });
+
+  it("PATCHes the session config with session_id when the picker changes (BLOCK-007)", async () => {
+    mocks.patchChatSessionConfig.mockResolvedValue({ ...SESSION, model: "claude-2" });
+    renderPane();
+    const picker = await screen.findByTestId("stub-model-picker");
+
+    fireEvent.click(picker);
+
+    await waitFor(() =>
+      expect(mocks.patchChatSessionConfig).toHaveBeenCalledWith("sess-1", {
+        model: "claude-2",
+      }),
+    );
+  });
+
+  it("hard degradation (empty session_id) renders read-only with a retry affordance (AC-27)", async () => {
+    mocks.getProjectPrivateChat.mockResolvedValue({ ...SESSION, session_id: "" });
+    renderPane();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("private-ask-config-unavailable")).toBeTruthy(),
+    );
+    expect(screen.getByTestId("private-ask-config-retry")).toBeTruthy();
+    // No session mounts: no composer, no PATCH surface.
+    expect(screen.queryByTestId("private-ask-composer-input")).toBeNull();
   });
 
   it("sends through the session endpoint and clears the draft on success", async () => {

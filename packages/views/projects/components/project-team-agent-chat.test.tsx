@@ -114,7 +114,11 @@ vi.mock("@multica/core/api", async (importActual) => {
   const actual = await importActual<typeof import("@multica/core/api")>();
   return {
     ...actual,
-    api: { updateAgent: vi.fn().mockResolvedValue({}) },
+    api: {
+      updateAgent: vi.fn().mockResolvedValue({}),
+      // CR-2026-056: the chat path persists via the session-config PATCH.
+      patchProjectChatConfig: vi.fn().mockResolvedValue({}),
+    },
   };
 });
 
@@ -162,8 +166,28 @@ let presenterStateMock: {
   my_request: unknown | null;
 } = { presenter: null, pending_requests: [], my_request: null };
 
+// CR-2026-056: the composer reads the session's effective config from the
+// chat context; mutable per test, read lazily in the mock factory.
+const chatCfg: {
+  session_id: string;
+  issue_id: string | null;
+  team_agent_id: string;
+  model: string;
+  thinking_level: string;
+} = {
+  session_id: "session-1",
+  issue_id: "issue-chat-1",
+  team_agent_id: "agent-1",
+  model: "gpt-5",
+  thinking_level: "",
+};
+
 vi.mock("@multica/core/projects", () => ({
   projectChatDraftKey: (projectId: string, mode: string) => `${projectId}:${mode}`,
+  projectChatOptions: (_wsId: string, id: string) => ({
+    queryKey: ["projects", "chat", id],
+    queryFn: async () => chatCfg,
+  }),
   useProjectChatStore: Object.assign(
     (selector?: (s: typeof projectChatState) => unknown) =>
       selector ? selector(projectChatState) : projectChatState,
@@ -531,7 +555,7 @@ describe("TeamAgentStreamView", () => {
 });
 
 describe("TeamAgentComposer", () => {
-  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", canConfigure: false };
+  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", sessionId: "session-1", canConfigure: false };
 
   it("clears the draft on a successful send", async () => {
     projectChatState.drafts["proj-1:team_agent"] = "hello agent";
@@ -632,29 +656,31 @@ describe("TeamAgentComposer", () => {
   });
 });
 
-// ─── TSUG-003: two disabled states must stay distinct ──────────────────────
-// Decision order: permission first (selector interactivity), then runtime
-// availability (selector content + send). The four combos below each render a
-// distinct selector state, so "I can't edit" is never conflated with "no
-// runtime configured".
-describe("TeamAgentComposer model selector (TSUG-003)", () => {
+// ─── CR-2026-056 session-config selector ──────────────────────────────────
+// The selector now binds the SESSION's effective model/thinking (PATCH
+// /chat/config), not the agent row. Permission is owner/admin (canConfigure
+// prop); runtime availability decides the editor's content. The value shown
+// is the chat context's model, never agent.model.
+describe("TeamAgentComposer session-config selector (CR-2026-056)", () => {
   const props = {
     projectId: "proj-1",
     wsId: "ws-1",
     issueId: "issue-chat-1",
+    sessionId: "session-1",
     teamAgentId: "agent-1",
     canConfigure: false,
   };
 
   beforeEach(() => {
     cfg.agent = { id: "agent-1", model: "gpt-5", runtime_id: "rt-1" };
+    chatCfg.model = "gpt-5";
+    chatCfg.thinking_level = "";
     projectChatState.drafts["proj-1:team_agent"] = "hi"; // isolate send-disable to runtime state
   });
 
-  it("permission + runtime → interactive picker, send enabled", async () => {
-    cfg.canEdit = true;
+  it("owner/admin + runtime → interactive picker, send enabled", async () => {
     cfg.runtimeStatus = "online";
-    renderWithProviders(<TeamAgentComposer {...props} />);
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
 
     expect(await screen.findByTestId("project-chat-model-picker")).toBeTruthy();
     expect(screen.queryByTestId("project-chat-model-readonly")).toBeNull();
@@ -662,10 +688,9 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
     expect(screen.getByTestId("project-chat-send")).not.toBeDisabled();
   });
 
-  it("permission + no runtime → runtime guide, send disabled", async () => {
-    cfg.canEdit = true;
+  it("owner/admin + no runtime → runtime guide, send disabled", async () => {
     cfg.runtimeStatus = "offline";
-    renderWithProviders(<TeamAgentComposer {...props} />);
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
 
     const guide = await screen.findByTestId("project-chat-model-runtime-guide");
     expect(guide.textContent).toBe(
@@ -677,28 +702,22 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
     );
   });
 
-  it("no permission + runtime → read-only badge, send enabled", async () => {
-    cfg.canEdit = false;
+  it("plain member + runtime → read-only badge (session model), send enabled", async () => {
     cfg.runtimeStatus = "online";
     renderWithProviders(<TeamAgentComposer {...props} />);
 
     expect(await screen.findByTestId("project-chat-model-readonly")).toBeTruthy();
     expect(screen.getByTestId("stub-model-readonly").textContent).toBe("gpt-5");
     expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
-    // The read-only badge renders as soon as the agent loads, so wait for the
-    // runtime query to settle before asserting send is re-enabled.
     await waitFor(() =>
       expect(screen.getByTestId("project-chat-send")).not.toBeDisabled(),
     );
   });
 
-  it("no permission + no runtime → read-only badge (not the guide), send disabled", async () => {
-    cfg.canEdit = false;
+  it("plain member + no runtime → read-only badge (not the guide), send disabled", async () => {
     cfg.runtimeStatus = "offline";
     renderWithProviders(<TeamAgentComposer {...props} />);
 
-    // Permission decides the selector: a non-editor sees the badge, never the
-    // "start a runtime" guide — the two disabled states are not conflated.
     expect(await screen.findByTestId("project-chat-model-readonly")).toBeTruthy();
     expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
     await waitFor(() =>
@@ -706,11 +725,10 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
     );
   });
 
-  it("selecting a model persists to the agent's model field", async () => {
-    cfg.canEdit = true;
+  it("selecting a model PATCHes the session config and never updateAgent (AC-1)", async () => {
     cfg.runtimeStatus = "online";
     const { api } = await import("@multica/core/api");
-    renderWithProviders(<TeamAgentComposer {...props} />);
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
 
     const trigger = await screen.findByTestId("stub-model-interactive");
     await act(async () => {
@@ -718,9 +736,24 @@ describe("TeamAgentComposer model selector (TSUG-003)", () => {
     });
 
     await waitFor(() =>
-      expect(api.updateAgent).toHaveBeenCalledWith("agent-1", {
+      expect(api.patchProjectChatConfig).toHaveBeenCalledWith("proj-1", {
         model: "claude-opus",
       }),
+    );
+    expect(api.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("the send mutation carries the session id (CR-2026-056 §3.1)", async () => {
+    projectChatState.drafts["proj-1:team_agent"] = "hello agent";
+    sendMock.mutateAsync = vi.fn().mockResolvedValue({ session_id: "session-1", issue_id: "issue-chat-1", comment_id: "c1", task_id: "t1" });
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+
+    expect(sendMock.mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session-1", content: "hello agent" }),
     );
   });
 });
@@ -1100,7 +1133,7 @@ describe("TeamAgentStreamView presenter notices", () => {
 // from 429 project_queue_full — separate banner, separate copy, never
 // conflated even though both share the "locked" state.
 describe("TeamAgentComposer presenter guard", () => {
-  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", canConfigure: false };
+  const props = { projectId: "proj-1", wsId: "ws-1", issueId: "issue-chat-1", sessionId: "session-1", canConfigure: false };
 
   it("locks the composer and names the current presenter", async () => {
     projectChatState.drafts["proj-1:team_agent"] = "blocked send";

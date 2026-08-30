@@ -1313,22 +1313,54 @@ const ProjectSchema = z.object({
   resource_count: z.number().default(0),
 }).loose();
 
-// Project group-chat context (CR-2026-006 TASK-01). `team_agent_id` is an
-// empty string when the project has no Team Agent configured yet.
+// Project group-chat context (CR-2026-006 TASK-01, CR-2026-056 §3.4).
+// `team_agent_id` is an empty string when the project has no Team Agent
+// configured yet; `issue_id` is null until the first send binds the container
+// (AC-11).
+//
+// Hard degradation (NFR-8/AC-27): a missing/empty/non-UUID `session_id` means
+// the backend response cannot anchor any chat-config write — the WHOLE object
+// degrades to UNSAFE_CHAT_CONFIG_FALLBACK and the UI turns read-only (no
+// picker, no PATCH, no send) until a fresh GET succeeds. Soft defaults: with a
+// valid session_id, absent model/source fields default field-by-field
+// (model "", thinking_level "", *_source "session_default", issue_id null)
+// and the controls stay writable.
 export interface ProjectChat {
-  issue_id: string;
+  session_id: string;
+  issue_id: string | null;
   team_agent_id: string;
+  model: string;
+  thinking_level: string;
+  model_source: string;
+  thinking_level_source: string;
 }
+
+// UNSAFE_CHAT_CONFIG_FALLBACK is the hard-degradation shape shared by the
+// Team Agent and Private Ask chat contexts. `session_id: ""` is the sentinel:
+// every consumer must refuse PATCH/send while it is empty.
+export const UNSAFE_CHAT_CONFIG_FALLBACK = {
+  session_id: "",
+  issue_id: null,
+  model: "",
+  thinking_level: "",
+  model_source: "runtime_default",
+  thinking_level_source: "runtime_default",
+} as const;
 
 export const ProjectChatSchema = z
   .object({
-    issue_id: z.string().default(""),
+    session_id: z.string().uuid(),
+    issue_id: z.string().nullable().default(null),
     team_agent_id: z.string().default(""),
+    model: z.string().default(""),
+    thinking_level: z.string().default(""),
+    model_source: z.string().default("session_default"),
+    thinking_level_source: z.string().default("session_default"),
   })
   .loose();
 
 export const EMPTY_PROJECT_CHAT: ProjectChat = {
-  issue_id: "",
+  ...UNSAFE_CHAT_CONFIG_FALLBACK,
   team_agent_id: "",
 };
 
@@ -1353,21 +1385,30 @@ export const EMPTY_PROJECT_DISCUSSION: ProjectDiscussion = {
   coordinator_agent_id: "",
 };
 
-// Result of posting a Team Agent chat message (CR-2026-006 TASK-02):
-// the created backing comment plus the enqueued agent task.
+// Result of posting a Team Agent chat message (CR-2026-006 TASK-02 /
+// CR-2026-056 §3.1): the created backing comment plus the enqueued agent
+// task, anchored on the session it ran in. Hard degradation (AC-27): a
+// success body missing `session_id`/`issue_id` degrades the WHOLE result to
+// the empty fallback (the send cannot be attributed to a session).
 export interface ProjectChatSendResult {
+  session_id: string;
+  issue_id: string;
   comment_id: string;
   task_id: string;
 }
 
 export const ProjectChatSendResultSchema = z
   .object({
+    session_id: z.string().uuid(),
+    issue_id: z.string().uuid(),
     comment_id: z.string().default(""),
     task_id: z.string().default(""),
   })
   .loose();
 
 export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
+  session_id: "",
+  issue_id: "",
   comment_id: "",
   task_id: "",
 };
@@ -2151,6 +2192,39 @@ export const EMPTY_CHAT_SESSION: ChatSession = {
   has_unread: false,
   created_at: "",
   updated_at: "",
+};
+
+// Private Ask session context (CR-2026-056 §3.2, BLOCK-007): the
+// ChatSession shape plus session_id (== the row id, the same UUID — kept
+// char-for-char, never rewritten) and the four resolved chat-config fields.
+// The client treats `session_id` as the PATCH/send credential.
+//
+// Hard degradation: missing/empty/non-UUID session_id degrades the WHOLE
+// object to EMPTY_PRIVATE_ASK_CHAT (read-only pane + retry GET). Soft
+// defaults: with a valid session_id, absent model/source fields default
+// field-by-field (AC-27/NFR-8).
+export interface PrivateAskChat extends ChatSession {
+  session_id: string;
+  model: string;
+  thinking_level: string;
+  model_source: string;
+  thinking_level_source: string;
+}
+
+export const PrivateAskChatSchema = z
+  .object({
+    session_id: z.string().uuid(),
+    model: z.string().default(""),
+    thinking_level: z.string().default(""),
+    model_source: z.string().default("session_default"),
+    thinking_level_source: z.string().default("session_default"),
+  })
+  .loose()
+  .and(ChatSessionSchema);
+
+export const EMPTY_PRIVATE_ASK_CHAT: PrivateAskChat = {
+  ...EMPTY_CHAT_SESSION,
+  ...UNSAFE_CHAT_CONFIG_FALLBACK,
 };
 export const ChatSessionListSchema = z
   .array(ChatSessionSchema.catch(EMPTY_CHAT_SESSION))

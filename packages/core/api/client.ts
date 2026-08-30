@@ -3613,22 +3613,63 @@ export class ApiClient {
   // with code team_agent_not_configured (409) when the project has no agent
   // bound — callers gate on projectChatOptions first, so that only fires on
   // config drift.
-  async getProjectPrivateChat(id: string): Promise<ChatSession> {
-    return this.fetch(`/api/projects/${id}/private-chat`);
+  //
+  // CR-2026-056 (BLOCK-007): the response is parsed through the Private Ask
+  // schema — session_id is the PATCH/send credential; a hard degradation
+  // (empty session_id) returns the read-only fallback shape.
+  async getProjectPrivateChat(id: string): Promise<PrivateAskChat> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/private-chat`);
+    return parseWithFallback(raw, PrivateAskChatSchema, EMPTY_PRIVATE_ASK_CHAT, {
+      endpoint: "GET /api/projects/:id/private-chat",
+    });
   }
 
-  // Post a message to the project's Team Agent (CR-2026-006 TASK-02). On
-  // success the server creates a backing comment and enqueues an agent task;
-  // non-2xx responses (409 team_agent_not_configured / 429 project_queue_full /
-  // 502 enqueue_failed) throw a structured ApiError the caller branches on.
+  // Patch the Team Agent chat session config (CR-2026-056 §3.1): three-state
+  // body — absent key keeps the value, null/"" clears, a non-empty string
+  // sets. Owner/admin only (backend 403 forbidden_chat_config).
+  async patchProjectChatConfig(
+    id: string,
+    body: { model?: string | null; thinking_level?: string | null },
+  ): Promise<ProjectChat> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/config`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
+      endpoint: "PATCH /api/projects/:id/chat/config",
+    });
+  }
+
+  // Explicitly bind the container issue for an active Team Agent session
+  // (FR-10/FR-4, CR-2026-056 §3.1). Idempotent: a repeat call returns the
+  // same issue. Success = the GET shape with a non-null issue_id.
+  async postProjectChatContainer(id: string, sessionId: string): Promise<ProjectChat> {
+    const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/container`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
+      endpoint: "POST /api/projects/:id/chat/container",
+    });
+  }
+
+  // Post a message to the project's Team Agent (CR-2026-006 TASK-02 /
+  // CR-2026-056 §3.1). session_id is REQUIRED: the send runs inside the
+  // active session's transaction (Bind-in-tx). On success the server creates
+  // a backing comment and enqueues an agent task; non-2xx responses (409
+  // team_agent_not_configured / 409 attachment_already_bound / 429
+  // project_queue_full / 502 enqueue_failed) throw a structured ApiError the
+  // caller branches on.
   async sendProjectChatMessage(
     id: string,
+    sessionId: string,
     content: string,
     attachmentIds?: string[],
   ): Promise<ProjectChatSendResult> {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/messages`, {
       method: "POST",
       body: JSON.stringify({
+        session_id: sessionId,
         content,
         // CR-2026-012 FR-8: optional attachment binding (older callers omit
         // the field; the backend treats absence as "no attachments").
@@ -3639,6 +3680,23 @@ export class ApiClient {
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/messages",
+    });
+  }
+
+  // Patch the caller's Private Ask session config (CR-2026-056 §3.2):
+  // PATCH /api/chat/sessions/{sessionId}/config. The session id comes from
+  // the path (no session_id body field); creator-only (backend 403
+  // forbidden_chat_config). Same three-state body as the Team Agent PATCH.
+  async patchChatSessionConfig(
+    sessionId: string,
+    body: { model?: string | null; thinking_level?: string | null },
+  ): Promise<PrivateAskChat> {
+    const raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+    return parseWithFallback(raw, PrivateAskChatSchema, EMPTY_PRIVATE_ASK_CHAT, {
+      endpoint: "PATCH /api/chat/sessions/:sessionId/config",
     });
   }
 

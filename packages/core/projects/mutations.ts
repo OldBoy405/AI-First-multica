@@ -65,8 +65,10 @@ export function useSendProjectChatMessage(wsId: string, projectId: string) {
   return useMutation({
     // CR-2026-012 FR-8: attachment ids ride along the same send (backend
     // binds them to the chat comment); absent/empty keeps prior behavior.
-    mutationFn: (vars: { content: string; attachmentIds?: string[] }) =>
-      api.sendProjectChatMessage(projectId, vars.content, vars.attachmentIds),
+    // CR-2026-056 §3.1: session_id is REQUIRED — the send runs inside the
+    // active session's transaction (Bind-in-tx).
+    mutationFn: (vars: { sessionId: string; content: string; attachmentIds?: string[] }) =>
+      api.sendProjectChatMessage(projectId, vars.sessionId, vars.content, vars.attachmentIds),
     onError: (err) => {
       if (err instanceof ApiError && err.status === 409) {
         qc.invalidateQueries({ queryKey: projectKeys.chat(wsId, projectId) });

@@ -217,6 +217,7 @@
       "status_error": "Failed",
       "status_interrupted": "Interrupted",
       "model_label": "Model",
+      "thinking_label": "Thinking",
       "runtime_guide": "Start a local Agent in Settings first",
       "model_update_failed": "Failed to update the model, please try again",
       "stop": "Stop",
@@ -246,6 +247,8 @@
       "stop_failed": "Failed to stop. Please retry.",
       "model_follows_team_agent": "Model follows the Team Agent configuration"
     },
+    "config_unavailable": "Chat configuration is unavailable. Retry to reload it.",
+    "config_retry": "Retry",
     "presenter": {
       "label": "Presenter",
       "current": "Presenter: {{name}}",
