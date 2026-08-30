@@ -821,6 +821,119 @@ type SendChatMessageResponse struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// PrivateChatSessionResponse is the Private Ask GET/PATCH payload (SDD §3.2,
+// BLOCK-007): the existing ChatSession shape plus session_id (== the row id,
+// the same UUID, never rewritten or truncated) and the four resolved
+// chat-config display fields.
+type PrivateChatSessionResponse struct {
+	ChatSessionResponse
+	SessionID           string `json:"session_id"`
+	Model               string `json:"model"`
+	ThinkingLevel       string `json:"thinking_level"`
+	ModelSource         string `json:"model_source"`
+	ThinkingLevelSource string `json:"thinking_level_source"`
+}
+
+// privateChatSessionResponse renders the Private Ask payload from a session
+// row and the resolved display config.
+func (h *Handler) privateChatSessionResponse(session db.ChatSession, resolved service.ResolvedChatConfig) PrivateChatSessionResponse {
+	return PrivateChatSessionResponse{
+		ChatSessionResponse: chatSessionToResponse(session),
+		SessionID:           uuidToString(session.ID),
+		Model:               resolved.Model,
+		ThinkingLevel:       resolved.ThinkingLevel,
+		ModelSource:         string(resolved.ModelSource),
+		ThinkingLevelSource: string(resolved.ThinkingLevelSource),
+	}
+}
+
+// PatchChatSessionConfig applies a three-state model/thinking_level patch to
+// the caller's Private Ask session (SDD §3.2 / §4.7.1, BLOCK-008,
+// CR-2026-056): PATCH /api/chat/sessions/{sessionId}/config. The session id
+// comes from the path (no session_id field in the body). Creator-only;
+// ordinary 1:1 chat sessions and wrong-workspace ids are refused with 404.
+//
+// Errors: 400 invalid_model_or_thinking_level; 403 forbidden_chat_config;
+// 404 chat_session_not_found.
+func (h *Handler) PatchChatSessionConfig(w http.ResponseWriter, r *http.Request) {
+	wsUUID, ok := parseUUIDOrBadRequest(w, h.resolveWorkspaceID(r), "workspace id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	sessionUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "sessionId"), "session id")
+	if !ok {
+		return
+	}
+
+	var body PatchProjectChatConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	modelPatch, err := parseChatConfigFieldPatch(body.Model)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "model must be a string or null")
+		return
+	}
+	thinkingPatch, err := parseChatConfigFieldPatch(body.ThinkingLevel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "thinking_level must be a string or null")
+		return
+	}
+	callerUUID, err := util.ParseUUID(userID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	// Workspace-scoped pre-load for provider resolution (validation input
+	// only); the service re-checks everything under the row lock
+	// (LockChatSessionInWorkspace, BLOCK-008).
+	session, err := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+		ID: sessionUUID, WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		writeErrorCode(w, http.StatusNotFound, "chat_session_not_found", "chat session not found")
+		return
+	}
+	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chat agent")
+		return
+	}
+	provider, pok := h.resolveAgentProvider(r, session.WorkspaceID, agent.RuntimeID)
+	if !pok {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "cannot resolve the chat agent's runtime provider")
+		return
+	}
+
+	view, err := h.IssueService.PatchChatSessionConfig(r.Context(),
+		session.WorkspaceID, sessionUUID, callerUUID, provider, modelPatch, thinkingPatch)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrChatSessionNotFound):
+			writeErrorCode(w, http.StatusNotFound, "chat_session_not_found", "chat session not found")
+		case errors.Is(err, service.ErrForbiddenChatConfig):
+			writeErrorCode(w, http.StatusForbidden, "forbidden_chat_config", "chat config requires the session creator")
+		case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+			writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update chat config")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, h.privateChatSessionResponse(view.Session, service.ResolvedChatConfig{
+		Model:               view.Model,
+		ModelSource:         view.ModelSource,
+		ThinkingLevel:       view.ThinkingLevel,
+		ThinkingLevelSource: view.ThinkingLevelSource,
+	}))
+}
+
 func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -943,6 +1056,10 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "chat agent is archived")
 		case errors.Is(err, service.ErrChatTaskAgentNoRuntime):
 			writeError(w, http.StatusConflict, "chat agent has no runtime")
+		case errors.Is(err, service.ErrInvalidModelOrThinkingLevel):
+			// CR-2026-056 (§4.6): Private Ask §4.3 validation failed inside the
+			// send transaction — nothing persisted, nothing enqueued.
+			writeErrorCode(w, http.StatusBadRequest, "invalid_model_or_thinking_level", "invalid model or thinking level")
 		default:
 			writeError(w, http.StatusInternalServerError, "failed to send chat message: "+err.Error())
 		}

@@ -2522,6 +2522,56 @@ func (s *TaskService) SendDirectChatMessage(
 		if currentSession.Status != "active" {
 			return ErrChatSessionArchived
 		}
+
+		// CR-2026-056 (BLOCK-006/BLOCK-009): branch decision and snapshot are
+		// bound to the SAME locked row. Only a Private Ask session
+		// (project_id set on the locked re-read — authoritative even across a
+		// concurrent ClearChatSessionProjectByProject) runs the new behavior.
+		// An ordinary 1:1 chat stays byte-for-byte baseline: no backfill, no
+		// resolve, no catalog I/O, context stays NULL. The branch actions run
+		// BEFORE the carrier re-read (below) so the transaction holds only the
+		// session row lock during catalog I/O — the precondition for the
+		// acceptance-10 enqueue-failure fixture.
+		var chatConfig []byte
+		if currentSession.ProjectID.Valid {
+			baseModel, baseThinking := SnapshotAgentDefaults(agent)
+			currentSession, err = qtx.BackfillChatSessionBaseIfNull(ctx, db.BackfillChatSessionBaseIfNullParams{
+				ID:                session.ID,
+				WorkspaceID:       currentSession.WorkspaceID,
+				BaseModel:         baseModel,
+				BaseThinkingLevel: baseThinking,
+			})
+			if err != nil {
+				return fmt.Errorf("backfill private ask base: %w", err)
+			}
+			resolved := ResolveChatConfig(
+				currentSession.BaseModel, currentSession.ModelOverride, agent.Model,
+				currentSession.BaseThinkingLevel, currentSession.ThinkingLevelOverride, agent.ThinkingLevel,
+			)
+			provider := ""
+			if agent.RuntimeID.Valid {
+				if rt, rerr := qtx.GetAgentRuntimeForWorkspace(ctx, db.GetAgentRuntimeForWorkspaceParams{
+					ID: agent.RuntimeID, WorkspaceID: currentSession.WorkspaceID,
+				}); rerr == nil {
+					provider = rt.Provider
+				}
+			}
+			if provider == "" || s.ChatCatalog == nil {
+				return ErrInvalidModelOrThinkingLevel
+			}
+			catalog, err := LoadChatCatalogForConfig(ctx, qtx, s.ChatCatalog, agent)
+			if err != nil {
+				return err
+			}
+			if err := ValidateResolvedChatConfig(resolved.Model, resolved.ThinkingLevel, provider, catalog); err != nil {
+				return err
+			}
+			// Snapshot = the SAME resolved output the validation consumed
+			// (no second parse). mergeChatConfigContext(nil, ...) keeps the
+			// pre-existing-key preservation contract at the seam.
+			chatConfig = mergeChatConfigContext(nil, resolved.Model, resolved.ThinkingLevel)
+		}
+
 		carrier, err := qtx.GetAgentForClaimUpdate(ctx, session.AgentID)
 		if err != nil {
 			return fmt.Errorf("reload chat agent: %w", err)
@@ -2560,6 +2610,9 @@ func (s *TaskService) SendDirectChatMessage(
 			OriginatorSource:     attrSource,
 			TriggerEvidenceKind:  attrEvidenceKind,
 			TriggerEvidenceRefID: attrEvidenceRef,
+			// CR-2026-056 (BLOCK-005): chat_config snapshot for Private Ask
+			// only; nil keeps the ordinary-chat baseline byte-for-byte.
+			Context: chatConfig,
 		})
 		if err != nil {
 			return fmt.Errorf("create direct chat task: %w", err)

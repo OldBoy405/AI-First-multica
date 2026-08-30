@@ -116,7 +116,7 @@ func (s *IssueService) EnsureProjectChatSession(ctx context.Context, workspaceID
 	})
 	baseModel, baseThinking := pgtype.Text{}, pgtype.Text{}
 	if err == nil {
-		baseModel, baseThinking = snapshotAgentDefaults(agent)
+		baseModel, baseThinking = SnapshotAgentDefaults(agent)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("load team agent: %w", err)
 	}
@@ -163,10 +163,10 @@ func (s *IssueService) EnsureProjectChatSession(ctx context.Context, workspaceID
 	return s.buildProjectChatSessionView(ctx, s.Queries, session)
 }
 
-// snapshotAgentDefaults converts the agent's current model/thinking_level into
-// the base_* snapshot written at session creation. NULL agent values snapshot
-// as the empty follow-runtime sentinel.
-func snapshotAgentDefaults(agent db.Agent) (pgtype.Text, pgtype.Text) {
+// SnapshotAgentDefaults converts the agent's current model/thinking_level into
+// the base_* snapshot written at session creation or first backfill. NULL
+// agent values snapshot as the empty follow-runtime sentinel.
+func SnapshotAgentDefaults(agent db.Agent) (pgtype.Text, pgtype.Text) {
 	model := agent.Model
 	if !model.Valid {
 		model = pgtype.Text{String: "", Valid: true}
@@ -605,6 +605,134 @@ func applyChatConfigFieldPatch(current pgtype.Text, patch ChatConfigFieldPatch) 
 		return pgtype.Text{}
 	}
 	return pgtype.Text{String: patch.Value, Valid: true}
+}
+
+// PrivateChatSessionView is the Private Ask GET/PATCH display payload
+// (SDD §3.2): the chat_session row plus the resolved model/thinking level
+// and the session_id (== the row id, the same UUID).
+type PrivateChatSessionView struct {
+	Session             db.ChatSession
+	Model               string
+	ModelSource         ChatConfigSource
+	ThinkingLevel       string
+	ThinkingLevelSource ChatConfigSource
+}
+
+// buildPrivateChatSessionView resolves the display values (SDD §4.2, no §4.3
+// validation — GET is read-only; PATCH validates before this runs). Legacy
+// rows with base_* NULL and no override resolve as agent_default and are
+// never written back (FR-11/AC-19).
+func (s *IssueService) buildPrivateChatSessionView(ctx context.Context, q *db.Queries, session db.ChatSession) (*PrivateChatSessionView, error) {
+	agent, err := q.GetAgent(ctx, session.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("load private ask agent for view: %w", err)
+	}
+	resolved := ResolveChatConfig(
+		session.BaseModel, session.ModelOverride, agent.Model,
+		session.BaseThinkingLevel, session.ThinkingLevelOverride, agent.ThinkingLevel,
+	)
+	return &PrivateChatSessionView{
+		Session:             session,
+		Model:               resolved.Model,
+		ModelSource:         resolved.ModelSource,
+		ThinkingLevel:       resolved.ThinkingLevel,
+		ThinkingLevelSource: resolved.ThinkingLevelSource,
+	}, nil
+}
+
+// PatchChatSessionConfig applies the three-state PATCH to a Private Ask
+// session (SDD §3.2 / §4.7.1, BLOCK-008): everything runs in ONE transaction
+// on the SAME locked row, in the fixed sequence lock -> creator gate ->
+// project gate -> backfill -> resolve -> §4.3 validation -> write. The row
+// lock (LockChatSessionInWorkspace, FOR UPDATE) is the fence against
+// concurrent sends (LockChatSessionForRuntimeBind on the same row) and
+// project clear (ClearChatSessionProjectByProject); any failure rolls the
+// whole transaction back — backfill and overrides both stay unwritten.
+func (s *IssueService) PatchChatSessionConfig(
+	ctx context.Context,
+	workspaceID, sessionID, callerID pgtype.UUID,
+	provider string,
+	modelPatch, thinkingPatch ChatConfigFieldPatch,
+) (*PrivateChatSessionView, error) {
+	if !workspaceID.Valid || !sessionID.Valid {
+		return nil, fmt.Errorf("patch chat session config: ids required")
+	}
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// Lock + authoritative workspace re-read in one step; a wrong workspace
+	// is the same 0 rows as a missing session (Hard Invariant 1).
+	session, err := qtx.LockChatSessionInWorkspace(ctx, db.LockChatSessionInWorkspaceParams{
+		ID: sessionID, WorkspaceID: workspaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChatSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock chat session: %w", err)
+	}
+	if session.CreatorID != callerID {
+		return nil, ErrForbiddenChatConfig
+	}
+	if !session.ProjectID.Valid {
+		// Ordinary 1:1 chat sessions are out of scope for this CR (SDD §3.2).
+		return nil, ErrChatSessionNotFound
+	}
+
+	agent, err := qtx.GetAgent(ctx, session.AgentID)
+	if err != nil {
+		return nil, fmt.Errorf("load private ask agent: %w", err)
+	}
+
+	// First write backfills base_* with the agent's current defaults where
+	// still NULL (never overwrites an existing snapshot), then the locked
+	// row is re-read so Resolve sees the backfilled values.
+	baseModel, baseThinking := SnapshotAgentDefaults(agent)
+	session, err = qtx.BackfillChatSessionBaseIfNull(ctx, db.BackfillChatSessionBaseIfNullParams{
+		ID:                session.ID,
+		WorkspaceID:       workspaceID,
+		BaseModel:         baseModel,
+		BaseThinkingLevel: baseThinking,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("backfill chat session base: %w", err)
+	}
+
+	modelOverride := applyChatConfigFieldPatch(session.ModelOverride, modelPatch)
+	thinkingOverride := applyChatConfigFieldPatch(session.ThinkingLevelOverride, thinkingPatch)
+	resolved := ResolveChatConfig(
+		session.BaseModel, modelOverride, agent.Model,
+		session.BaseThinkingLevel, thinkingOverride, agent.ThinkingLevel,
+	)
+
+	if s.ChatCatalog == nil {
+		return nil, ErrInvalidModelOrThinkingLevel
+	}
+	catalog, err := LoadChatCatalogForConfig(ctx, qtx, s.ChatCatalog, agent)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateResolvedChatConfig(resolved.Model, resolved.ThinkingLevel, provider, catalog); err != nil {
+		return nil, err
+	}
+
+	updated, err := qtx.PatchChatSessionConfig(ctx, db.PatchChatSessionConfigParams{
+		ID:                    sessionID,
+		WorkspaceID:           workspaceID,
+		ModelOverride:         modelOverride,
+		ThinkingLevelOverride: thinkingOverride,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("patch chat session config: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit config patch: %w", err)
+	}
+	return s.buildPrivateChatSessionView(ctx, s.Queries, updated)
 }
 
 // createContainerIssueInTx creates the hidden container issue row inside the

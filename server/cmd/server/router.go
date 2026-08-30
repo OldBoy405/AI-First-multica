@@ -2321,6 +2321,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Route("/{sessionId}", func(r chi.Router) {
 					r.Get("/", h.GetChatSession)
 					r.Patch("/", h.UpdateChatSession)
+					// Private Ask config patch (CR-2026-056, SDD §3.2): the
+					// session id is the path segment; no session_id body field.
+					r.Patch("/config", h.PatchChatSessionConfig)
 					r.Patch("/pin", h.SetChatSessionPinned)
 					r.Patch("/archive", h.SetChatSessionArchived)
 					r.Delete("/", h.DeleteChatSession)

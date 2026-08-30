@@ -294,6 +294,13 @@ func projectTeamAgentSetting(settings []byte, key string) string {
 // to its creator (all /api/chat/sessions/{id}/* endpoints enforce
 // creator-only access; the realtime layer delivers its events per-user).
 //
+// CR-2026-056 (SDD §3.2, BLOCK-004): get-or-create writes the base_* snapshot
+// in the SAME INSERT as the row (the Team Agent's defaults at creation time;
+// never a post-hoc UPDATE). The response appends session_id (== the row id,
+// the same UUID) plus the four resolved chat-config fields — display only,
+// no §4.3 validation, and existing rows are never written (legacy rows with
+// base_* NULL resolve as agent_default, FR-11/AC-19).
+//
 // Errors: 409 team_agent_not_configured when the project has no Team Agent
 // bound (the frontend renders the same setup CTA as the Team Agent pane).
 func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) {
@@ -322,50 +329,75 @@ func (h *Handler) GetProjectPrivateChat(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-		ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
-	})
-	if err == nil {
-		writeJSON(w, http.StatusOK, chatSessionToResponse(session))
-		return
-	}
-	if !isNotFound(err) {
-		writeError(w, http.StatusInternalServerError, "failed to resolve private chat session")
-		return
-	}
-
 	teamAgentID := projectTeamAgentID(project.Settings)
-	if teamAgentID == "" {
-		writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
-		return
-	}
-	agentUUID, err := util.ParseUUID(teamAgentID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
-		return
-	}
-
-	session, err = h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
-		WorkspaceID: project.WorkspaceID,
-		AgentID:     agentUUID,
-		CreatorID:   callerUUID,
-		Title:       "Private Ask",
-		ProjectID:   project.ID,
-	})
-	if err != nil {
-		// Concurrent get-or-create (two tabs opening the pane at once): the
-		// partial unique index collapses the race; the loser reselects.
-		if isUniqueViolation(err) {
-			session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
-				ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
-			})
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to create private chat session")
+	var agentUUID pgtype.UUID
+	if teamAgentID != "" {
+		var perr error
+		agentUUID, perr = util.ParseUUID(teamAgentID)
+		if perr != nil {
+			writeError(w, http.StatusInternalServerError, "stored team_agent_id is invalid")
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, chatSessionToResponse(session))
+
+	session, err := h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+		ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
+	})
+	if err != nil {
+		if !isNotFound(err) {
+			writeError(w, http.StatusInternalServerError, "failed to resolve private chat session")
+			return
+		}
+		// Existing sessions still resolve when the binding was removed; only
+		// the get-or-create path needs a bound Team Agent (baseline shape).
+		if teamAgentID == "" {
+			writeErrorCode(w, http.StatusConflict, "team_agent_not_configured", "project has no Team Agent configured")
+			return
+		}
+		agent, err := h.Queries.GetAgent(r.Context(), agentUUID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load private chat agent")
+			return
+		}
+		// BLOCK-004: the snapshot is consumed by the INSERT itself.
+		baseModel, baseThinking := service.SnapshotAgentDefaults(agent)
+		session, err = h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
+			WorkspaceID:       project.WorkspaceID,
+			AgentID:           agentUUID,
+			CreatorID:         callerUUID,
+			Title:             "Private Ask",
+			ProjectID:         project.ID,
+			BaseModel:         baseModel,
+			BaseThinkingLevel: baseThinking,
+		})
+		if err != nil {
+			// Concurrent get-or-create (two tabs opening the pane at once): the
+			// partial unique index collapses the race; the loser reselects.
+			// The winner row's own INSERT snapshot is authoritative then.
+			if isUniqueViolation(err) {
+				session, err = h.Queries.GetProjectChatSessionForCreator(r.Context(), db.GetProjectChatSessionForCreatorParams{
+					ProjectID: project.ID, CreatorID: callerUUID, WorkspaceID: project.WorkspaceID,
+				})
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to create private chat session")
+				return
+			}
+		}
+	}
+
+	// Display resolution (SDD §4.2, no §4.3 validation): the session's own
+	// agent provides the agent_default fallback for legacy rows.
+	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load private chat agent")
+		return
+	}
+	resolved := service.ResolveChatConfig(
+		session.BaseModel, session.ModelOverride, agent.Model,
+		session.BaseThinkingLevel, session.ThinkingLevelOverride, agent.ThinkingLevel,
+	)
+	writeJSON(w, http.StatusOK, h.privateChatSessionResponse(session, resolved))
 }
 
 // SendProjectChatMessageRequest is the body of POST /api/projects/{id}/chat/messages.

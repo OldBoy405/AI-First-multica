@@ -116,12 +116,12 @@ func TestApplyChatConfigFieldPatch(t *testing.T) {
 func TestSnapshotAgentDefaults(t *testing.T) {
 	t.Parallel()
 	agent := db.Agent{Model: pgtype.Text{}, ThinkingLevel: pgtype.Text{}}
-	model, thinking := snapshotAgentDefaults(agent)
+	model, thinking := SnapshotAgentDefaults(agent)
 	if !model.Valid || model.String != "" || !thinking.Valid || thinking.String != "" {
 		t.Fatalf("NULL agent defaults must snapshot as empty sentinels: %+v %+v", model, thinking)
 	}
 	agent = db.Agent{Model: pgtype.Text{String: "claude-opus-5", Valid: true}, ThinkingLevel: pgtype.Text{String: "high", Valid: true}}
-	model, thinking = snapshotAgentDefaults(agent)
+	model, thinking = SnapshotAgentDefaults(agent)
 	if model.String != "claude-opus-5" || thinking.String != "high" {
 		t.Fatalf("agent defaults not preserved: %+v %+v", model, thinking)
 	}
