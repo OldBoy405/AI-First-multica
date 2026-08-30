@@ -322,6 +322,12 @@ LIMIT 5;
 -- parsing (parseQuickCreateContext short-circuits on IssueID.Valid), so this
 -- key rides harmlessly alongside.
 --
+-- chat_config merges the Team Agent send-path chat-config snapshot into the
+-- same context (CR-2026-056, SDD 搂2.3): the caller passes the pre-merged
+-- {"chat_config":{...}} JSONB from the shared service-side merge helper, and
+-- the || below preserves every existing key (head_sha and chat_config never
+-- collide). A NULL chat_config keeps the pre-CR behavior byte-for-byte.
+--
 -- AIFIRST: CR-2026-010 stamps project_id (nullable, from the caller's
 -- issue.ProjectID) so ClaimAgentTask can serialize on it without joining
 -- issue on every claim attempt. NULL for issues outside any project.
@@ -352,6 +358,9 @@ SELECT
     CASE
         WHEN COALESCE(sqlc.narg('head_sha')::text, '') <> ''
         THEN jsonb_build_object('head_sha', sqlc.narg('head_sha')::text)
+             || COALESCE(sqlc.narg('chat_config')::jsonb, '{}'::jsonb)
+        WHEN sqlc.narg('chat_config')::jsonb IS NOT NULL
+        THEN sqlc.narg('chat_config')::jsonb
         ELSE NULL
     END,
     sqlc.narg(originator_user_id),

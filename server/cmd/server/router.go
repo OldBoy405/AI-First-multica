@@ -2007,6 +2007,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/queue-status", h.GetProjectQueueStatus)
 					r.Get("/chat", h.GetProjectChat)
 					r.Patch("/chat/config", h.PatchProjectChatConfig)
+					r.Post("/chat/container", h.PostProjectChatContainer)
 					r.Post("/chat/messages", h.SendProjectChatMessage)
 					// CR-2026-012 DD-7: merge-forward a multi-select of Discussion
 					// messages into one Team Agent task (same send kernel as above).

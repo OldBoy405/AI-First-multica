@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -128,131 +127,295 @@ func (s *IssueService) ensureContainerIssue(
 	return issue, nil
 }
 
-// SendProjectChatMessage posts a member's message into the project's Team Agent
-// group chat (a comment on the hidden container issue) and enqueues a run for
-// the bound agent (CR-2026-006).
-//
-// The presenter and capacity guards are front-loaded so a rejected sender
-// never gets an orphan comment — nothing is persisted for either rejection.
-// If the enqueue still fails after a comment is created (a concurrent enqueue
-// slipping past the front-load capacity check into the guard *inside*
-// enqueueMentionTaskWithCommentPlan, or a DB error), the comment is
-// compensated by physical delete (comment has no soft-delete) so a failed
-// send leaves nothing behind.
+// SendProjectChatMessageResult is the committed outcome of a Team Agent send
+// (messages or merge-forward): the session id (echoed from the request for
+// messages, the ensured active session for merge-forward) and the ids the
+// single send transaction wrote.
+type SendProjectChatMessageResult struct {
+	SessionID string
+	IssueID   string
+	CommentID string
+	TaskID    string
+}
+
+// ErrAttachmentAlreadyBound: a draft attachment id in the send request was
+// already bound to another target (handler: 409 attachment_already_bound).
+var ErrAttachmentAlreadyBound = errors.New("attachment already bound")
+
+// SendProjectChatMessage posts a member's message into the project's Team
+// Agent group chat and enqueues one run for the bound agent (CR-2026-056,
+// SDD §4.5 / FR-16). The container bind, the comment, the enqueue and the
+// draft-attachment binding commit in ONE transaction — any failure rolls the
+// whole send back, leaving no container, no comment, no task and no bound
+// attachment behind (BLOCK-003).
 //
 // Error contract for the handler:
-//   - *ErrPresenterRequired -> 403 (an active presenter holds single-writer
-//     control and the caller is neither the presenter nor owner/admin).
-//   - *ErrProjectQueueFull  -> 429 (queue full, try later). Covers both the
-//     front-load rejection and the inner-guard race (TSUG-001).
-//   - any other error       -> 502 (send failed, retryable).
-//
-// The presenter guard runs before the capacity guard (SDD §4.3/DD-6): a
-// rejected sender must see "presenter required", never "queue full", and
-// nothing is persisted (no comment, no task) for either rejection.
-func (s *TaskService) SendProjectChatMessage(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
-	return s.sendProjectChatCore(ctx, issue, agentID, callerID, content)
+//   - *ErrPresenterRequired -> 403 (single-writer presenter control)
+//   - *ErrProjectQueueFull -> 429
+//   - ErrTeamAgentNotConfigured -> 409
+//   - ErrChatSessionNotFound -> 404 / ErrChatSessionClosedOrChanged -> 409
+//   - ErrInvalidModelOrThinkingLevel -> 400 (pre-transaction §4.3)
+//   - ErrAttachmentAlreadyBound -> 409
+//   - any other error -> 502 (send failed, retryable)
+func (s *IssueService) SendProjectChatMessage(ctx context.Context, workspaceID, projectID, sessionID, callerID pgtype.UUID, content string, attachmentIDs []pgtype.UUID) (*SendProjectChatMessageResult, error) {
+	return s.sendProjectChatCore(ctx, workspaceID, projectID, sessionID, callerID, content, attachmentIDs)
 }
 
 // MergeForwardDiscussion posts a member's multi-select of Discussion messages
 // as ONE merged message on the project Team Agent chat and enqueues exactly
-// one Team Agent run for it (CR-2026-012 DD-7/DD-8): one confirmation = one
-// comment + one task. comments must already be validated as belonging to the
-// project's Discussion container and are rendered in created_at ascending
-// order inside the merged markdown. registerCR appends the
-// requirement-register instruction block — pure comment text, the server
-// keeps zero CR write paths (DD-8).
+// one Team Agent run for it (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12): one
+// confirmation = one comment + one task. The request carries no session_id —
+// the active session is ensured first (created on first use, base_* snapshot
+// included); a concurrent rebind that closes it surfaces as 409
+// chat_session_closed_or_changed from the send kernel's lock-internal check.
 //
-// Reuses the exact SendProjectChatMessage kernel (presenter guard → capacity
-// guard → create → enqueue → compensating delete → broadcast-after-success),
-// so CR-2026-010 presenter control and CR-2026-004 capacity governance apply
-// to merged forwards without a second implementation. Deliberately NOT
-// coalesced_comment_ids: that mechanism assumes same-issue delivery plans,
-// which cross-container forwarding is not (DD-7).
-//
-// ponytail: the 50-comment selection cap lives at the handler; compressing
-// genuinely longer discussions into a summary is an upgrade path, not a
-// v1 feature.
-func (s *TaskService) MergeForwardDiscussion(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, comments []db.Comment, registerCR bool) (db.Comment, db.AgentTaskQueue, error) {
-	// Render in created_at ascending order regardless of caller ordering — the
-	// history list and the "earliest message" trigger quote both depend on it.
+// comments must already be validated as belonging to the project's Discussion
+// container and are rendered in created_at ascending order inside the merged
+// markdown. registerCR appends the requirement-register instruction block —
+// pure comment text, the server keeps zero CR write paths (DD-8).
+func (s *IssueService) MergeForwardDiscussion(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID, comments []db.Comment, registerCR bool) (*SendProjectChatMessageResult, error) {
 	sorted := append([]db.Comment(nil), comments...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt.Time.Before(sorted[j].CreatedAt.Time) })
-	content := buildMergedForwardContent(ctx, s, sorted, registerCR)
-	return s.sendProjectChatCore(ctx, issue, agentID, callerID, content)
+	content := buildMergedForwardContent(ctx, s.TaskService, sorted, registerCR)
+
+	view, err := s.EnsureProjectChatSession(ctx, workspaceID, projectID, callerID)
+	if err != nil {
+		return nil, err
+	}
+	if view.SessionID == "" {
+		return nil, ErrTeamAgentNotConfigured
+	}
+	sessionID, err := util.ParseUUID(view.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("parse ensured session id: %w", err)
+	}
+	return s.sendProjectChatCore(ctx, workspaceID, projectID, sessionID, callerID, content, nil)
 }
 
-// sendProjectChatCore is the shared guard → create → enqueue → compensate →
-// broadcast sequence behind SendProjectChatMessage and MergeForwardDiscussion.
-func (s *TaskService) sendProjectChatCore(ctx context.Context, issue db.Issue, agentID, callerID pgtype.UUID, content string) (db.Comment, db.AgentTaskQueue, error) {
-	suppressPreempt, perr := s.guardProjectChatPresenter(ctx, issue, callerID)
+// sendProjectChatCore is the single Team Agent send kernel behind messages
+// and merge-forward (SDD §4.5). Pre-transaction: presenter guard, queue
+// capacity guard, Resolve and §4.3 catalog validation — a failure here leaves
+// no issue, no comment and no binding behind. Then ONE transaction:
+//
+//	① project-chat-session|{ws}|{project} advisory
+//	② session row FOR UPDATE + binding CAS (active + agent_id == the
+//	   lock-internal team_agent_id re-read; never a pre-lock snapshot)
+//	③ BindProjectChatContainer (idempotent; creates the container on the
+//	   first send)
+//	④ CreateComment -> enqueue (with the chat_config snapshot merged into
+//	   task.context before the queue INSERT) -> BindUnboundDraftAttachments
+//	   (ORDER BY id)
+//
+// commit, then broadcast. The lock order is fixed by §4.14 and must not be
+// reordered. Any in-transaction error rolls back the whole send (BLOCK-003):
+// no compensating deletes, no orphan container, no ghost comment, no queued
+// task, no bound attachment.
+func (s *IssueService) sendProjectChatCore(ctx context.Context, workspaceID, projectID, sessionID, callerID pgtype.UUID, content string, attachmentIDs []pgtype.UUID) (*SendProjectChatMessageResult, error) {
+	if !workspaceID.Valid || !projectID.Valid || !sessionID.Valid || !callerID.Valid {
+		return nil, fmt.Errorf("send project chat message: workspace, project, session and caller required")
+	}
+
+	// ---- pre-transaction guards + resolve + §4.3 (SDD §4.5) ----
+	// The presenter guard only needs the project identity, so a synthetic
+	// issue keeps it working before a container ever exists.
+	synthetic := db.Issue{ProjectID: projectID, WorkspaceID: workspaceID}
+	suppressPreempt, perr := s.TaskService.guardProjectChatPresenter(ctx, synthetic, callerID)
 	if perr != nil {
-		return db.Comment{}, db.AgentTaskQueue{}, perr
+		return nil, perr
+	}
+	if _, gerr := s.TaskService.guardProjectQueueCapacity(ctx, projectID, workspaceID, callerID); gerr != nil {
+		return nil, gerr
 	}
 
-	if _, gerr := s.guardProjectQueueCapacity(ctx, issue.ProjectID, issue.WorkspaceID, callerID); gerr != nil {
-		return db.Comment{}, db.AgentTaskQueue{}, gerr
+	session, err := s.Queries.GetProjectChatSessionByID(ctx, db.GetProjectChatSessionByIDParams{
+		ID: sessionID, WorkspaceID: workspaceID, ProjectID: projectID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChatSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load chat session: %w", err)
+	}
+	agent, err := s.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
+		ID: session.AgentID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load team agent: %w", err)
+	}
+	resolved := ResolveChatConfig(
+		session.BaseModel, session.ModelOverride, agent.Model,
+		session.BaseThinkingLevel, session.ThinkingLevelOverride, agent.ThinkingLevel,
+	)
+	provider := ""
+	if agent.RuntimeID.Valid {
+		if rt, rerr := s.Queries.GetAgentRuntimeForWorkspace(ctx, db.GetAgentRuntimeForWorkspaceParams{
+			ID: agent.RuntimeID, WorkspaceID: workspaceID,
+		}); rerr == nil {
+			provider = rt.Provider
+		}
+	}
+	if provider == "" {
+		return nil, ErrInvalidModelOrThinkingLevel
+	}
+	if s.ChatCatalog == nil {
+		return nil, ErrInvalidModelOrThinkingLevel
+	}
+	catalog, err := LoadChatCatalogForConfig(ctx, s.Queries, s.ChatCatalog, agent)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateResolvedChatConfig(resolved.Model, resolved.ThinkingLevel, provider, catalog); err != nil {
+		return nil, err
+	}
+	// Composio overlay pre-computed before the transaction: it can do network
+	// I/O and must not run with a DB transaction open (same contract as
+	// SendDirectChatMessage).
+	overlay := s.TaskService.buildRuntimeMCPOverlay(ctx, callerID, agent)
+
+	// ---- one transaction (BLOCK-003) ----
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin send tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// ① project-level advisory shared with GET/PATCH/rebind/forwarding Ensure.
+	if err := qtx.LockIssueDuplicateKey(ctx, projectChatSessionAdvisoryKey(workspaceID, projectID)); err != nil {
+		return nil, fmt.Errorf("lock project chat session key: %w", err)
 	}
 
-	comment, err := s.Queries.CreateComment(ctx, db.CreateCommentParams{
+	// Binding re-read under the advisory (§4.7.1: never trust a pre-lock
+	// binding).
+	project, err := qtx.GetProjectInWorkspace(ctx, db.GetProjectInWorkspaceParams{
+		ID: projectID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reload project under session lock: %w", err)
+	}
+	teamAgentID := teamAgentIDFromSettings(project.Settings)
+	if !teamAgentID.Valid {
+		return nil, ErrTeamAgentNotConfigured
+	}
+
+	// ② session row FOR UPDATE + binding CAS.
+	locked, err := qtx.LockProjectChatSessionByID(ctx, db.LockProjectChatSessionByIDParams{
+		ID: sessionID, WorkspaceID: workspaceID, ProjectID: projectID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChatSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock session: %w", err)
+	}
+	if locked.Status != "active" || locked.AgentID != teamAgentID {
+		return nil, ErrChatSessionClosedOrChanged
+	}
+
+	// ③ Bind the container inside THIS transaction — the send never commits a
+	// container ahead of the enqueue (SDD §4.5).
+	issue, err := s.BindProjectChatContainer(ctx, qtx, tx, sessionID, workspaceID, projectID, teamAgentID, callerID)
+	if err != nil {
+		return nil, err
+	}
+
+	comment, err := qtx.CreateComment(ctx, db.CreateCommentParams{
 		IssueID:     issue.ID,
-		WorkspaceID: issue.WorkspaceID,
+		WorkspaceID: workspaceID,
 		AuthorType:  "member",
 		AuthorID:    callerID,
 		Content:     content,
 		Type:        "comment",
 	})
 	if err != nil {
-		return db.Comment{}, db.AgentTaskQueue{}, fmt.Errorf("create chat comment: %w", err)
+		return nil, fmt.Errorf("create chat comment: %w", err)
 	}
 
-	// enqueueMentionTaskWithCommentPlan re-runs the capacity guard internally;
-	// a concurrent send can pass our front-load check and then trip that inner
-	// guard, returning *ErrProjectQueueFull here (TSUG-001). We return it
-	// verbatim so the handler maps it to 429 rather than the generic 502.
-	//
-	// Called directly (bypassing the EnqueueTaskForMention wrapper) so
-	// suppressPreempt can reach the priority computation: DD-6 requires
-	// owner/admin sends to keep their capacity exemption but lose the
-	// queue-jump priority while a presenter other than themselves is active.
-	task, err := s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{})
+	// enqueueMentionTaskWithCommentPlanTx re-runs the capacity guard
+	// internally; a concurrent send can pass the front-load check and then
+	// trip that inner guard, returning *ErrProjectQueueFull (TSUG-001). It is
+	// returned verbatim so the handler maps it to 429 rather than the generic
+	// 502. suppressPreempt keeps DD-6: owner/admin sends keep their capacity
+	// exemption but lose the queue-jump priority while a presenter other than
+	// themselves is active. The chat_config snapshot is the SAME resolved
+	// output the §4.3 validation consumed.
+	task, err := s.TaskService.enqueueMentionTaskWithCommentPlanTx(ctx, qtx, issue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{}, pgtype.UUID{}, &resolved, &overlay)
 	if err != nil {
-		if _, derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
-			ID: comment.ID, WorkspaceID: issue.WorkspaceID,
-		}); derr != nil {
-			// Double fault: the compensating delete also failed, leaving a
-			// visible-but-unanswered message. Log ids only, never the body
-			// (audit redaction). Still surface the original enqueue error.
-			slog.Error("project chat compensating delete failed",
-				"comment_id", util.UUIDToString(comment.ID),
-				"issue_id", util.UUIDToString(issue.ID),
-				"enqueue_error", err, "delete_error", derr)
-		}
-		return db.Comment{}, db.AgentTaskQueue{}, err
+		return nil, err
 	}
 
-	// Broadcast only after a successful enqueue (SDD §4.3 step 6): a send that
+	// ④ draft attachments: lock ORDER BY id, then bind inside the same tx.
+	// Duplicate request ids are collapsed first so a repeat id cannot fake an
+	// attachment_already_bound 409.
+	if len(attachmentIDs) > 0 {
+		seen := make(map[pgtype.UUID]struct{}, len(attachmentIDs))
+		deduped := attachmentIDs[:0:0]
+		for _, id := range attachmentIDs {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			deduped = append(deduped, id)
+		}
+		if _, err := qtx.LockUnboundDraftAttachments(ctx, db.LockUnboundDraftAttachmentsParams{
+			WorkspaceID: workspaceID, AttachmentIds: deduped,
+		}); err != nil {
+			return nil, fmt.Errorf("lock draft attachments: %w", err)
+		}
+		bound, err := qtx.BindUnboundDraftAttachments(ctx, db.BindUnboundDraftAttachmentsParams{
+			IssueID:       issue.ID,
+			CommentID:     comment.ID,
+			TaskID:        task.ID,
+			WorkspaceID:   workspaceID,
+			AttachmentIds: deduped,
+			UploaderType:  "member",
+			UploaderID:    callerID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bind draft attachments: %w", err)
+		}
+		if len(bound) != len(deduped) {
+			return nil, ErrAttachmentAlreadyBound
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit send: %w", err)
+	}
+
+	// Broadcast only after a successful commit (SDD §4.5 step 6): a send that
 	// fails and rolls back must never first flash a ghost message to peers.
+	commentRow := commentFromCreateRow(comment)
 	s.Bus.Publish(events.Event{
 		Type:        protocol.EventCommentCreated,
-		WorkspaceID: util.UUIDToString(issue.WorkspaceID),
+		WorkspaceID: util.UUIDToString(workspaceID),
 		ActorType:   "member",
 		ActorID:     util.UUIDToString(callerID),
 		Payload: map[string]any{
 			"comment": map[string]any{
-				"id":          util.UUIDToString(comment.ID),
-				"issue_id":    util.UUIDToString(comment.IssueID),
-				"author_type": comment.AuthorType,
-				"author_id":   util.UUIDToString(comment.AuthorID),
-				"content":     comment.Content,
-				"type":        comment.Type,
-				"created_at":  comment.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+				"id":          util.UUIDToString(commentRow.ID),
+				"issue_id":    util.UUIDToString(commentRow.IssueID),
+				"author_type": commentRow.AuthorType,
+				"author_id":   util.UUIDToString(commentRow.AuthorID),
+				"content":     commentRow.Content,
+				"type":        commentRow.Type,
+				"created_at":  commentRow.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
 			},
 			"issue_title":  issue.Title,
 			"issue_status": issue.Status,
 		},
 	})
-	return commentFromCreateRow(comment), task, nil
+	// The queued task event must leave in the same post-commit ordering as
+	// the non-tx enqueue path (broadcast before wakeup).
+	s.TaskService.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.TaskService.NotifyTaskEnqueued(ctx, task)
+
+	return &SendProjectChatMessageResult{
+		SessionID: util.UUIDToString(sessionID),
+		IssueID:   util.UUIDToString(issue.ID),
+		CommentID: util.UUIDToString(commentRow.ID),
+		TaskID:    util.UUIDToString(task.ID),
+	}, nil
 }
 
 // ErrPresenterRequired is returned when a project has an active presenter and

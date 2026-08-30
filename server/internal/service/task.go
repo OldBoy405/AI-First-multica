@@ -267,10 +267,17 @@ func (s *TaskService) forgetTaskReclaim(task db.AgentTaskQueue) {
 // reaching an enqueue/merge path must NOT leak another workspace's text even in
 // truncated form (MUL-4252).
 func (s *TaskService) buildCommentTriggerSummary(ctx context.Context, workspaceID, commentID pgtype.UUID) pgtype.Text {
+	return buildCommentTriggerSummaryWithQueries(ctx, s.Queries, workspaceID, commentID)
+}
+
+// buildCommentTriggerSummaryWithQueries is the query-scoped trigger-summary
+// read: the send-path tx variant needs the summary of a comment created in
+// the SAME transaction, which only qtx can see (CR-2026-056, SDD §4.5).
+func buildCommentTriggerSummaryWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID) pgtype.Text {
 	if !commentID.Valid {
 		return pgtype.Text{}
 	}
-	comment, err := s.Queries.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+	comment, err := q.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
 		ID:          commentID,
 		WorkspaceID: workspaceID,
 	})
@@ -1302,8 +1309,8 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 	createParams := db.CreateAgentTaskParams{
-		ID:       dbid.NewV7(),
-		AgentID:  issue.AssigneeID,
+		ID:        dbid.NewV7(),
+		AgentID:   issue.AssigneeID,
 		RuntimeID: agent.RuntimeID,
 		IssueID:   issue.ID,
 		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
@@ -1445,7 +1452,64 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 // parent chain and passes it here. Zero keeps the ordinary attribution
 // semantics.
 func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, explicitOriginator pgtype.UUID) (db.AgentTaskQueue, error) {
-	agent, err := s.Queries.GetAgent(ctx, agentID)
+	task, err := s.enqueueMentionTaskWithCommentPlanTx(ctx, s.Queries, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, suppressPreemptPriority, actorUserID, rerunOfTaskID, explicitOriginator, nil, nil)
+	if err != nil {
+		return db.AgentTaskQueue{}, err
+	}
+	// See EnqueueTaskForIssue for ordering rationale.
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.NotifyTaskEnqueued(ctx, task)
+	return task, nil
+}
+
+// mergeChatConfigContext merges the session chat-config snapshot into an
+// existing task-context JSONB value (SDD §2.3): existing keys are preserved
+// and the chat_config key is overwritten with {model, thinking_level}.
+// thinking_level="" is stored verbatim ("do not inject"). A nil existing
+// yields a context containing only chat_config. Unparsable existing JSON is
+// discarded — contexts are server-written, and a corrupt value must not fail
+// the enqueue.
+//
+// This is the SINGLE merge implementation shared by both chat_config seams:
+// the Team Agent enqueue (CreateAgentTask merges its output over the head_sha
+// key built in SQL) and the Private Ask send path (CreateChatTask takes the
+// output as its context parameter, TASK-13 / BLOCK-005). Do not add a second
+// merge.
+func mergeChatConfigContext(existing []byte, model, thinkingLevel string) []byte {
+	merged := map[string]any{}
+	if len(existing) > 0 {
+		_ = json.Unmarshal(existing, &merged)
+	}
+	merged["chat_config"] = map[string]string{
+		"model":          model,
+		"thinking_level": thinkingLevel,
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		// String-only values cannot fail to marshal; keep the enqueue safe.
+		return nil
+	}
+	return out
+}
+
+// enqueueMentionTaskWithCommentPlanTx is the transaction-scoped variant of
+// enqueueMentionTaskWithCommentPlan (CR-2026-056, SDD §4.5 / BLOCK-003): every
+// DB write runs through qtx so the caller's send transaction owns the enqueue
+// and a rollback undoes it. The chat_config snapshot is merged into
+// task.context BEFORE the queue INSERT; a nil chatConfig keeps the pre-CR
+// behavior byte-for-byte (no merge, context NULL without head_sha).
+//
+// Broadcast and wakeup are deliberately NOT performed here: a queued event
+// must only leave after the caller's transaction commits. The non-tx wrapper
+// above keeps today's post-insert broadcast; the send kernel broadcasts after
+// its commit.
+//
+// overlay, when non-nil, carries the caller's pre-computed Composio overlay
+// (network I/O must not run with a transaction open — the same contract as
+// SendDirectChatMessage). nil means "compute here", preserving the legacy
+// non-tx callers' behavior exactly.
+func (s *TaskService) enqueueMentionTaskWithCommentPlanTx(ctx context.Context, qtx *db.Queries, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, suppressPreemptPriority bool, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, explicitOriginator pgtype.UUID, chatConfig *ResolvedChatConfig, overlay *runtimeMCPOverlayData) (db.AgentTaskQueue, error) {
+	agent, err := qtx.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
@@ -1462,7 +1526,8 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context
 	// An explicit mention / thread-parent / squad-leader hop from an
 	// agent-authored comment is a delegation (the parent task's human is
 	// copied); a member mention is direct_human. attr.UserID matches the
-	// pre-MUL-4302 value, so authorization is unchanged.
+	// pre-MUL-4302 value, so authorization is unchanged. The send path
+	// passes a valid actor, so this never reads the uncommitted comment.
 	attr := s.attributionForIssueTask(ctx, issue, triggerCommentID, attribution.SourceDelegation, actorUserID)
 	// No precise human resolved 鈫?owner_fallback (accountable = agent owner), or
 	// refuse the enqueue if the workspace is fail-closed (MUL-4302 §3.5).
@@ -1482,11 +1547,20 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context
 	} else if override != 0 && !suppressPreemptPriority {
 		priority = override
 	}
-	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	runtimeMCPOverlay := runtimeMCPOverlayData{}
+	if overlay != nil {
+		runtimeMCPOverlay = *overlay
+	} else {
+		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	}
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
-		ID:       dbid.NewV7(),
-		AgentID:  agentID,
+	chatConfigBytes := []byte(nil)
+	if chatConfig != nil {
+		chatConfigBytes = mergeChatConfigContext(nil, chatConfig.Model, chatConfig.ThinkingLevel)
+	}
+	task, err := qtx.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+		ID:        dbid.NewV7(),
+		AgentID:   agentID,
 		RuntimeID: agent.RuntimeID,
 		IssueID:   issue.ID,
 		// AIFIRST: CR-2026-010 stamps project_id so ClaimAgentTask can
@@ -1495,7 +1569,7 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context
 		Priority:             priority,
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
-		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
+		TriggerSummary:       buildCommentTriggerSummaryWithQueries(ctx, qtx, issue.WorkspaceID, triggerCommentID),
 		IsLeaderTask:         pgtype.Bool{Bool: isLeader, Valid: isLeader},
 		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
 		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
@@ -1511,8 +1585,10 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context
 		TriggerEvidenceKind:  attrEvidenceKind,
 		TriggerEvidenceRefID: attrEvidenceRef,
 		// Stamp the reviewed head so dedup can distinguish this run's target
-		// from a later request against a new HEAD (TEN-356).
-		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		// from a later request against a new HEAD (TEN-356). A container issue
+		// has no linked PR, so this is always empty on the send path.
+		HeadSha:    headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		ChatConfig: chatConfigBytes,
 	})
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the
@@ -1529,9 +1605,6 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlanAndOriginator(ctx context
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
-	// See EnqueueTaskForIssue for ordering rationale.
-	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
 	return task, nil
 }
 
@@ -1570,8 +1643,8 @@ func (s *TaskService) EnqueueDeferredAssigneeFallback(ctx context.Context, issue
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
 	isLeader := squadID.Valid
 	task, err := s.Queries.CreateDeferredAgentTask(ctx, db.CreateDeferredAgentTaskParams{
-		ID:       dbid.NewV7(),
-		AgentID:  agentID,
+		ID:        dbid.NewV7(),
+		AgentID:   agentID,
 		RuntimeID: agent.RuntimeID,
 		IssueID:   issue.ID,
 		// AIFIRST: CR-2026-010 stamps project_id so the promoted task can
@@ -4253,24 +4326,24 @@ func (s *TaskService) AttributeTaskToCR(ctx context.Context, taskID pgtype.UUID,
 // the server-derived task/issue/project and whether any binding field
 // actually transitioned (same-value replay → changed=false, AC-B3).
 type CRBindResult struct {
-	CRID      string    `json:"cr_id"`
+	CRID      string      `json:"cr_id"`
 	TaskID    pgtype.UUID `json:"task_id"`
 	IssueID   pgtype.UUID `json:"issue_id"`
 	ProjectID pgtype.UUID `json:"project_id"`
-	Changed   bool      `json:"changed"`
+	Changed   bool        `json:"changed"`
 }
 
 // CR-bind sentinel errors (FR-B3). The handler maps each to its HTTP status;
 // none of them ever increments a review attempt or becomes a business blocker
 // (they are technical failures, SDD §3.1).
 var (
-	ErrCRBindTaskContext       = errors.New("TASK_CONTEXT_REQUIRED")
-	ErrCRBindTaskIssueRequired = errors.New("TASK_ISSUE_REQUIRED")
-	ErrCRBindCRNotFound        = errors.New("CR_NOT_FOUND")
+	ErrCRBindTaskContext         = errors.New("TASK_CONTEXT_REQUIRED")
+	ErrCRBindTaskIssueRequired   = errors.New("TASK_ISSUE_REQUIRED")
+	ErrCRBindCRNotFound          = errors.New("CR_NOT_FOUND")
 	ErrCRBindTaskProjectMismatch = errors.New("TASK_PROJECT_MISMATCH")
-	ErrCRBindTaskCRConflict    = errors.New("TASK_CR_CONFLICT")
-	ErrCRBindCRIssueConflict   = errors.New("CR_ISSUE_CONFLICT")
-	ErrCRBindFailed            = errors.New("CR_BIND_FAILED")
+	ErrCRBindTaskCRConflict      = errors.New("TASK_CR_CONFLICT")
+	ErrCRBindCRIssueConflict     = errors.New("CR_ISSUE_CONFLICT")
+	ErrCRBindFailed              = errors.New("CR_BIND_FAILED")
 )
 
 // BindCurrentTaskToCR (CR-2026-053 TASK-05, SDD §4.1) is the task-scoped
@@ -4425,8 +4498,8 @@ func (s *TaskService) BindCurrentTaskToCR(ctx context.Context, taskID, agentID, 
 	}
 	if crChanged {
 		if _, err := qtx.BindCrShellIssueIfNull(ctx, db.BindCrShellIssueIfNullParams{
-			WorkspaceID: task.AgentWorkspaceID,
-			CrID:        crID,
+			WorkspaceID:  task.AgentWorkspaceID,
+			CrID:         crID,
 			ShellIssueID: task.IssueID,
 		}); err != nil {
 			slog.Error("cr bind: update cr.shell_issue_id failed", "cr_id", crID, "error", err)

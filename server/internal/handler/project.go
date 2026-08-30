@@ -551,6 +551,11 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		patch := map[string]any{}
+		// teamAgentRebind carries the new binding when the team_agent_id key
+		// is present; the settings write and the active-session close must
+		// commit together under the session advisory (SDD §4.7 / FR-7).
+		teamAgentRebind := pgtype.UUID{}
+		teamAgentRebindPresent := false
 		if v, present := req.Settings[service.ProjectSettingTeamAgentQueueLimit]; present {
 			f, isNum := v.(float64)
 			if !isNum || f < 1 || f != math.Trunc(f) {
@@ -561,7 +566,8 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		}
 		// CR-2026-006: the agent bound as the project's Team Agent. Must be an
 		// agent that exists in this workspace; validated so a forged id can't be
-		// persisted and surface later as a broken chat.
+		// persisted and surface later as a broken chat. CR-2026-056: a binding
+		// change closes the active chat session (FR-7 / AC-18).
 		if v, present := req.Settings[service.ProjectSettingTeamAgentID]; present {
 			s, isStr := v.(string)
 			if !isStr {
@@ -580,6 +586,8 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			patch[service.ProjectSettingTeamAgentID] = s
+			teamAgentRebind = agentUUID
+			teamAgentRebindPresent = true
 		}
 		// CR-2026-012: the agent bound as the project's Discussion Coordinator.
 		// Same validation shape as team_agent_id above — a forged or stale id
@@ -609,7 +617,22 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to encode settings patch")
 				return
 			}
-			if _, uerr := h.Queries.UpdateProjectSettings(r.Context(), db.UpdateProjectSettingsParams{
+			if teamAgentRebindPresent {
+				// SDD §4.7: the settings write and the active-session close
+				// commit in ONE transaction under the project-level session
+				// advisory — never a close outside the binding update.
+				prevID := pgtype.UUID{}
+				if prevStr := projectTeamAgentID(prevProject.Settings); prevStr != "" {
+					if parsed, perr := util.ParseUUID(prevStr); perr == nil {
+						prevID = parsed
+					}
+				}
+				if _, rerr := h.IssueService.UpdateProjectSettingsWithTeamAgentRebind(r.Context(),
+					prevProject.WorkspaceID, prevProject.ID, prevID, teamAgentRebind, patchJSON); rerr != nil {
+					writeError(w, http.StatusInternalServerError, "failed to update project settings")
+					return
+				}
+			} else if _, uerr := h.Queries.UpdateProjectSettings(r.Context(), db.UpdateProjectSettingsParams{
 				ID: prevProject.ID, WorkspaceID: prevProject.WorkspaceID, Patch: patchJSON,
 			}); uerr != nil {
 				writeError(w, http.StatusInternalServerError, "failed to update project settings")
