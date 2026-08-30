@@ -750,8 +750,33 @@ func (h *Handler) loadAttachmentForRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return db.Attachment{}, false
 	}
+	// §4.9 uploader gate (CR-2026-056): a row with all five bind targets
+	// empty is a private composer draft — only its member uploader may read
+	// it. Everyone else gets 404 so the draft's existence never leaks.
+	if isUnboundDraftAttachment(att) && !isMemberUploader(w, r, att) {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return db.Attachment{}, false
+	}
 
 	return att, true
+}
+
+// isUnboundDraftAttachment reports whether an attachment row is a composer
+// draft: all five bind targets empty (SDD §4.9). Bound rows are workspace-
+// visible as before.
+func isUnboundDraftAttachment(a db.Attachment) bool {
+	return !a.IssueID.Valid && !a.CommentID.Valid && !a.ChatSessionID.Valid &&
+		!a.ChatMessageID.Valid && !a.TaskID.Valid
+}
+
+// isMemberUploader applies the §4.9 draft visibility gate: true only when the
+// row was uploaded by a member and the authenticated caller is that member.
+func isMemberUploader(w http.ResponseWriter, r *http.Request, a db.Attachment) bool {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return false
+	}
+	return a.UploaderType == "member" && uuidToString(a.UploaderID) == userID
 }
 
 // loadAttachmentForDownload is a workspace-self-resolving variant used by the
@@ -798,9 +823,19 @@ func (h *Handler) loadAttachmentForDownload(w http.ResponseWriter, r *http.Reque
 		return db.Attachment{}, false
 	}
 	if h.MembershipCache.Get(r.Context(), userID, workspaceID) {
+		// The uploader gate must still run for drafts: workspace membership
+		// alone does not make another member's private draft visible (§4.9).
+		if isUnboundDraftAttachment(att) && !isMemberUploader(w, r, att) {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return db.Attachment{}, false
+		}
 		return att, true
 	}
 	if _, err := h.getWorkspaceMember(r.Context(), userID, workspaceID); err != nil {
+		writeError(w, http.StatusNotFound, "attachment not found")
+		return db.Attachment{}, false
+	}
+	if isUnboundDraftAttachment(att) && !isMemberUploader(w, r, att) {
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return db.Attachment{}, false
 	}
@@ -1423,6 +1458,16 @@ func (h *Handler) DeleteAttachment(w http.ResponseWriter, r *http.Request) {
 	if att.SourceContextID.Valid {
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return
+	}
+
+	// §4.9 uploader gate (CR-2026-056): an unbound draft is private — only
+	// the member uploader may delete it (no admin bypass), and anyone else
+	// gets the 404 shape so the draft's existence never leaks.
+	if isUnboundDraftAttachment(att) {
+		if att.UploaderType != "member" || uuidToString(att.UploaderID) != userID {
+			writeError(w, http.StatusNotFound, "attachment not found")
+			return
+		}
 	}
 
 	// Only the uploader (or workspace admin) can delete

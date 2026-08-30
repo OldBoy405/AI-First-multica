@@ -317,3 +317,34 @@ ORDER BY id;
 DELETE FROM attachment
 WHERE workspace_id = sqlc.arg(workspace_id)
   AND source_context_id IS NOT NULL;
+
+-- name: ListUnboundDraftAttachmentCandidates :many
+-- CR-2026-056 (SDD §4.10): lock-free candidate scan for the 1h draft TTL
+-- sweeper. The age predicate is strict: a row created exactly 168h ago is
+-- retained this round (AC-28).
+SELECT id FROM attachment
+WHERE issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+ORDER BY id
+LIMIT @max_per_tick::int;
+
+-- name: LockUnboundDraftAttachmentCandidate :one
+-- CR-2026-056 (SDD §4.10): per-candidate locked re-read. SKIP LOCKED lets
+-- concurrent sweeper ticks skip an already-claimed row, and the send path's
+-- BindUnboundDraftAttachments locks the same rows (attachment-id-ascending),
+-- so a row bound between the scan and this lock makes the predicate miss.
+SELECT * FROM attachment
+WHERE id = $1
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+FOR UPDATE SKIP LOCKED;

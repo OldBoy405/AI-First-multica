@@ -1192,6 +1192,42 @@ func (q *Queries) ListSourceContextIssueAttachments(ctx context.Context, arg Lis
 	return items, nil
 }
 
+const listUnboundDraftAttachmentCandidates = `-- name: ListUnboundDraftAttachmentCandidates :many
+SELECT id FROM attachment
+WHERE issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+ORDER BY id
+LIMIT $1::int
+`
+
+// CR-2026-056 (SDD §4.10): lock-free candidate scan for the 1h draft TTL
+// sweeper. The age predicate is strict: a row created exactly 168h ago is
+// retained this round (AC-28).
+func (q *Queries) ListUnboundDraftAttachmentCandidates(ctx context.Context, maxPerTick int32) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listUnboundDraftAttachmentCandidates, maxPerTick)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAttachmentsForIssueLink = `-- name: LockAttachmentsForIssueLink :many
 SELECT id FROM attachment
 WHERE workspace_id = $1
@@ -1228,6 +1264,46 @@ func (q *Queries) LockAttachmentsForIssueLink(ctx context.Context, arg LockAttac
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockUnboundDraftAttachmentCandidate = `-- name: LockUnboundDraftAttachmentCandidate :one
+SELECT id, workspace_id, issue_id, comment_id, uploader_type, uploader_id, filename, url, content_type, size_bytes, created_at, chat_session_id, chat_message_id, task_id, source_context_id FROM attachment
+WHERE id = $1
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND created_at < now() - interval '168 hours'
+FOR UPDATE SKIP LOCKED
+`
+
+// CR-2026-056 (SDD §4.10): per-candidate locked re-read. SKIP LOCKED lets
+// concurrent sweeper ticks skip an already-claimed row, and the send path's
+// BindUnboundDraftAttachments locks the same rows (attachment-id-ascending),
+// so a row bound between the scan and this lock makes the predicate miss.
+func (q *Queries) LockUnboundDraftAttachmentCandidate(ctx context.Context, id pgtype.UUID) (Attachment, error) {
+	row := q.db.QueryRow(ctx, lockUnboundDraftAttachmentCandidate, id)
+	var i Attachment
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.UploaderType,
+		&i.UploaderID,
+		&i.Filename,
+		&i.Url,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.CreatedAt,
+		&i.ChatSessionID,
+		&i.ChatMessageID,
+		&i.TaskID,
+		&i.SourceContextID,
+	)
+	return i, err
 }
 
 const lockUnboundDraftAttachments = `-- name: LockUnboundDraftAttachments :many

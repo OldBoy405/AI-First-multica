@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -112,6 +113,13 @@ const (
 	// delegatedFailureRecoveryBatchSize bounds the durable recovery-outbox
 	// replay so a historical backlog cannot monopolise the runtime sweep tick.
 	delegatedFailureRecoveryBatchSize = 100
+	// chatDraftAttachmentSweepInterval is the cadence of the chat draft TTL
+	// sweeper (CR-2026-056, SDD §4.10). Object-store work runs on its own 1h
+	// ticker beside runRuntimeSweeper — never inside the 30s runtime tick,
+	// and never from a request path.
+	chatDraftAttachmentSweepInterval = 1 * time.Hour
+	// chatDraftAttachmentSweepBatchSize bounds candidates per tick.
+	chatDraftAttachmentSweepBatchSize = 100
 )
 
 type runtimeGCTxStarter interface {
@@ -150,6 +158,32 @@ func runRuntimeSweeper(ctx context.Context, txStarter runtimeGCTxStarter, querie
 			sweepPendingDelegatedFailureRecoveries(ctx, taskSvc)
 			sweepDeferredChatFinalizations(ctx, queries, taskSvc)
 			gcRuntimes(ctx, txStarter, queries, taskSvc.Metrics, bus)
+		}
+	}
+}
+
+// runChatDraftAttachmentSweeper removes unbound draft attachments older than
+// the 168h TTL (CR-2026-056, SDD §4.10). Runs on its own 1h ticker so
+// object-storage latency spikes cannot starve the runtime/task sweeps, and
+// the attachment table is never scanned from a request path. A nil storage
+// backend is safe: the sweep leaves every candidate for the next tick.
+func runChatDraftAttachmentSweeper(ctx context.Context, txStarter runtimeGCTxStarter, queries *db.Queries, st storage.Storage) {
+	ticker := time.NewTicker(chatDraftAttachmentSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := service.SweepChatDraftAttachments(ctx, queries, txStarter, st, chatDraftAttachmentSweepBatchSize)
+			if err != nil {
+				slog.Warn("draft attachment sweeper: sweep failed", "error", err)
+				continue
+			}
+			if deleted > 0 {
+				slog.Info("draft attachment sweeper: deleted expired drafts", "count", deleted)
+			}
 		}
 	}
 }
