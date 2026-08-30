@@ -2630,3 +2630,65 @@ describe("clientErrorMessage", () => {
     expect(clientErrorMessage(undefined)).toBeUndefined();
   });
 });
+
+describe("ApiClient project chat config PATCH (CR-2026-056 §3.1)", () => {
+  const SESSION_ID = "550e8400-e29b-41d4-a716-446655440000";
+  const chatResponse = {
+    session_id: SESSION_ID,
+    issue_id: null,
+    team_agent_id: "agent-1",
+    model: "claude-opus-5",
+    thinking_level: "",
+    model_source: "session_default",
+    thinking_level_source: "session_default",
+  };
+
+  it("sends the real session UUID in the PATCH body — the backend rejects a body without it", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(chatResponse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await client.patchProjectChatConfig("proj-1", SESSION_ID, { model: "claude-opus-5" });
+    await client.patchProjectChatConfig("proj-1", SESSION_ID, { thinking_level: "high" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.example.test/api/projects/proj-1/chat/config");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({
+      session_id: SESSION_ID,
+      model: "claude-opus-5",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      session_id: SESSION_ID,
+      thinking_level: "high",
+    });
+  });
+
+  it("passes null through so an explicit clear keeps its wire meaning", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(chatResponse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await client.patchProjectChatConfig("proj-1", SESSION_ID, { thinking_level: null });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      session_id: SESSION_ID,
+      thinking_level: null,
+    });
+  });
+});

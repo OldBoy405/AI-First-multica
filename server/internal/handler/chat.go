@@ -890,9 +890,9 @@ func (h *Handler) PatchChatSessionConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Workspace-scoped pre-load for provider resolution (validation input
-	// only); the service re-checks everything under the row lock
-	// (LockChatSessionInWorkspace, BLOCK-008).
+	// Workspace-scoped pre-load (validation input only); the service
+	// re-checks everything under the row lock (LockChatSessionInWorkspace,
+	// BLOCK-008).
 	session, err := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
 		ID: sessionUUID, WorkspaceID: wsUUID,
 	})
@@ -900,6 +900,24 @@ func (h *Handler) PatchChatSessionConfig(w http.ResponseWriter, r *http.Request)
 		writeErrorCode(w, http.StatusNotFound, "chat_session_not_found", "chat session not found")
 		return
 	}
+
+	// SDD §3.2 error boundaries must not depend on the agent's runtime
+	// state (review BLOCK-003): the creator / project-bound gates run FIRST
+	// on the workspace-scoped pre-load, so a non-creator or an ordinary 1:1
+	// session (project_id IS NULL) is refused 403/404 even when the agent
+	// has no resolvable runtime/provider. The service re-checks both gates
+	// under the row lock — these handler checks only pin the error ORDER
+	// (authorization stays the service's), never a provider-resolution 400
+	// ahead of them.
+	if session.CreatorID != callerUUID {
+		writeErrorCode(w, http.StatusForbidden, "forbidden_chat_config", "chat config requires the session creator")
+		return
+	}
+	if !session.ProjectID.Valid {
+		writeErrorCode(w, http.StatusNotFound, "chat_session_not_found", "chat session not found")
+		return
+	}
+
 	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load chat agent")

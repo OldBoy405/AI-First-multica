@@ -267,10 +267,30 @@ function TeamAgentPane({
   // default to "" (never undefined) once `chat` itself has loaded, and "" is
   // the actual "not configured yet" sentinel, not just a falsy placeholder.
   // CR-2026-056 (AC-11/§3.1): issue_id may be null before the first send —
-  // the session itself anchors "configured", not the container. A hard
-  // degradation (empty session_id) lands in the same branch, read-only.
-  const configured =
-    chat !== undefined && chat.team_agent_id !== "" && chat.session_id !== "";
+  // the session itself anchors "configured", not the container.
+  //
+  // Hard degradation (AC-27, review BLOCK-002) is recognized FIRST: the
+  // schema fallback (EMPTY_PROJECT_CHAT) carries `degraded: true`, and a
+  // failed fetch leaves `chat` undefined. Both mean the config cannot be
+  // trusted — admin AND member get the read-only unavailable state with a
+  // retry, never the TeamAgentSetupPicker write entry. The unconfigured
+  // state (parsed backend response, team_agent_id "") keeps its existing
+  // admin CTA / member notice split.
+  if (chat === undefined || chat.degraded === true) {
+    return (
+      <CenteredState>
+        <p
+          data-testid="project-chat-config-unavailable"
+          className="text-xs text-muted-foreground"
+        >
+          {t(($) => $.chat.config_unavailable)}
+        </p>
+        <RetryChatConfigButton wsId={wsId} projectId={projectId} />
+      </CenteredState>
+    );
+  }
+
+  const configured = chat.team_agent_id !== "" && chat.session_id !== "";
 
   if (!configured) {
     return canConfigure ? (
@@ -313,8 +333,9 @@ function TeamAgentPane({
 }
 
 // Retry affordance for a hard-degraded chat context (AC-27): the GET schema
-// fallback wipes session_id, so the member state doubles as the
-// "config unavailable" state — one explicit retry refetches the GET.
+// fallback carries `degraded: true` (or the fetch failed outright), so the
+// pane renders the read-only unavailable state for everyone — one explicit
+// retry refetches the GET.
 function RetryChatConfigButton({
   wsId,
   projectId,

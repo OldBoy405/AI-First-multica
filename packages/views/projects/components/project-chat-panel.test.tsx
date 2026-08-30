@@ -186,8 +186,9 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
     expect(screen.queryByTestId("project-chat-unconfigured-admin")).toBeNull();
   });
 
-  // CR-2026-056 AC-27 hard degradation: an empty session_id lands read-only
-  // in the unconfigured branch with an explicit retry affordance.
+  // CR-2026-056 AC-27 hard degradation: the schema fallback (degraded
+  // marker) renders read-only with an explicit retry affordance — for
+  // members AND owner/admin alike (review BLOCK-002).
   it("hard-degraded chat context renders read-only with a retry affordance (AC-27)", async () => {
     mockGetProjectChat.mockResolvedValue({
       session_id: "",
@@ -197,12 +198,37 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
       thinking_level: "",
       model_source: "runtime_default",
       thinking_level_source: "runtime_default",
+      degraded: true,
     });
     renderPanel(false);
     await waitFor(() =>
-      expect(screen.getByTestId("project-chat-unconfigured-member")).toBeTruthy(),
+      expect(screen.getByTestId("project-chat-config-unavailable")).toBeTruthy(),
     );
     expect(screen.getByTestId("project-chat-config-retry")).toBeTruthy();
+    expect(screen.queryByTestId("project-chat-unconfigured-member")).toBeNull();
+    expect(screen.queryByTestId("project-team-agent-chat")).toBeNull();
+  });
+
+  // Review BLOCK-002: a hard-degraded context must NOT render the
+  // TeamAgentSetupPicker write entry, even for owner/admin — the degraded
+  // sentinel is recognized before the unconfigured branch.
+  it("hard-degraded chat context never renders the setup picker for owner/admin (BLOCK-002)", async () => {
+    mockGetProjectChat.mockResolvedValue({
+      session_id: "",
+      issue_id: null,
+      team_agent_id: "a1",
+      model: "",
+      thinking_level: "",
+      model_source: "runtime_default",
+      thinking_level_source: "runtime_default",
+      degraded: true,
+    });
+    renderPanel(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("project-chat-config-unavailable")).toBeTruthy(),
+    );
+    expect(screen.getByTestId("project-chat-config-retry")).toBeTruthy();
+    expect(screen.queryByTestId("project-chat-unconfigured-admin")).toBeNull();
     expect(screen.queryByTestId("project-team-agent-chat")).toBeNull();
   });
 

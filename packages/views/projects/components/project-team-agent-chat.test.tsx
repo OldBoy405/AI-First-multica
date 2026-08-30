@@ -84,6 +84,28 @@ vi.mock("../../agents/components/inspector/model-picker", () => ({
     ),
 }));
 
+vi.mock("../../agents/components/inspector/thinking-picker", () => ({
+  ThinkingPicker: ({
+    canEdit,
+    value,
+    onChange,
+  }: {
+    canEdit: boolean;
+    value: string;
+    onChange: (l: string) => void;
+  }) =>
+    canEdit ? (
+      <button
+        data-testid="stub-thinking-interactive"
+        onClick={() => onChange("high")}
+      >
+        {value}
+      </button>
+    ) : (
+      <span data-testid="stub-thinking-readonly">{value}</span>
+    ),
+}));
+
 vi.mock("@multica/core/permissions", () => ({
   useAgentPermissions: () => ({ canEdit: { allowed: cfg.canEdit, reason: "" } }),
 }));
@@ -103,7 +125,13 @@ vi.mock("@multica/core/runtimes", () => ({
   runtimeModelsOptions: (rid: string | null) => ({
     queryKey: ["models", rid],
     queryFn: async () => ({
-      models: [{ id: "claude-opus", label: "Claude Opus" }],
+      models: [
+        {
+          id: "claude-opus",
+          label: "Claude Opus",
+          thinking: { supported_levels: [{ value: "high" }] },
+        },
+      ],
       supported: true,
     }),
     enabled: !!rid,
@@ -725,7 +753,7 @@ describe("TeamAgentComposer session-config selector (CR-2026-056)", () => {
     );
   });
 
-  it("selecting a model PATCHes the session config and never updateAgent (AC-1)", async () => {
+  it("selecting a model PATCHes the session config with the session id and never updateAgent (AC-1)", async () => {
     cfg.runtimeStatus = "online";
     const { api } = await import("@multica/core/api");
     renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
@@ -736,8 +764,27 @@ describe("TeamAgentComposer session-config selector (CR-2026-056)", () => {
     });
 
     await waitFor(() =>
-      expect(api.patchProjectChatConfig).toHaveBeenCalledWith("proj-1", {
+      expect(api.patchProjectChatConfig).toHaveBeenCalledWith("proj-1", "session-1", {
         model: "claude-opus",
+      }),
+    );
+    expect(api.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("selecting a thinking level PATCHes the session config with the session id (AC-2)", async () => {
+    cfg.runtimeStatus = "online";
+    chatCfg.model = "claude-opus"; // exposes the stub catalog's thinking levels
+    const { api } = await import("@multica/core/api");
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
+
+    const trigger = await screen.findByTestId("stub-thinking-interactive");
+    await act(async () => {
+      trigger.click();
+    });
+
+    await waitFor(() =>
+      expect(api.patchProjectChatConfig).toHaveBeenCalledWith("proj-1", "session-1", {
+        thinking_level: "high",
       }),
     );
     expect(api.updateAgent).not.toHaveBeenCalled();

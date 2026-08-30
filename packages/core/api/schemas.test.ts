@@ -77,6 +77,7 @@ import {
   ProjectChatSchema,
   EMPTY_PROJECT_CHAT,
   UNSAFE_CHAT_CONFIG_FALLBACK,
+  type ProjectChat,
   ProjectChatSendResultSchema,
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   PrivateAskChatSchema,
@@ -2075,7 +2076,10 @@ describe("issue status catalog schemas", () => {
 // object to the unsafe fallback (UI read-only). Soft defaults: with a valid
 // session_id, absent config fields default field-by-field (writable).
 
-const VALID_SESSION_ID = "11111111-2222-3333-4444-555555555555";
+// A strict RFC 4122 v4 UUID: zod ^4's z.string().uuid() enforces the version
+// and variant nibbles ([1-8] version, [89ab] variant), so the legacy
+// all-ones-looking placeholder fails — and these schemas gate writes on it.
+const VALID_SESSION_ID = "550e8400-e29b-41d4-a716-446655440000";
 
 describe("ProjectChatSchema (CR-2026-056 §3.4)", () => {
   const base = {
@@ -2092,6 +2096,25 @@ describe("ProjectChatSchema (CR-2026-056 §3.4)", () => {
     const parsed = ProjectChatSchema.parse(base);
     expect(parsed.session_id).toBe(VALID_SESSION_ID);
     expect(parsed.model).toBe("claude-opus-5");
+    expect((parsed as ProjectChat).degraded).toBeUndefined();
+  });
+
+  // The backend's explicit unconfigured shape (§3.1: GET on a project
+  // without a Team Agent creates no session) parses — so the panel can tell
+  // "unconfigured" (admin setup CTA) from the hard-degraded fallback.
+  it("parses the explicit unconfigured shape (empty session_id AND empty team_agent_id)", () => {
+    const parsed = ProjectChatSchema.parse({
+      session_id: "",
+      issue_id: null,
+      team_agent_id: "",
+      model: "",
+      thinking_level: "",
+      model_source: "",
+      thinking_level_source: "",
+    });
+    expect(parsed.session_id).toBe("");
+    expect(parsed.team_agent_id).toBe("");
+    expect((parsed as ProjectChat).degraded).toBeUndefined();
   });
 
   it("soft-defaults missing config fields and a null issue_id (AC-11)", () => {
@@ -2118,9 +2141,12 @@ describe("ProjectChatSchema (CR-2026-056 §3.4)", () => {
     );
     expect(parsed).toEqual(EMPTY_PROJECT_CHAT);
     expect(parsed.session_id).toBe(UNSAFE_CHAT_CONFIG_FALLBACK.session_id);
+    // The fallback carries the explicit degraded marker so panels render
+    // read-only + retry instead of the unconfigured setup CTA (BLOCK-002).
+    expect(parsed.degraded).toBe(true);
   });
 
-  it("hard-degrades an empty session_id", () => {
+  it("hard-degrades an empty session_id (with a non-empty team_agent_id)", () => {
     const parsed = parseWithFallback(
       { ...base, session_id: "" },
       ProjectChatSchema,
@@ -2128,6 +2154,7 @@ describe("ProjectChatSchema (CR-2026-056 §3.4)", () => {
       { endpoint: "GET /api/projects/:id/chat" },
     );
     expect(parsed).toEqual(EMPTY_PROJECT_CHAT);
+    expect(parsed.degraded).toBe(true);
   });
 
   it("hard-degrades a non-UUID session_id", () => {
@@ -2138,6 +2165,7 @@ describe("ProjectChatSchema (CR-2026-056 §3.4)", () => {
       { endpoint: "GET /api/projects/:id/chat" },
     );
     expect(parsed).toEqual(EMPTY_PROJECT_CHAT);
+    expect(parsed.degraded).toBe(true);
   });
 });
 
@@ -2145,7 +2173,7 @@ describe("ProjectChatSendResultSchema (CR-2026-056 §3.1)", () => {
   it("parses the success body anchored on session_id/issue_id", () => {
     const parsed = ProjectChatSendResultSchema.parse({
       session_id: VALID_SESSION_ID,
-      issue_id: "11111111-1111-1111-1111-111111111111",
+      issue_id: VALID_SESSION_ID,
       comment_id: "c1",
       task_id: "t1",
     });
@@ -2154,7 +2182,7 @@ describe("ProjectChatSendResultSchema (CR-2026-056 §3.1)", () => {
 
   it("hard-degrades a success body missing session_id (AC-27)", () => {
     const parsed = parseWithFallback(
-      { issue_id: "11111111-1111-1111-1111-111111111111", comment_id: "c1", task_id: "t1" },
+      { issue_id: VALID_SESSION_ID, comment_id: "c1", task_id: "t1" },
       ProjectChatSendResultSchema,
       EMPTY_PROJECT_CHAT_SEND_RESULT,
       { endpoint: "POST /api/projects/:id/chat/messages" },

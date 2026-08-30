@@ -275,6 +275,9 @@ import {
   EMPTY_PROJECT_CHAT,
   ProjectChatSchema,
   type ProjectChat,
+  EMPTY_PRIVATE_ASK_CHAT,
+  PrivateAskChatSchema,
+  type PrivateAskChat,
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
@@ -3626,14 +3629,17 @@ export class ApiClient {
 
   // Patch the Team Agent chat session config (CR-2026-056 §3.1): three-state
   // body — absent key keeps the value, null/"" clears, a non-empty string
-  // sets. Owner/admin only (backend 403 forbidden_chat_config).
+  // sets. session_id is REQUIRED by the backend (the PATCH anchor, parsed
+  // server-side as a UUID) and is injected here so no caller can forget it.
+  // Owner/admin only (backend 403 forbidden_chat_config).
   async patchProjectChatConfig(
     id: string,
+    sessionId: string,
     body: { model?: string | null; thinking_level?: string | null },
   ): Promise<ProjectChat> {
     const raw = await this.fetch<unknown>(`/api/projects/${id}/chat/config`, {
       method: "PATCH",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ session_id: sessionId, ...body }),
     });
     return parseWithFallback(raw, ProjectChatSchema, EMPTY_PROJECT_CHAT, {
       endpoint: "PATCH /api/projects/:id/chat/config",

@@ -735,7 +735,7 @@ export function TeamAgentComposer({
     const prev = chatModel;
     qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, model } : old));
     try {
-      await api.patchProjectChatConfig(projectId, { model });
+      await api.patchProjectChatConfig(projectId, sessionId, { model });
       qc.invalidateQueries({ queryKey: chatKey });
     } catch {
       qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, model: prev } : old));
@@ -748,7 +748,7 @@ export function TeamAgentComposer({
     const prev = chatThinking;
     qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, thinking_level: level } : old));
     try {
-      await api.patchProjectChatConfig(projectId, { thinking_level: level });
+      await api.patchProjectChatConfig(projectId, sessionId, { thinking_level: level });
       qc.invalidateQueries({ queryKey: chatKey });
     } catch {
       qc.setQueryData<ProjectChat>(chatKey, (old) => (old ? { ...old, thinking_level: prev } : old));

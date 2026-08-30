@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
@@ -335,6 +336,91 @@ func TestPatchChatSessionConfigHTTP(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body["code"] != "chat_session_not_found" {
 		t.Fatalf("ordinary session error body = %s (err %v)", w.Body.String(), err)
+	}
+}
+
+// TestPatchChatSessionConfigErrorBoundariesWithoutRuntime pins the SDD §3.2
+// error ORDER (review BLOCK-003): the creator / project-bound gates must be
+// answered BEFORE agent/provider resolution. A Private Ask session whose
+// agent's runtime lives in a foreign workspace (so the handler's
+// workspace-scoped provider lookup resolves nothing) must still get 403 for
+// a non-creator and 404 for an ordinary (project_id IS NULL) session — never
+// a premature 400 invalid_model_or_thinking_level. The authorized
+// project-bound control case keeps the 400.
+func TestPatchChatSessionConfigErrorBoundariesWithoutRuntime(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("handler test fixture unavailable")
+	}
+	ctx := context.Background()
+
+	// A runtime in a foreign workspace satisfies the agent.runtime_id FK but
+	// never resolves through GetAgentRuntimeForWorkspace(id, testWorkspaceID)
+	// — the exact "agent has no resolvable runtime/provider" shape.
+	foreignWorkspaceID := dbfx.Insert(t, "workspace", testutil.Cols{
+		"name":         "Private ask config foreign ws",
+		"slug":         "pcc-foreign-ws",
+		"description":  "Foreign workspace",
+		"issue_prefix": "PCC",
+	})
+	var foreignRuntimeID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (workspace_id, name, runtime_mode, provider, status, device_info, metadata, owner_id, last_seen_at)
+		VALUES ($1, 'pcc-foreign-runtime', 'cloud', 'claude', 'online', '', '{}'::jsonb, $2, now()) RETURNING id`,
+		foreignWorkspaceID, testUserID).Scan(&foreignRuntimeID); err != nil {
+		t.Fatalf("create foreign runtime: %v", err)
+	}
+	agentID := createHandlerTestAgent(t, "private-chat-config-foreign-runtime", nil)
+	if _, err := testPool.Exec(ctx, `UPDATE agent SET runtime_id = $1 WHERE id = $2`, foreignRuntimeID, agentID); err != nil {
+		t.Fatalf("repoint agent runtime: %v", err)
+	}
+	// RESTRICT fkey order: agent first, then runtime, then workspace.
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, agentID)
+		testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, foreignRuntimeID)
+		testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, foreignWorkspaceID)
+	})
+
+	projectID := insertPrivateChatProject(t, agentID)
+	sessionID := seedPrivateAskRow(t, agentID, projectID)
+	otherUserID := seedSecondMember(t)
+
+	// Non-creator on a project-bound session -> 403 even without a runtime.
+	w := patchPrivateChatConfig(t, sessionID, otherUserID, testWorkspaceID, map[string]any{"model": "claude-opus-5"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-creator patch without runtime: %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body["code"] != "forbidden_chat_config" {
+		t.Fatalf("non-creator error body = %s (err %v)", w.Body.String(), err)
+	}
+
+	// Ordinary 1:1 session (project_id NULL) -> 404 even without a runtime.
+	var ordinarySession string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, status, explicitly_created_at)
+		VALUES ($1, $2, $3, 'Ordinary', 'active', now()) RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&ordinarySession); err != nil {
+		t.Fatalf("seed ordinary session: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM chat_session WHERE id = $1`, ordinarySession)
+	})
+	w = patchPrivateChatConfig(t, ordinarySession, testUserID, testWorkspaceID, map[string]any{"model": "claude-opus-5"})
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("ordinary session patch without runtime: %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body["code"] != "chat_session_not_found" {
+		t.Fatalf("ordinary session error body = %s (err %v)", w.Body.String(), err)
+	}
+
+	// Authorized project-bound control: the foreign runtime surfaces as the
+	// §4.3 validation 400, exactly as before the reorder.
+	w = patchPrivateChatConfig(t, sessionID, testUserID, testWorkspaceID, map[string]any{"model": "claude-opus-5"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("creator patch without runtime: %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body["code"] != "invalid_model_or_thinking_level" {
+		t.Fatalf("creator error body = %s (err %v)", w.Body.String(), err)
 	}
 }
 

@@ -1318,13 +1318,15 @@ const ProjectSchema = z.object({
 // configured yet; `issue_id` is null until the first send binds the container
 // (AC-11).
 //
-// Hard degradation (NFR-8/AC-27): a missing/empty/non-UUID `session_id` means
-// the backend response cannot anchor any chat-config write — the WHOLE object
-// degrades to UNSAFE_CHAT_CONFIG_FALLBACK and the UI turns read-only (no
-// picker, no PATCH, no send) until a fresh GET succeeds. Soft defaults: with a
-// valid session_id, absent model/source fields default field-by-field
-// (model "", thinking_level "", *_source "session_default", issue_id null)
-// and the controls stay writable.
+// Hard degradation (NFR-8/AC-27): a missing/empty/non-UUID `session_id` that
+// is NOT the backend's explicit unconfigured shape (empty session_id AND
+// empty team_agent_id) means the response cannot anchor any chat-config
+// write — the WHOLE object degrades to EMPTY_PROJECT_CHAT (the
+// UNSAFE_CHAT_CONFIG_FALLBACK shape plus the `degraded` marker) and the UI
+// turns read-only (no picker, no PATCH, no send) until a fresh GET succeeds.
+// Soft defaults: with a valid session_id, absent model/source fields default
+// field-by-field (model "", thinking_level "", *_source "session_default",
+// issue_id null) and the controls stay writable.
 export interface ProjectChat {
   session_id: string;
   issue_id: string | null;
@@ -1333,6 +1335,11 @@ export interface ProjectChat {
   thinking_level: string;
   model_source: string;
   thinking_level_source: string;
+  /** Client-side marker on the schema fallback (EMPTY_PROJECT_CHAT) only —
+   *  a real server response never carries it. Its presence means the GET
+   *  failed schema validation, so panels must render read-only + retry
+   *  (AC-27) instead of the unconfigured setup CTA (review BLOCK-002). */
+  degraded?: boolean;
 }
 
 // UNSAFE_CHAT_CONFIG_FALLBACK is the hard-degradation shape shared by the
@@ -1347,21 +1354,43 @@ export const UNSAFE_CHAT_CONFIG_FALLBACK = {
   thinking_level_source: "runtime_default",
 } as const;
 
+// A parseable GET shape is either a live session (UUID session_id) or the
+// backend's explicit "unconfigured" shape (§3.1: empty session_id AND empty
+// team_agent_id — GET on a project without a Team Agent creates no session).
+// Anything else — missing/empty/non-UUID session_id alongside a non-empty
+// team_agent_id, absent keys, garbage — fails the union and hard-degrades to
+// EMPTY_PROJECT_CHAT (`degraded: true`), so panels can tell "unconfigured"
+// (setup CTA) from "cannot trust this response" (read-only + retry).
 export const ProjectChatSchema = z
-  .object({
-    session_id: z.string().uuid(),
-    issue_id: z.string().nullable().default(null),
-    team_agent_id: z.string().default(""),
-    model: z.string().default(""),
-    thinking_level: z.string().default(""),
-    model_source: z.string().default("session_default"),
-    thinking_level_source: z.string().default("session_default"),
-  })
-  .loose();
+  .union([
+    z
+      .object({
+        session_id: z.string().uuid(),
+        issue_id: z.string().nullable().default(null),
+        team_agent_id: z.string().default(""),
+        model: z.string().default(""),
+        thinking_level: z.string().default(""),
+        model_source: z.string().default("session_default"),
+        thinking_level_source: z.string().default("session_default"),
+      })
+      .loose(),
+    z
+      .object({
+        session_id: z.literal(""),
+        issue_id: z.string().nullable().default(null),
+        team_agent_id: z.literal(""),
+        model: z.string().default(""),
+        thinking_level: z.string().default(""),
+        model_source: z.string().default("session_default"),
+        thinking_level_source: z.string().default("session_default"),
+      })
+      .loose(),
+  ]);
 
 export const EMPTY_PROJECT_CHAT: ProjectChat = {
   ...UNSAFE_CHAT_CONFIG_FALLBACK,
   team_agent_id: "",
+  degraded: true,
 };
 
 // Project Discussion context (CR-2026-009): the backing container issue id.
