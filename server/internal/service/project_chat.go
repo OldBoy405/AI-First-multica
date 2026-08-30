@@ -36,7 +36,7 @@ const projectDiscussionIssueTitle = "Discussion"
 // origin_type='project_chat' so all issue-listing queries filter it out.
 func (s *IssueService) EnsureProjectChatIssue(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID) (db.Issue, error) {
 	return s.ensureContainerIssue(ctx, workspaceID, projectID, callerID,
-		"project_chat", projectChatIssueTitle, "project-chat",
+		"project_chat", projectChatIssueTitle, "project-chat-session",
 		func(q *db.Queries, ctx context.Context, projectID, workspaceID pgtype.UUID) (db.Issue, error) {
 			return q.GetProjectChatIssue(ctx, db.GetProjectChatIssueParams{ProjectID: projectID, WorkspaceID: workspaceID})
 		})

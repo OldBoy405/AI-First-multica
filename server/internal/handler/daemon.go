@@ -2219,6 +2219,28 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	if rc := bytes.TrimSpace(agent.RuntimeConfig); len(rc) > 0 && !bytes.Equal(rc, []byte("{}")) && !bytes.Equal(rc, []byte("null")) {
 		runtimeConfig = json.RawMessage(agent.RuntimeConfig)
 	}
+	// CR-2026-056 (SDD §4.8, FR-14): a task enqueued through the Team Agent
+	// chat carries an immutable chat_config snapshot in task.context. When
+	// present, the claim uses the snapshot's model / thinking_level (model=""
+	// is the legal follow-runtime-default sentinel and passes through
+	// verbatim); every other task keeps the agent's current columns — old
+	// tasks and non-chat tasks never read the session or agent config back,
+	// and retries re-claim the same task row and therefore the same
+	// snapshot.
+	taskModel := agent.Model.String
+	taskThinking := agent.ThinkingLevel.String
+	if len(task.Context) > 0 {
+		var taskCtx struct {
+			ChatConfig *struct {
+				Model         string `json:"model"`
+				ThinkingLevel string `json:"thinking_level"`
+			} `json:"chat_config"`
+		}
+		if json.Unmarshal(task.Context, &taskCtx) == nil && taskCtx.ChatConfig != nil {
+			taskModel = taskCtx.ChatConfig.Model
+			taskThinking = taskCtx.ChatConfig.ThinkingLevel
+		}
+	}
 	resp.Agent = &TaskAgentData{
 		ID:                    uuidToString(agent.ID),
 		Name:                  agent.Name,
@@ -2226,8 +2248,8 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		CustomEnv:             customEnv,
 		CustomArgs:            customArgs,
 		McpConfig:             mcpConfig,
-		Model:                 agent.Model.String,
-		ThinkingLevel:         agent.ThinkingLevel.String,
+		Model:                 taskModel,
+		ThinkingLevel:         taskThinking,
 		ServiceTier:           agent.ServiceTier.String,
 		RuntimeConfig:         runtimeConfig,
 		DisabledRuntimeSkills: disabledRuntimeSkillsFor(agent.DisabledRuntimeSkills, runtimeID, runtime.Provider),
@@ -2339,7 +2361,6 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		resp.ThreadName = issue.Title
 		issueNumber = issue.Number
 
-
 		// CR-2026-012: the Discussion container is a coordination-only
 		// surface — any task hanging on it (today only Discussion
 		// Coordinator runs) must execute read-only. The rule is keyed on
@@ -2351,7 +2372,6 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		if issue.OriginType.Valid && issue.OriginType.String == "project_discussion" {
 			resp.AskOnly = true
 		}
-
 
 		// Squad-leader briefing injection: keyed off the task being a
 		// leader-task (is_leader_task) carrying a squad_id — NOT off the
