@@ -31,7 +31,7 @@ func TestGeneratedPrefixesShape(t *testing.T) {
 			}
 		}
 	}
-	if decls["multica"].Trunk != "main" || decls["tools"].Trunk != "custom/main" || decls["ai-first-platform-docs"].Trunk != "master" {
+	if decls["multica"].Trunk != "main" || decls["tools"].Trunk != "main" || decls["ai-first-platform-docs"].Trunk != "master" {
 		t.Errorf("trunk mismatch: %s %s %s",
 			decls["ai-first-platform-docs"].Trunk, decls["multica"].Trunk, decls["tools"].Trunk)
 	}

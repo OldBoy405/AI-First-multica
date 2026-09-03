@@ -58,6 +58,7 @@ grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=
 | CR-2026-055 | P2 v2 | 会话级配置与 Team Agent 闭环（上游同步后 rebase 适配） | ✅ 已合并 | 2026-08-30 | —（基线 8746add，适配见 merge 记录） | — |
 | CR-2026-056 | P2 v2 会话级配置 | 会话级配置与 Team Agent 闭环（迁移 472–480 / sqlc / 会话·容器·发送内核 / Private Ask 后端闭环 / 附件草稿门 + 1h sweeper / 前端） | 🚧 实现中 | 2026-08-30 | #59–#66 | KG-1/KG-2（转投无 chat_config 快照、换绑后转投仍写旧 Issue）归 CR-B/CR-C |
 | —（合并适配） | 上游同步 | 上游 258 提交合并的 fork 侧适配 | ✅ 已合并 | 2026-08-19 | #38 | — |
+| —（漂移修复） | — | tools trunk rename（custom/main→main）传播点修复：commitprefix 声明副本再生 + 断言 + 台账登记 | ✅ 已合并 | 2026-09-03 | #67 | — |
 
 > 编号说明：原表末位补记的 Skill Market 行与 CR-2026-049 租户隔离行同占 #48，本次重排已将其改为 **#54**（无交叉引用受影响）。
 
@@ -317,6 +318,12 @@ fork 的 36 个迁移原占 362–397，上游 `upstream/main` 因自身 PR 撞�
 | 38 | 第二次上游合并的 fork 侧适配（无单一 CR 归属）：`internal/daemon/health.go`（activeTaskAuth 校验增加 `Authorization` header 回落）、`health_test.go`（fork 测试适配 bearer 注册机制 + Windows 路径 `filepath.ToSlash`）、`cmd/multica/cmd_repo.go`（body `auth_token` 字段随上游移除）、`internal/service/{discussion_coordinator,project_chat}.go`（`commentFromCreateRow` 适配 sqlc 新返回行）、`task.go`/`mika_onboarding.go`（`publishTaskEvent`/`publishChat` 增参）、`cancel_task_by_user_test.go`/`project_queue_capacity_test.go`（fixture 补 `accountable_user_id` 满足上游 strict CHECK）、迁移 362–374 顺延与 `364/367` CHECK 并枚举、前端 `chat-input.test.tsx`（adapter-isolation describe 重组 + spy mock）、`discussion-pane.tsx`（submitComment 签名适配） | 上游 258 提交合并（`b4137fc5b`）。合并总则适配：上游改签名则跟改、上游收编则改写（161→365）、上游新约束则 fixture 补列 | 2026-08-19 | 下次合并前对照本行复核：上游再改 checkout 认证协议时重贴 `health.go` 回落；上游再改 `agent_task_queue` 归因约束时复核 fork fixture；`commentFromCreateRow` 随 sqlc 行结构同步。验证：`go test ./internal/daemon/ -run 'RepoCheckout'`、`go test ./internal/handler/ -run 'CancelTaskByUser|ProjectQueueCapacity'`、`pnpm -C packages/views vitest run chat/components/chat-input.test.tsx` |
 
 > **第三次合并（2026-08-26）适配已在合并记录摘要内**，未单开行：适配点全部是「上游改签名则跟改」类（`publishChat`/`CompleteTask` 增参、chat claim 重构贴回 `AskOnly`/Discussion ask-only、`ReportTaskMessages` 批量化后 per-user 投递贴回、`ws-updaters` helper 化、react-query infinite 适配）。下次合并前对照 2026-08-26 摘要逐项复核。
+
+### 无单一 CR 归属 — tools trunk rename 传播点修复（KB c98aec6）｜✅ 已合并 2026-09-03｜延后：无
+
+| # | 位置 | 改动 | 原因 / 追溯 | 日期 | 合并注意 |
+|---|---|---|---|---|---|
+| 67 | `server/internal/commitprefix/config_gen.go`（生成产物再生）+ `config_test.go`（trunk 断言同步）+ `CUSTOM.md`（本行登记） | 再生成 commitprefix 声明副本：`tools.Trunk` `custom/main → main`、`Source`/`generatedConfigRev` `b68591a → c98aec6`（dir-graph.yaml 最近变更 commit，KB master HEAD）；`config_test.go` 硬断言同步为 `main`；除声明相关两行 + rev 头外无其它 diff（生成器 --check 验证一致） | tools 仓 `custom/main → main` 人工 rename 漂移修复：KB `dir-graph.yaml#repositories.tools.trunk` 已改 `main`（KB c98aec6），commitprefix 提交只读副本与单一事实源分叉；2026-09-03；上下文 AIFI-16 / CR-2026-059（人工授权直接修复，非 CR 交付物） | 2026-09-03 | `config_gen.go` 是生成产物，冲突丢弃后重跑 `node server/internal/commitprefix/gen/generate-prefixes.mjs --source <kb-checkout>`；`--check` 由 CI 守漂移。验证：`cd server && go test ./internal/commitprefix/...` + `node server/internal/commitprefix/gen/generate-prefixes.mjs --source <kb-checkout> --check` |
 
 ## 纯配置约定（无代码改动，部署时执行）
 
