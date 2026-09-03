@@ -1,0 +1,291 @@
+# agent-skill-matrix.yml — Agent / Skill 权限与归属矩阵
+schema: "ai-first.tools.agent-skill-matrix/v1"
+updated-at: "2026-09-03"
+
+relation-types:
+  owns: "主责维护与默认执行；每个 active skill 必须且只能有一个 owns owner"
+  can-call: "可在职责边界内调用；不代表主责"
+  external: "目标运行时提供的外部方法论 Skill；phase0 tools 不打包"
+  forbidden: "明确禁止调用，避免跨域越权"
+
+# `can-call: crctl` 只声明 Skill 级可调用关系。
+# 子命令范围必须由 Agent Prompt、对应 Skill 和运行时 caller policy 共同约束；
+# 当前 v1 矩阵校验器不把子命令列表解析为独立权限字段。
+
+pipeline-owners:
+  product-planning: product-planning-agent
+  market-to-plan: product-planning-agent
+  competitive-radar: competitive-analyst-agent
+  requirement-authoring: requirement-writer
+  architecture-design: dev-agent
+  code-implementation: dev-agent
+  feature-writeback: delivery-agent
+  resume-cr: system-orchestrator
+
+actors:
+  # 平台层 Leader：负责协调和委派，不是普通业务 Pipeline owner。
+  cr-coordinator-agent:
+    kind: system
+    mode: leader
+    owns: []
+    can-call:
+      - cr-dashboard
+      - cr-query
+      - cr-show
+      - crctl
+    external: []
+    forbidden:
+      - requirement-register
+      - write-requirement-prd
+      - write-tech-design
+      - write-dev-plan
+      - write-dev-tasks
+      - implement-code
+      - write-test-report
+      - review-requirement
+      - review-tech-design
+      - review-dev-plan
+      - review-code
+      - review-alignment
+      - approve-requirement
+      - approve-tech-design
+      - approve-dev-start
+      - approve-code
+      - merge-feature-branch
+      - writeback-prd-sdd
+      - writeback-tasks
+      - writeback-traceability
+      - cr-archive
+      - push-progress
+      - pull-progress
+      - handover-cr
+      - cr-review-record
+
+  product-planning-agent:
+    kind: agent
+    owns:
+      - analyze-user-feedback
+      - conduct-market-research
+      - analyze-current-product
+      - write-planning-report
+      - review-planning-report
+      - write-roadmap
+      - write-planning-entry
+      - extract-market-insight
+      - gather-product-context
+      - planning-draft
+      - record-idea
+      - focus-briefing
+    can-call:
+      - spec-query
+      - cr-query
+      - cr-dashboard
+      - engineering-docs
+      - validate-doc
+    external:
+      - brainstorming
+    forbidden:
+      - requirement-register
+      - implement-code
+      - merge-feature-branch
+      - cr-archive
+
+  requirement-writer:
+    kind: agent
+    owns:
+      - requirement-register
+      - write-requirement-prd
+      - approve-requirement
+    can-call:
+      - review-requirement
+      - push-progress
+      - cr-show
+      - cr-query
+      - handover-cr
+      - inbox-emit
+      - crctl
+    external: []
+    forbidden:
+      - writeback-prd-sdd
+      - implement-code
+      - merge-feature-branch
+      - cr-archive
+
+  dev-agent:
+    kind: agent
+    owns:
+      - write-tech-design
+      - approve-tech-design
+      - write-dev-plan
+      - write-dev-tasks
+      - approve-dev-start
+      - implement-code
+      - write-test-report
+      - approve-code
+      - coding-discipline
+    can-call:
+      - review-tech-design
+      - review-dev-plan
+      - review-code
+      - push-progress
+      - pull-progress
+      - workspace-freshness
+      - cr-show
+      - controlled-shell
+      - crctl
+      - record-idea
+    external:
+      - executing-plans
+      - subagent-driven-development
+    forbidden:
+      - writeback-prd-sdd
+      - merge-feature-branch
+      - cr-archive
+
+  spec-agent:
+    kind: agent
+    owns:
+      - spec-show
+      - spec-query
+      - spec-dashboard
+    can-call:
+      - cr-query
+      - cr-show
+    external: []
+    forbidden:
+      - requirement-register
+      - implement-code
+      - writeback-prd-sdd
+      - writeback-traceability
+
+  delivery-agent:
+    kind: agent
+    owns:
+      - merge-feature-branch
+      - writeback-prd-sdd
+      - writeback-tasks
+      - writeback-traceability
+      - cr-archive
+    can-call:
+      - validate-doc
+      - crctl
+    external: []
+    forbidden:
+      - write-requirement-prd
+      - write-tech-design
+      - implement-code
+
+  quality-reviewer-agent:
+    kind: agent
+    owns:
+      - review-alignment
+      - review-requirement
+      - review-tech-design
+      - review-dev-plan
+      - review-code
+    can-call:
+      - review-planning-report
+      - cr-show
+      - controlled-shell
+      - crctl
+    external: []
+    # crctl 仅允许：status、next、对应 review Skill 要求的 gate、
+    # review-record、以及对应 review Skill 明确要求的 advance。
+    # review-alignment 路径不允许 review-record/advance 或任何写入操作。
+    forbidden:
+      - approve-requirement
+      - approve-tech-design
+      - approve-dev-start
+      - approve-code
+      - register
+      - requirement-register
+      - merge-feature-branch
+      - writeback-prd-sdd
+      - writeback-tasks
+      - writeback-traceability
+      - cr-archive
+      - push-progress
+      - checkpoint
+      - write-test-report
+      - coding-discipline
+
+  knowledge-agent:
+    kind: agent
+    owns: []
+    can-call:
+      - engineering-docs
+      - validate-doc
+      - record-idea
+    external: []
+    forbidden:
+      - requirement-register
+      - implement-code
+      - merge-feature-branch
+
+  competitive-analyst-agent:
+    kind: agent
+    owns:
+      - fetch-competitor-updates
+      - write-competitive-report
+      - report-to-planning-suggestion
+    can-call:
+      - gather-product-context
+      - planning-draft
+      - write-planning-entry
+      - engineering-docs
+      - validate-doc
+    external:
+      - brainstorming
+    forbidden:
+      - conduct-market-research
+      - requirement-register
+      - implement-code
+
+  customer-support-agent:
+    kind: agent
+    owns: []
+    can-call:
+      - spec-show
+      - spec-query
+      - validate-doc
+    external: []
+    forbidden:
+      - requirement-register
+      - write-requirement-prd
+      - implement-code
+
+  system-orchestrator:
+    kind: system
+    owns:
+      - push-progress
+      - pull-progress
+      - workspace-freshness
+      - resume-from-remote
+      - list-remote-checkpoints
+      - handover-cr
+      - validate-doc
+      - engineering-docs
+      - controlled-shell
+      - crctl
+      - cr-review-record
+      - inbox-emit
+      - cr-inbox
+      - cr-query
+      - cr-show
+      - cr-dashboard
+    can-call: []
+    external: []
+    forbidden: []
+
+# 纯文档参考，不被任何程序解析；唯一被 check-skill-matrix 解析的声明位置是 actor 级 external。
+external-skills:
+  - using-superpowers
+  - brainstorming
+  - writing-plans
+  - executing-plans
+  - subagent-driven-development
+  - test-driven-development
+  - systematic-debugging
+  - verification-before-completion
+
+known-gaps: []
