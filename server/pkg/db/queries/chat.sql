@@ -13,11 +13,14 @@ RETURNING *;
 -- Private Ask get-or-create lookup: the latest active session for a
 -- (workspace, project, creator) triple (CR-2026-056 Hard Invariant 1:
 -- workspace_id is authoritative; never filter by project/creator alone).
--- The partial unique index chat_session_project_creator_active_unique
+-- CR-2026-059 (SDD §2.3 FR-5): narrowed to kind='private' so a project's
+-- shared Discussion session can never be returned as someone's Private Ask.
+-- The partial unique index chat_session_private_creator_active_unique
 -- guarantees at most one row matches; ORDER BY is a belt-and-braces
 -- tiebreak, not a correctness need.
 SELECT * FROM chat_session
 WHERE project_id = $1 AND creator_id = $2 AND workspace_id = $3 AND status = 'active'
+  AND kind = 'private'
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -532,7 +535,7 @@ WHERE id = $1;
 INSERT INTO chat_message (
     chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
     message_kind, quick_actions, channel_media_pending_until, channel_ingested,
-    channel_context_revision, id
+    channel_context_revision, author_type, author_id, id
 )
 VALUES (
     $1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms),
@@ -548,6 +551,7 @@ VALUES (
          ELSE now() + make_interval(secs => sqlc.narg(channel_media_pending_secs)::float8) END,
     COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE),
     sqlc.narg(channel_context_revision),
+    sqlc.narg(author_type), sqlc.narg(author_id),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
@@ -1712,3 +1716,39 @@ WHERE workspace_id = $1
   AND status = 'active'
 ORDER BY created_at ASC
 LIMIT 1;
+
+-- AIFIRST: CR-2026-059 TASK-01 (SDD §2.4/§4.1): shared Discussion session
+-- queries consumed by TASK-02's EnsureProjectDiscussionSession.
+
+-- name: GetActiveProjectSharedSession :one
+-- The project's unique ACTIVE shared Discussion session. The partial unique
+-- index chat_session_project_shared_active_unique (485) guarantees at most
+-- one row; the insert-conflict loser reselects under the project advisory.
+SELECT * FROM chat_session
+WHERE workspace_id = $1 AND project_id = $2
+  AND kind = 'project_shared' AND status = 'active';
+
+-- name: InsertProjectSharedSession :one
+-- First-open INSERT for the shared Discussion session. agent_id is NULL when
+-- no Coordinator is configured (legal since 481); base_* snapshot the
+-- routable Coordinator's defaults, NULL otherwise. runtime_id is an existing
+-- nullable column left NULL. Unique conflicts are handled by the caller's
+-- lock-internal reselect (same pattern as EnsureProjectChatSession).
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, project_id, kind, base_model, base_thinking_level)
+VALUES ($1, sqlc.narg('agent_id'), $2, '', $3, 'project_shared', sqlc.narg('base_model'), sqlc.narg('base_thinking_level'))
+RETURNING *;
+
+-- name: SetChatSessionAgentID :execrows
+-- Coordinator projection write (SDD §4.5): settings are the write authority;
+-- the session row mirrors the effective binding in the same transaction.
+UPDATE chat_session
+SET agent_id = $2
+WHERE id = $1;
+
+-- name: GetChatMessageInWorkspace :one
+-- merge-forward message_ids validation (SDD §3.5): chat_message carries no
+-- workspace_id, so the workspace predicate MUST go through the session join.
+-- No rows -> pgx.ErrNoRows -> 400 invalid_message_selection.
+SELECT message.* FROM chat_message AS message
+JOIN chat_session AS session ON session.id = message.chat_session_id
+WHERE message.id = $1 AND session.workspace_id = $2;

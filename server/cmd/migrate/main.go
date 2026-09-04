@@ -291,6 +291,23 @@ var concurrentIndexCleanups = map[string]string{
 	"428_channel_task_delivery_binding_index":                   "idx_channel_task_delivery_binding",
 	"429_channel_task_delivery_installation_index":              "idx_channel_task_delivery_installation",
 	"430_channel_outbound_message_binding_index":                "idx_channel_outbound_message_binding_route",
+	// AIFIRST: CR-2026-059 TASK-01 (SDD §4.9): Discussion shared-session and
+	// idempotency index builds.
+	"483_chat_session_private_active_unique": "chat_session_private_creator_active_unique",
+	"485_chat_session_project_shared_active_unique": "chat_session_project_shared_active_unique",
+	"488_chat_idempotency_scope_key_unique": "chat_idempotency_scope_key_uidx",
+	"490_idx_chat_idempotency_created": "idx_chat_idempotency_created",
+	// AIFIRST: CR-2026-059 TASK-01 ledger completeness: these AIFIRST builds
+	// (CR-2026-052/056) predate this CR and were never registered, tripping
+	// the total-invariant tests. Registration-only; each entry costs one
+	// to_regclass lookup on a database where the migration is still pending.
+	"469_approval_continuation_record_active_unique": "idx_approval_continuation_record_active",
+	"471_approval_continuation_workspace_cr_pending_unique": "idx_approval_continuation_workspace_cr_pending",
+	"473_project_chat_session_id_uidx": "project_chat_session_id_uidx",
+	"475_project_chat_session_project_active_unique": "project_chat_session_project_active_unique",
+	"476_project_chat_session_issue_uidx": "project_chat_session_issue_uidx",
+	"477_project_chat_session_project_index": "project_chat_session_project_index",
+	"480_issue_project_chat_session_origin_uidx": "issue_project_chat_session_origin_uidx",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
@@ -316,6 +333,13 @@ var concurrentDownIndexCleanups = map[string]string{
 	"371_comment_content_search_index_strategy":             "idx_comment_content_trgm",
 	"375_drop_issue_last_activity_index":                    "idx_issue_workspace_last_activity",
 	"391_drop_agent_task_queue_dispatched_prepare_index":    "idx_agent_task_queue_dispatched_prepare",
+	// AIFIRST: CR-2026-059 TASK-01 (SDD §4.9): the ONLY down direction that
+	// builds an index concurrently is 484.down (old wide-predicate rebuild).
+	"484_drop_chat_session_project_creator_active_unique":   "chat_session_project_creator_active_unique",
+	// AIFIRST: CR-2026-059 TASK-01 ledger completeness: CR-2026-056's
+	// 479.down rebuilds issue_project_chat_unique concurrently but was never
+	// registered (total-invariant test failure).
+	"479_drop_issue_project_chat_unique":                    "issue_project_chat_unique",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {

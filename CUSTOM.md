@@ -57,6 +57,7 @@ grep -rnE "AIFIRST|CR-2026-[0-9]{3}" server/ packages/ --include=*.go --include=
 | CR-2026-054 | P1 终态闭环 | CR 归档安全 + Agent 执行边界 + daemon 终态补投（本仓侧：终态补投；其余在 tools 仓） | 🚧 实现中 | 2026-08-29 | #58 | — |
 | CR-2026-055 | P2 v2 | 会话级配置与 Team Agent 闭环（上游同步后 rebase 适配） | ✅ 已合并 | 2026-08-30 | —（基线 8746add，适配见 merge 记录） | — |
 | CR-2026-056 | P2 v2 会话级配置 | 会话级配置与 Team Agent 闭环（迁移 472–480 / sqlc / 会话·容器·发送内核 / Private Ask 后端闭环 / 附件草稿门 + 1h sweeper / 前端） | 🚧 实现中 | 2026-08-30 | #59–#66 | KG-1/KG-2（转投无 chat_config 快照、换绑后转投仍写旧 Issue）归 CR-B/CR-C |
+| CR-2026-059 | P2 v2 Discussion 无 Issue | Discussion 无 Issue 共享会话（迁移 481–490 / sqlc / 服务层 / handler·事件·实时 / 前端 pane / CUSTOM 台账） | 🚧 实现中 | 2026-09-05 | #68– | 评审 Skill 根因修复后置（tools 仓） |
 | —（合并适配） | 上游同步 | 上游 258 提交合并的 fork 侧适配 | ✅ 已合并 | 2026-08-19 | #38 | — |
 | —（漂移修复） | — | tools trunk rename（custom/main→main）传播点修复：commitprefix 声明副本再生 + 断言 + 台账登记 | ✅ 已合并 | 2026-09-03 | #67 | — |
 
@@ -324,6 +325,14 @@ fork 的 36 个迁移原占 362–397，上游 `upstream/main` 因自身 PR 撞�
 | # | 位置 | 改动 | 原因 / 追溯 | 日期 | 合并注意 |
 |---|---|---|---|---|---|
 | 67 | `server/internal/commitprefix/config_gen.go`（生成产物再生）+ `config_test.go`（trunk 断言同步）+ `CUSTOM.md`（本行登记） | 再生成 commitprefix 声明副本：`tools.Trunk` `custom/main → main`、`Source`/`generatedConfigRev` `b68591a → c98aec6`（dir-graph.yaml 最近变更 commit，KB master HEAD）；`config_test.go` 硬断言同步为 `main`；除声明相关两行 + rev 头外无其它 diff（生成器 --check 验证一致） | tools 仓 `custom/main → main` 人工 rename 漂移修复：KB `dir-graph.yaml#repositories.tools.trunk` 已改 `main`（KB c98aec6），commitprefix 提交只读副本与单一事实源分叉；2026-09-03；上下文 AIFI-16 / CR-2026-059（人工授权直接修复，非 CR 交付物） | 2026-09-03 | `config_gen.go` 是生成产物，冲突丢弃后重跑 `node server/internal/commitprefix/gen/generate-prefixes.mjs --source <kb-checkout>`；`--check` 由 CI 守漂移。验证：`cd server && go test ./internal/commitprefix/...` + `node server/internal/commitprefix/gen/generate-prefixes.mjs --source <kb-checkout> --check` |
+
+### CR-2026-059 — Discussion 无 Issue 共享会话（M0–M3）｜🚧 实现中｜2026-09-05｜延后：无
+
+> 基线钉在 `be6426a7c8d93ed58e6a69210e8a3d1d4357fe6d`（multica CR worktree 证据基线 HEAD）。tools 仓零改动。KB 仓承载 plan.md/TASK 卡；CUSTOM.md 按 TASK 各自登记（plan §3 关键纪律）。
+
+| # | 位置 | 改动 | 原因 / 追溯 | 日期 | 合并注意 |
+|---|---|---|---|---|---|
+| 68 | 迁移 `481_chat_session_agent_nullable_set_null`～`490_idx_chat_idempotency_created`（20 文件，`-- AIFIRST:` 标注）+ `server/cmd/migrate/main.go`（concurrentIndexCleanups 补 483/485/488/490 + 历史遗漏 469/471/473/475/476/477/480，concurrentDownIndexCleanups 补 484 + 历史遗漏 479）+ `server/cmd/migrate/migrate_discussion_shared_session_test.go`（新，481–490 up/down 往返真库测试）+ sqlc 真源 `server/pkg/db/queries/chat.sql`（`GetProjectChatSessionForCreator` 收窄 `kind='private'`、`CreateChatMessage` 补 author_type/author_id narg、新增 GetActiveProjectSharedSession/InsertProjectSharedSession/SetChatSessionAgentID/GetChatMessageInWorkspace）+ `attachment.sql`（新增 `BindDraftAttachmentsToChatMessage`，uploader 门禁恒由鉴权身份推导）+ `idempotency.sql`（新，5 查询）+ `sqlc.yaml`（`chat_idempotency.created_at` → `time.Time` override）+ 生成物 `pkg/db/generated/*`（`make sqlc`，禁手改） | M0 迁移与数据层：`chat_session.agent_id` 可空 + 既有 FK CASCADE→SET NULL（PRD FR-21 唯一授权转换）；`chat_session.kind`（private/project_shared，存量默认 private）；Private Ask 唯一索引先建新名再删旧（483/484 无无约束窗口）；485 每项目单 active shared；486 `chat_message` 作者列；487–490 幂等表（建表不内联 PK → CONCURRENTLY 唯一索引 → USING INDEX 挂 PK → 辅助索引）；down 全集逆序可回滚（482/485/486 有损注记）；迁移钩子 total 不变量补齐（含 CR-2026-052/056 历史遗漏，仅登记零行为变化）。CR-2026-059 TASK-01（SDD §2.1–§2.6/§4.9，AC-19） | 2026-09-05 | ① 索引类迁移一文件一条 CONCURRENTLY；481 同文件三句（PRD FR-21 授权形态，非 CONCURRENTLY）；② `GetProjectChatSessionForCreator` 加 kind 过滤后三调用点语义保持（TASK-02 验证）；③ 生成物冲突丢弃重跑 `make sqlc`（sqlc v1.31.1，真源在 `.sql`）；④ 487 不内联 PK、489 `USING INDEX` 前提（488 唯一/非部分/列序匹配）；⑤ 481.down `SET NOT NULL` 在 NULL 行存在时硬失败（不静默吞错）。验证：`cd server && DATABASE_URL=… go test ./cmd/migrate/ -count=1`（全绿，含新往返测试）+ `go build ./...` |
 
 ## 纯配置约定（无代码改动，部署时执行）
 
