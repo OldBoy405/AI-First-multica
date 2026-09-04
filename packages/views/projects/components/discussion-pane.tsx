@@ -814,6 +814,10 @@ function DiscussionComposer({
   });
   const setDraft = useCommentDraftStore((s) => s.setDraft);
   const clearDraft = useCommentDraftStore((s) => s.clearDraft);
+  // One Idempotency-Key per logical send: retries of the SAME draft reuse it
+  // (server-side replay semantics); cleared on success so the next message
+  // gets a fresh key.
+  const idempotencyKeyRef = useRef<string>("");
 
   useEffect(() => {
     const flush = () => {
@@ -844,13 +848,17 @@ function DiscussionComposer({
       .map((a) => a.id);
     setSubmitting(true);
     try {
+      if (!idempotencyKeyRef.current) {
+        idempotencyKeyRef.current = crypto.randomUUID();
+      }
       await api.sendChatMessage(sessionId, content, activeIds.length > 0 ? activeIds : undefined, {
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: idempotencyKeyRef.current,
       });
       editorRef.current?.clearContent();
       setIsEmpty(true);
       setPendingAttachments([]);
       clearDraft(draftKey);
+      idempotencyKeyRef.current = "";
       onSent();
     } catch (e) {
       // 409 attachment_already_bound keeps the composer content + attachments
