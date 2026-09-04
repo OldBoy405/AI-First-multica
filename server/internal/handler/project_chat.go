@@ -728,7 +728,7 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 	}
 
 	result, err := h.IssueService.MergeForwardDiscussion(r.Context(),
-		project.WorkspaceID, project.ID, callerUUID, comments, req.RegisterCR)
+		project.WorkspaceID, project.ID, callerUUID, comments, nil, req.RegisterCR, "")
 	if err != nil {
 		writeProjectChatSendError(w, err)
 		return

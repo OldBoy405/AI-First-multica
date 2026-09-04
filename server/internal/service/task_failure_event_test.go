@@ -55,7 +55,7 @@ func TestTaskEventCarriesPayloadAndScopeHints(t *testing.T) {
 	// Seed the creator cache so taskEvent resolves the per-user delivery hint
 	// without a database.
 	svc := &TaskService{}
-	svc.storeChatSessionCreator(util.UUIDToString(task.ChatSessionID), "creator-9")
+	svc.storeChatSessionCreator(util.UUIDToString(task.ChatSessionID), chatSessionEventIdentity{Creator: "creator-9", Kind: "private"})
 	e := svc.taskEvent(context.Background(), protocol.EventTaskFailed, "workspace-1", task, map[string]any{
 		"failure_reason": "timeout",
 		"retry_pending":  false,

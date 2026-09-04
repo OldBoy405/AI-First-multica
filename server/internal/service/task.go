@@ -89,15 +89,23 @@ type TaskService struct {
 	analyticsContextCache map[string]analytics.TaskContext
 	analyticsContextOrder []string
 
-	// chatCreators memoizes chat_session.id -> creator_id for the per-user
-	// realtime delivery of chat events (CR-2026-008). Entries are immutable
-	// (a session's creator never changes) but the cache is process-lifetime,
-	// so it's bounded FIFO — same shape as analyticsContextCache/
-	// analyticsContextOrder above — rather than left to grow with the
-	// server's total chat session count over its uptime.
+	// chatCreators memoizes chat_session.id -> {creator_id, kind} for the
+	// per-user realtime delivery of chat events (CR-2026-008) and the
+	// kind-aware routing of shared-session events (CR-2026-059 §3.7). Entries
+	// are immutable (a session's creator and kind never change) but the cache
+	// is process-lifetime, so it's bounded FIFO — same shape as
+	// analyticsContextCache/analyticsContextOrder above — rather than left to
+	// grow with the server's total chat session count over its uptime.
 	chatCreatorsMu    sync.Mutex
-	chatCreatorsCache map[string]string
+	chatCreatorsCache map[string]chatSessionEventIdentity
 	chatCreatorsOrder []string
+}
+
+// chatSessionEventIdentity is the memoized per-session event-routing pair
+// (CR-2026-008 creator-only delivery + CR-2026-059 kind-aware fanout).
+type chatSessionEventIdentity struct {
+	Creator string
+	Kind    string
 }
 
 type SourceContextObjectStore interface {
@@ -5160,6 +5168,15 @@ func (s *TaskService) writeChatCompletionOutcome(ctx context.Context, qtx *db.Qu
 		params.Content = chatNoResponseFallback
 		params.MessageKind = pgtype.Text{String: protocol.ChatMessageKindNoResponse, Valid: true}
 	}
+	// CR-2026-059 (SDD §2.5/FR-12): assistant replies that land on a shared
+	// Discussion session attribute the Coordinator agent as author; private
+	// and legacy rows keep NULL author columns (zero behavior change).
+	if task.ChatSessionID.Valid && task.AgentID.Valid {
+		if sess, serr := qtx.GetChatSession(ctx, task.ChatSessionID); serr == nil && sess.Kind == chatSessionKindProjectShared {
+			params.AuthorType = pgtype.Text{String: "agent", Valid: true}
+			params.AuthorID = task.AgentID
+		}
+	}
 	row, err := createAssistantChatMessage(ctx, qtx, params)
 	if err != nil {
 		return nil, err
@@ -7256,37 +7273,48 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 // be loaded — the WS bridge then fails closed (drops the event) instead of
 // broadcasting private content to the workspace.
 func (s *TaskService) ChatSessionCreatorID(ctx context.Context, sessionID pgtype.UUID) string {
-	if !sessionID.Valid {
-		return ""
-	}
-	key := util.UUIDToString(sessionID)
-	if creator, ok := s.cachedChatSessionCreator(key); ok {
-		return creator
-	}
-	sess, err := s.Queries.GetChatSession(ctx, sessionID)
-	if err != nil {
-		return ""
-	}
-	creator := util.UUIDToString(sess.CreatorID)
-	s.storeChatSessionCreator(key, creator)
+	creator, _ := s.ChatSessionCreatorAndKind(ctx, sessionID)
 	return creator
 }
 
-func (s *TaskService) cachedChatSessionCreator(key string) (string, bool) {
-	s.chatCreatorsMu.Lock()
-	defer s.chatCreatorsMu.Unlock()
-	if s.chatCreatorsCache == nil {
-		return "", false
+// ChatSessionCreatorAndKind resolves (and memoizes) the creator and kind of a
+// chat session in one lookup (CR-2026-059 §3.7): task event producers fill
+// Event.ChatSessionKind from the same cached read that resolves the recipient,
+// so kind-aware routing costs no extra DB round trip. Both fields are empty
+// when the session cannot be loaded — the WS bridge fails closed.
+func (s *TaskService) ChatSessionCreatorAndKind(ctx context.Context, sessionID pgtype.UUID) (creator, kind string) {
+	if !sessionID.Valid {
+		return "", ""
 	}
-	creator, ok := s.chatCreatorsCache[key]
-	return creator, ok
+	key := util.UUIDToString(sessionID)
+	if identity, ok := s.cachedChatSessionCreator(key); ok {
+		return identity.Creator, identity.Kind
+	}
+	sess, err := s.Queries.GetChatSession(ctx, sessionID)
+	if err != nil {
+		return "", ""
+	}
+	creator = util.UUIDToString(sess.CreatorID)
+	kind = sess.Kind
+	s.storeChatSessionCreator(key, chatSessionEventIdentity{Creator: creator, Kind: kind})
+	return creator, kind
 }
 
-func (s *TaskService) storeChatSessionCreator(key, creator string) {
+func (s *TaskService) cachedChatSessionCreator(key string) (chatSessionEventIdentity, bool) {
 	s.chatCreatorsMu.Lock()
 	defer s.chatCreatorsMu.Unlock()
 	if s.chatCreatorsCache == nil {
-		s.chatCreatorsCache = make(map[string]string)
+		return chatSessionEventIdentity{}, false
+	}
+	identity, ok := s.chatCreatorsCache[key]
+	return identity, ok
+}
+
+func (s *TaskService) storeChatSessionCreator(key string, identity chatSessionEventIdentity) {
+	s.chatCreatorsMu.Lock()
+	defer s.chatCreatorsMu.Unlock()
+	if s.chatCreatorsCache == nil {
+		s.chatCreatorsCache = make(map[string]chatSessionEventIdentity)
 	}
 	if _, ok := s.chatCreatorsCache[key]; !ok {
 		s.chatCreatorsOrder = append(s.chatCreatorsOrder, key)
@@ -7296,7 +7324,7 @@ func (s *TaskService) storeChatSessionCreator(key, creator string) {
 			delete(s.chatCreatorsCache, oldest)
 		}
 	}
-	s.chatCreatorsCache[key] = creator
+	s.chatCreatorsCache[key] = identity
 }
 
 // taskEvent builds the shared task-lifecycle event contract. Scope hints are
