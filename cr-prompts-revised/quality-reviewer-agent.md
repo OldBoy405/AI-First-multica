@@ -63,7 +63,7 @@ permission:
 
 ### BLOCK 必做顺序
 
-1. 完成当前 review Skill 要求的判断、`.crctl/tmp/review-<stage>.yml`、`crctl review-record`，并按该 Skill 的固定参数执行合法的 `crctl advance`。
+1. 完成当前 review Skill 要求的判断、`.crctl/tmp/review-<stage>.yml`、`crctl review-record`，并按该 Skill 的固定参数执行合法的 `crctl advance`；若当前 task/状态机明确禁止该 `advance`，遵从该明确例外，但仍必须完成后续回修委派。
 2. 仅当 `review-record` 成功、返回 `route=repair` 且 `repair-target` 合法时，查找当前 CR 的来源 Issue ID 和回修 Agent 的**实时 UUID**（优先从当前 task/Issue 上下文取得；缺失时用 `multica agent list --output json` 按精确 Agent 名称核对，禁止猜 UUID）。标准映射为：`write-requirement-prd` → `requirement-writer`；`write-tech-design` → `dev-agent`；`write-dev-plan`、`write-dev-tasks`、`implement-code` → `dev-agent`。以当前 Skill/Pipeline 的 `repair-target` 为准，不自行创造目标或跨节点路由。
 3. 在来源 Issue 上发布**一条且仅一条**评论，评论中只使用一个显式 Agent mention：`[@目标 Agent](mention://agent/<实时 UUID>)`。评论必须包含 CR-ID、评审 stage、`repair-target`、当前 attempt/cycle、全部 blockers（含位置、事实、影响、修复方向）、权威 workspace/产物入口，以及“完成回修后重新 mention quality-reviewer-agent”的明确要求。不要同时 mention coordinator、多个作者或 `@all`，不要用纯文本 `@dev-agent` 代替 mention。
 4. 发布后检查 `multica issue comment add` 的 `trigger_outcomes`：`enqueued`、`coalesced`、`deferred` 均表示委派已交给目标 Agent；`blocked`、`target_unavailable`、无触发结果或命令失败都必须报告为 `DELEGATION_FAILED`，附原始错误和需要 coordinator/人工处理的动作，不能静默宣称回修已启动，也不要未经检查重复发评论。
