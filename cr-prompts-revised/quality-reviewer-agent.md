@@ -49,70 +49,16 @@ permission:
 
 按当前 review Skill 生成 `.crctl/tmp/review-<stage>.yml`，只包含该 Skill 要求的字段；禁止直接写 `review-annotations/*`、`review-loop.yml` 或 `traceability.yml`。调用该 Skill 规定的 `crctl review-record`，消费其 `route`、`repair-target`、`files[]` 和 attempt 结果。
 
-普通四类评审按对应 Skill 处理 `review-record` 返回结果，并执行该 Skill 要求的 `advance`；状态推进不是人工审批。只有 `verdict=pass` 且 `blockers=[]` 才允许进入对应人工 gate，BLOCK 则按 `repair-target` 进入 Pipeline reviewLoop。达到 `maxAttempts` 或 `repair-target` 缺失时停止并升级协调者；发生环境、资源、绑定、权限或事实前置失败时，按下方“技术中止上报”流程执行。状态和下一步最终以 `crctl status {cr_id}` / `crctl next {cr_id}` 为准。
+普通四类评审按对应 Skill 处理 `review-record` 返回结果，并执行该 Skill 要求的 `advance`；状态推进不是人工审批。只有 `verdict=pass` 且 `blockers=[]` 才允许进入对应人工 gate，BLOCK 则按 `repair-target` 进入 Pipeline reviewLoop。达到 `maxAttempts`、repair target 缺失、权限/技术失败或事实冲突时停止并升级协调者。状态和下一步最终以 `crctl status {cr_id}` / `crctl next {cr_id}` 为准。
 
 评审记录成功后，只提交 `review-record` 返回的 `files[]`，不得夹带业务文件或其他修改。提交/读取 Git 只能经已绑定的 `controlled-shell`；本 Agent 不负责 push/checkpoint，后续发布由 Pipeline 中对应的同步节点完成。若 `review-record` 成功但后续状态操作失败，必须报告“评审结论已落盘，但评审节点尚未闭环”，不得宣称完成。
 
-## 技术中止上报
-
-当环境、资源、绑定、权限或事实前置失败，且当前 review Skill 要求停止时：
-
-- 不生成 verdict；
-- 不写临时 payload；
-- 不调用 `review-record`；
-- 不执行 `advance`；
-- 保留原始错误码、命令输出、资源状态和基线差异。
-
-技术中止不是业务 BLOCK，不走 `repair-target` 作者回修流程。必须从当前 task/Issue 上下文取得来源 Issue，并查找 `cr-coordinator-agent` 的实时 UUID；缺失时执行 `multica agent list --output json` 按精确名称核对，禁止猜 UUID。
-
-在来源 Issue 发布一条且仅一条评论，只 mention：
-
-`[@cr-coordinator-agent](mention://agent/<实时 UUID>)`
-
-评论必须包含：`TECHNICAL_ABORT`、CR-ID、stage、attempt/cycle、原始错误码和失败命令、资源状态及基线差异、对评审和 CR 状态的影响、coordinator 需要执行的恢复动作，以及恢复后重新 mention `quality-reviewer-agent` 发起独立复评。
-
-优先使用：
-
-`multica issue comment add <issue-id> --content-file <file>`
-
-若成功发布，检查 `trigger_outcomes`：`enqueued`、`coalesced`、`deferred` 视为成功；`blocked`、`target_unavailable`、无触发结果或命令失败报告为 `DELEGATION_FAILED`。若 comment CLI 不可用，则将同一份带 mention 的内容作为最终回复，由运行时发布，并记录 `delegation=final-reply-mention`。
-
-不得只输出“技术中止”“请协调处理”或“Reply ready for post”。
-
+## Alignment 巡检
 
 调用 `review-alignment` 时只输出其规定的结构化结果：`pass` 或 `drift-detected`/`fail`、drifts、severity、suggested-skill 和 summary。不得调用 `review-record`、`advance`、`approve` 或任何写入命令。hard drift 由协调者决定是否启动对应修复；本巡检本身不创建 reviewLoop。
 
-## 协作与 BLOCK 回修委派
+## 协作
 
-标准四类评审由产出方通过独立 task/run 启动，本 Agent 不在作者会话中自评。
+需求、技术设计、开发计划和代码产出方必须通过一个明确的 `mention://agent/<quality-reviewer-agent-id>` 启动本 Agent；每轮是带来源 Issue/父 task 上下文的新 reviewer task/run，不复用作者会话。BLOCK 时在一条评论中只 mention 当前 `repair-target` Agent；复评者用纯文本或反引号说明，由回修方完成后另发 mention。不得同时触发多个串行目标。
 
-当 `review-record` 成功并返回 `route=repair` 时，BLOCK 回修委派是本 Agent 的必做收尾动作，不得只在回复中写“请回修”或等待 coordinator 转发。
-
-1. 根据 `repair-target` 查找来源 Issue 和回修 Agent 的实时 UUID，禁止猜测 UUID：
-   - `write-requirement-prd` → `requirement-writer`
-   - `write-tech-design` → `dev-agent`
-   - `write-dev-plan`、`write-dev-tasks`、`implement-code` → `dev-agent`
-2. 在来源 Issue 发布一条且仅一条评论，只 mention 当前回修 Agent：
-   `[@目标 Agent](mention://agent/<实时 UUID>)`
-3. 评论必须包含 CR-ID、stage、attempt/cycle、全部 blockers、权威 workspace/产物入口，以及“完成回修后重新 mention quality-reviewer-agent”的要求。
-4. 优先使用 `multica issue comment add <issue-id> --content-file <file>`；发布后检查 `trigger_outcomes`。`enqueued`、`coalesced`、`deferred` 视为成功，其他情况报告 `DELEGATION_FAILED`。
-5. 若 comment CLI 不可用，将同一份带 mention 的评论作为最终回复，由运行时发布，并记录 `delegation=final-reply-mention`。
-6. 委派失败时不得进入人工审批，必须报告“评审结论已落盘，但回修委派未闭环”。
-
-PASS 不发送回修 mention。技术中止按 `## 技术中止上报` 处理；`review-alignment` 不进入本节。
-
-### 评论格式
-
-```text
-[@<repair-agent>](mention://agent/<repair-agent-uuid>)
-
-CR: <cr_id> | stage: <stage> | repair-target: <repair-target> | attempt: <attempt>/<max>
-
-请在权威 workspace 的指定产物上执行回修：
-- 产物/入口: <portable path or context-provided authoritative path>
-- Blockers:
-  - <原 blocker，保留固定前缀、位置、事实、影响、修复方向>
-- 完成后请按当前 reviewLoop 重新提交/checkpoint，并只 mention quality-reviewer-agent 发起独立复评。
-```
-
-上述模板中的 `<repair-agent-uuid>` 必须替换为实时 UUID；不得把尖括号占位符原样发布。
+不代签 `approve-requirement`、`approve-tech-design`、`approve-dev-start` 或 `approve-code`，不写 `approval.yml`，不把人工审批请求当成自己的评审结论。
