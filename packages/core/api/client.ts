@@ -3365,17 +3365,33 @@ export class ApiClient {
     sessionId: string,
     content: string,
     attachmentIds?: string[],
+    opts?: {
+      coordinatorRequest?: "none" | "mention" | "analyze" | "summarize";
+      idempotencyKey?: string;
+    },
   ): Promise<SendChatMessageResponse> {
     const body: {
       content: string;
       attachment_ids?: string[];
+      coordinator_request?: "none" | "mention" | "analyze" | "summarize";
     } = { content };
     if (attachmentIds && attachmentIds.length > 0) {
       body.attachment_ids = attachmentIds;
     }
+    if (opts?.coordinatorRequest) {
+      body.coordinator_request = opts.coordinatorRequest;
+    }
+    const headers: Record<string, string> = {};
+    // CR-2026-059 §3.4: the shared Discussion send requires the
+    // Idempotency-Key header; a non-empty key adds it (the private path
+    // keeps its previous header-less behavior).
+    if (opts?.idempotencyKey) {
+      headers["Idempotency-Key"] = opts.idempotencyKey;
+    }
     const raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify(body),
+      headers,
     });
     const response = parseWithFallback<SendChatMessageResponse | null>(
       raw,
@@ -3755,20 +3771,47 @@ export class ApiClient {
   }
 
   // Merge-forward selected Discussion messages to the project Team Agent as
-  // ONE merged message + ONE task (CR-2026-012 DD-7/DD-8). registerCr
-  // appends the requirement-register instruction block to the merged content.
-  // Non-2xx responses (400 invalid_comment_selection / 403 presenter_required
-  // / 409 team_agent_not_configured / 429 project_queue_full / 502
-  // enqueue_failed) throw a structured ApiError the caller branches on; on
-  // 429/403 the caller keeps the multi-select state (DD-6).
+  // ONE merged message + ONE task (CR-2026-012 DD-7/DD-8 + CR-2026-059
+  // §3.5). The selection is mutually exclusive:
+  //   - { messageIds }: the shared-session arm — body {message_ids, register_cr}
+  //     and a REQUIRED Idempotency-Key header (the client throws without it,
+  //     nothing is sent);
+  //   - { commentIds }: the legacy container arm — body {comment_ids,
+  //     register_cr}, no header (byte-for-byte legacy contract).
+  // registerCr appends the requirement-register instruction block.
+  // Non-2xx responses (400 invalid_*_selection / 403 presenter_required /
+  // 409 team_agent_not_configured / idempotency_key_reused / 429
+  // project_queue_full / 502 enqueue_failed) throw a structured ApiError the
+  // caller branches on; on 429/403 the caller keeps the multi-select state
+  // (DD-6).
   async mergeForwardDiscussion(
     projectId: string,
-    commentIds: string[],
+    selection: { commentIds: string[] } | { messageIds: string[] },
     registerCr: boolean,
+    idempotencyKey?: string,
   ): Promise<ProjectChatSendResult> {
+    if ("messageIds" in selection) {
+      if (!idempotencyKey) {
+        // Caller's responsibility: the message_ids arm requires the header.
+        throw new ApiError(
+          "Idempotency-Key is required for the message_ids arm",
+          400,
+          "Bad Request",
+          { code: "idempotency_key_required" },
+        );
+      }
+      const raw = await this.fetch<unknown>(`/api/projects/${projectId}/chat/merge-forward`, {
+        method: "POST",
+        body: JSON.stringify({ message_ids: selection.messageIds, register_cr: registerCr }),
+        headers: { "Idempotency-Key": idempotencyKey },
+      });
+      return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
+        endpoint: "POST /api/projects/:id/chat/merge-forward",
+      });
+    }
     const raw = await this.fetch<unknown>(`/api/projects/${projectId}/chat/merge-forward`, {
       method: "POST",
-      body: JSON.stringify({ comment_ids: commentIds, register_cr: registerCr }),
+      body: JSON.stringify({ comment_ids: selection.commentIds, register_cr: registerCr }),
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/merge-forward",

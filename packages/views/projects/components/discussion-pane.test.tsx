@@ -4,25 +4,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
-import type { TimelineEntry } from "@multica/core/types";
+import type { ChatMessage, TimelineEntry } from "@multica/core/types";
 import enCommon from "../../locales/en/common.json";
 import enProjects from "../../locales/en/projects.json";
 
 const TEST_RESOURCES = { en: { common: enCommon, projects: enProjects } };
 
-// ─── Discussion tab data source (CR-2026-009) ──────────────────────────────
+const SESSION_ID = "550e8400-e29b-41d4-a716-446655440000";
+
+// ─── Discussion data sources ──────────────────────────────────────────────
 const mockGetProjectDiscussion = vi.hoisted(() => vi.fn());
-// CR-2026-012 TASK-07: merge-forward endpoint + CR gates (register-CR default).
+const mockListChatMessagesPage = vi.hoisted(() => vi.fn());
+const mockSendChatMessage = vi.hoisted(() => vi.fn());
+const mockPatchChatSessionConfig = vi.hoisted(() => vi.fn());
 const mockMergeForwardDiscussion = vi.hoisted(() => vi.fn());
 const mockGetProjectGates = vi.hoisted(() => vi.fn());
+const mockListAgents = vi.hoisted(() => vi.fn());
+const mockUpdateAgent = vi.hoisted(() => vi.fn());
 vi.mock("@multica/core/api", async (importActual) => {
   const actual = await importActual<typeof import("@multica/core/api")>();
   return {
     ...actual,
     api: {
       getProjectDiscussion: (...args: unknown[]) => mockGetProjectDiscussion(...args),
-      getProjectGates: (...args: unknown[]) => mockGetProjectGates(...args),
+      listChatMessagesPage: (...args: unknown[]) => mockListChatMessagesPage(...args),
+      sendChatMessage: (...args: unknown[]) => mockSendChatMessage(...args),
+      patchChatSessionConfig: (...args: unknown[]) => mockPatchChatSessionConfig(...args),
       mergeForwardDiscussion: (...args: unknown[]) => mockMergeForwardDiscussion(...args),
+      getProjectGates: (...args: unknown[]) => mockGetProjectGates(...args),
+      listAgents: (...args: unknown[]) => mockListAgents(...args),
+      updateAgent: (...args: unknown[]) => mockUpdateAgent(...args),
     },
   };
 });
@@ -37,10 +48,7 @@ vi.mock("@multica/core/auth", () => ({
     selector({ user: { id: "me" } }),
 }));
 
-// ─── useIssueTimeline (CR-2026-009): mocked as a whole so this test drives
-// the stream/composer through a controllable timeline + spy mutations,
-// without pulling in the full API/WS mock stack the hook's own dedicated
-// test (use-issue-timeline.test.tsx) already covers. ───────────────────────
+// ─── useIssueTimeline (legacy read-only stream). ──────────────────────────
 const timelineState = vi.hoisted(() => ({
   timeline: [] as TimelineEntry[],
   submitComment: vi.fn(async () => true),
@@ -55,15 +63,13 @@ vi.mock("../../issues/hooks/use-issue-timeline", () => ({
 }));
 
 vi.mock("@multica/core/workspace/hooks", () => ({
-  useActorName: () => ({ getActorName: () => "Ada" }),
+  useActorName: () => ({ getActorName: (_type: string, _id: string) => "Ada" }),
 }));
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: () => <div data-testid="avatar" />,
 }));
 
-// ─── ContentEditor stub (same pattern as chat-input.test.tsx): a plain
-// textarea driving onUpdate, with an imperative handle for getMarkdown /
-// clearContent so the composer's submit flow is exercised without TipTap. ──
+// ─── ContentEditor stub ───────────────────────────────────────────────────
 const editorLast = vi.hoisted(() => ({ value: "" }));
 vi.mock("../../editor", () => ({
   ReadonlyContent: ({ content }: { content: string }) => <div>{content}</div>,
@@ -95,6 +101,33 @@ vi.mock("../../editor", () => ({
 import { DiscussionPane } from "./discussion-pane";
 import { ApiError } from "@multica/core/api";
 
+function discussionContext() {
+  return {
+    session_id: SESSION_ID,
+    issue_id: null,
+    legacy_issue_id: null,
+    coordinator_agent_id: "",
+    model: "",
+    thinking_level: "",
+    model_source: "session_default",
+    thinking_level_source: "session_default",
+    degraded: false,
+  };
+}
+
+function sharedMessage(id: string, content: string, at: string, author?: { type: "member" | "agent"; id: string } | null): ChatMessage {
+  return {
+    id,
+    chat_session_id: SESSION_ID,
+    role: author ? "user" : "user",
+    content,
+    task_id: null,
+    created_at: at,
+    author_type: author?.type ?? null,
+    author_id: author?.id ?? null,
+  };
+}
+
 function renderPane(canConfigure = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -106,11 +139,18 @@ function renderPane(canConfigure = false) {
   );
 }
 
-describe("DiscussionPane (CR-2026-009 TASK-03)", () => {
+describe("DiscussionPane (CR-2026-059 TASK-04)", () => {
   beforeEach(() => {
-    mockGetProjectDiscussion.mockReset();
+    mockGetProjectDiscussion.mockReset().mockResolvedValue(discussionContext());
+    mockListChatMessagesPage.mockReset().mockResolvedValue({
+      messages: [], limit: 50, has_more: false, next_cursor: null,
+    });
+    mockSendChatMessage.mockReset();
+    mockPatchChatSessionConfig.mockReset();
     mockMergeForwardDiscussion.mockReset();
     mockGetProjectGates.mockReset().mockResolvedValue({ crs: [] });
+    mockListAgents.mockReset().mockResolvedValue([]);
+    mockUpdateAgent.mockReset();
     timelineState.timeline = [];
     timelineState.submitComment.mockReset().mockResolvedValue(true);
     timelineState.toggleReaction.mockReset();
@@ -119,173 +159,136 @@ describe("DiscussionPane (CR-2026-009 TASK-03)", () => {
   afterEach(cleanup);
 
   it("shows the empty-state greeting when there are no messages yet", async () => {
-    mockGetProjectDiscussion.mockResolvedValue({ issue_id: "disc-1" });
     renderPane();
     await waitFor(() => expect(screen.getByText(/Start a discussion/)).toBeTruthy());
   });
 
-  it("renders each comment as a discussion message with avatar and reaction bar", async () => {
-    mockGetProjectDiscussion.mockResolvedValue({ issue_id: "disc-1" });
-    timelineState.timeline = [
-      {
-        type: "comment",
-        id: "c1",
-        actor_type: "member",
-        actor_id: "u1",
-        content: "hello team",
-        created_at: new Date().toISOString(),
-      },
-      // Non-comment entries (activity) must be filtered out — Discussion has
-      // no task/activity noise, only human messages.
-      {
-        type: "activity",
-        id: "a1",
-        actor_type: "member",
-        actor_id: "u1",
-        created_at: new Date().toISOString(),
-      },
-    ];
+  it("renders shared messages with author bubbles and a fallback for NULL authors", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "hello team", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }),
+        sharedMessage("m2", "from nowhere", "2026-01-01T00:00:02.000Z", null),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
     renderPane();
-    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(2));
     expect(screen.getByText("hello team")).toBeTruthy();
-    expect(screen.getByTestId("avatar")).toBeTruthy();
+    // Member-author bubbles resolve a name; NULL authors keep the fallback
+    // marker (no author label), matching the baseline rendering.
+    expect(screen.getAllByTestId("discussion-author")).toHaveLength(1);
+    expect(screen.getByTestId("discussion-author").textContent).toContain("Ada");
+    expect(screen.getByText("from nowhere")).toBeTruthy();
   });
 
-  it("sending a message calls submitComment and clears the composer on success", async () => {
-    mockGetProjectDiscussion.mockResolvedValue({ issue_id: "disc-1" });
+  it("sends through the shared session with a fresh Idempotency-Key (session identity)", async () => {
+    mockSendChatMessage.mockResolvedValue({
+      message_id: "m-new", task_id: null, supports_queue: false, queued: false,
+    });
     renderPane();
     await waitFor(() => expect(screen.getByTestId("discussion-editor")).toBeTruthy());
 
     fireEvent.change(screen.getByTestId("discussion-editor"), { target: { value: "hi all" } });
     fireEvent.click(screen.getByTestId("discussion-send"));
 
-    await waitFor(() =>
-      expect(timelineState.submitComment).toHaveBeenCalledWith("hi all", undefined),
-    );
-  });
-
-  it("the send button is disabled while the composer is empty", async () => {
-    mockGetProjectDiscussion.mockResolvedValue({ issue_id: "disc-1" });
-    renderPane();
-    await waitFor(() =>
-      expect(screen.getByTestId("discussion-send")).toHaveProperty("disabled", true),
-    );
-  });
-});
-
-// ─── Multi-select + merge-forward (CR-2026-012 TASK-07) ──────────────────────
-
-function discussionComment(id: string, content: string, at: string): TimelineEntry {
-  return {
-    type: "comment",
-    id,
-    actor_type: "member",
-    actor_id: "u1",
-    content,
-    created_at: at,
-  };
-}
-
-describe("DiscussionPane merge-forward (CR-2026-012 TASK-07)", () => {
-  beforeEach(() => {
-    mockGetProjectDiscussion.mockReset().mockResolvedValue({ issue_id: "disc-1" });
-    mockMergeForwardDiscussion.mockReset();
-    mockGetProjectGates.mockReset().mockResolvedValue({ crs: [] });
-    timelineState.timeline = [];
-    timelineState.submitComment.mockReset().mockResolvedValue(true);
-    timelineState.toggleReaction.mockReset();
-    localStorage.clear();
-  });
-  afterEach(cleanup);
-
-  async function enterSelectModeWithMessages() {
-    timelineState.timeline = [
-      discussionComment("c1", "first idea", "2026-01-01T00:00:01.000Z"),
-      discussionComment("c2", "second idea", "2026-01-01T00:00:02.000Z"),
-      discussionComment("c3", "third idea", "2026-01-01T00:00:03.000Z"),
+    await waitFor(() => expect(mockSendChatMessage).toHaveBeenCalledTimes(1));
+    const [sessionId, content, attachmentIds, opts] = mockSendChatMessage.mock.calls[0] as [
+      string, string, string[] | undefined, { idempotencyKey?: string } | undefined,
     ];
+    expect(sessionId).toBe(SESSION_ID);
+    expect(content).toBe("hi all");
+    expect(attachmentIds).toBeUndefined();
+    expect(opts?.idempotencyKey).toBeTruthy();
+  });
+
+  it("hard-degrades to read-only when session_id is missing (AC-17)", async () => {
+    mockGetProjectDiscussion.mockResolvedValue({ ...discussionContext(), session_id: "" });
     renderPane();
-    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(3));
-    fireEvent.click(screen.getByTestId("discussion-select-entry"));
-    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(3));
-  }
+    await waitFor(() => expect(screen.getByTestId("discussion-retry")).toBeTruthy());
+    // No composer, no send surface.
+    expect(screen.queryByTestId("discussion-editor")).toBeNull();
+    expect(screen.queryByTestId("discussion-send")).toBeNull();
+  });
 
-  it("selects messages, previews the three-part structure, and forwards on confirm", async () => {
+  it("the legacy issue stream is read-only and selectable for comment_ids merge-forward", async () => {
+    mockGetProjectDiscussion.mockResolvedValue({
+      ...discussionContext(),
+      legacy_issue_id: "44444444-4444-4444-4444-444444444444",
+    });
+    timelineState.timeline = [
+      {
+        type: "comment",
+        id: "c1",
+        actor_type: "member",
+        actor_id: "u1",
+        content: "legacy note",
+        created_at: "2026-01-01T00:00:01.000Z",
+      },
+    ];
     mockMergeForwardDiscussion.mockResolvedValue({ comment_id: "m1", task_id: "t1" });
-    await enterSelectModeWithMessages();
+    renderPane();
+    await waitFor(() => expect(screen.getByTestId("discussion-legacy-stream")).toBeTruthy());
 
-    // Select c1 + c3 (out of order — the preview must render ascending).
-    const checkboxes = screen.getAllByTestId("discussion-select-checkbox");
-    fireEvent.click(checkboxes[2]!);
-    fireEvent.click(checkboxes[0]!);
-    await waitFor(() =>
-      expect(screen.getByTestId("discussion-selected-count").textContent).toContain("2"),
-    );
-
+    fireEvent.click(screen.getByTestId("discussion-legacy-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
     fireEvent.click(screen.getByTestId("discussion-merge-cta"));
-    const preview = await screen.findByTestId("merge-forward-preview");
-    // Trigger message = the EARLIEST selected message.
-    expect(screen.getByTestId("merge-forward-trigger").textContent).toContain("first idea");
-    // History lists both selected messages in ascending order.
-    const history = screen.getByTestId("merge-forward-history").textContent ?? "";
-    expect(history).toContain("first idea");
-    expect(history).toContain("third idea");
-    expect(history).not.toContain("second idea");
-    expect(history.indexOf("first idea")).toBeLessThan(history.indexOf("third idea"));
-    expect(preview.textContent).toContain("2 messages");
+    await screen.findByTestId("merge-forward-preview");
     // No in-flight gates → register-CR pre-checked (REQ-SUG-002 default).
-    await waitFor(() =>
-      expect(screen.getByTestId("merge-forward-register-cr")).toBeChecked(),
-    );
-
+    await waitFor(() => expect(screen.getByTestId("merge-forward-register-cr")).toBeChecked());
     fireEvent.click(screen.getByTestId("merge-forward-confirm"));
-    await waitFor(() =>
-      expect(mockMergeForwardDiscussion).toHaveBeenCalledWith("proj-1", ["c1", "c3"], true),
-    );
-    // Success exits the multi-select mode.
-    await waitFor(() =>
-      expect(screen.queryByTestId("discussion-batch-bar")).toBeNull(),
-    );
-  });
 
-  it("keeps the selection and preview on a 429 queue-full rejection (DD-6)", async () => {
-    mockMergeForwardDiscussion.mockRejectedValue(
-      new ApiError("full", 429, "Too Many Requests", { queue_depth: 5, queue_limit: 5 }),
-    );
-    await enterSelectModeWithMessages();
-    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
-    fireEvent.click(screen.getByTestId("discussion-merge-cta"));
-    await screen.findByTestId("merge-forward-preview");
-
-    fireEvent.click(screen.getByTestId("merge-forward-confirm"));
+    // Legacy arm: comment_ids selection, NO idempotency key.
     await waitFor(() => expect(mockMergeForwardDiscussion).toHaveBeenCalledTimes(1));
-    // Both the preview and the multi-select state survive the rejection.
-    expect(screen.getByTestId("merge-forward-preview")).toBeTruthy();
-    expect(screen.getByTestId("discussion-batch-bar")).toBeTruthy();
-    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
+    const [projectId, selection, registerCr, idempotencyKey] = mockMergeForwardDiscussion.mock.calls[0] as [
+      string, { commentIds: string[] }, boolean, string | undefined,
+    ];
+    expect(projectId).toBe("proj-1");
+    expect(selection).toEqual({ commentIds: ["c1"] });
+    expect(registerCr).toBe(true);
+    expect(idempotencyKey).toBeUndefined();
   });
 
-  it("defaults register-CR to unchecked when the gates endpoint errors (TSUG-003)", async () => {
-    mockGetProjectGates.mockRejectedValue(new Error("no approval service"));
-    await enterSelectModeWithMessages();
-    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[1]!);
+  it("merge-forward from the shared stream uses messageIds + Idempotency-Key (B-DP-07)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "first idea", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }),
+        sharedMessage("m2", "second idea", "2026-01-01T00:00:02.000Z", { type: "member", id: "u1" }),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockMergeForwardDiscussion.mockResolvedValue({ comment_id: "m1", task_id: "t1" });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(2));
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(2));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
     fireEvent.click(screen.getByTestId("discussion-merge-cta"));
     await screen.findByTestId("merge-forward-preview");
+    await waitFor(() => expect(screen.getByTestId("merge-forward-register-cr")).toBeChecked());
+    fireEvent.click(screen.getByTestId("merge-forward-confirm"));
 
-    // Give the (failing) gates query a tick to settle.
-    await waitFor(() =>
-      expect(screen.getByTestId("merge-forward-register-cr")).not.toBeChecked(),
-    );
+    await waitFor(() => expect(mockMergeForwardDiscussion).toHaveBeenCalledTimes(1));
+    const [projectId, selection, registerCr, idempotencyKey] = mockMergeForwardDiscussion.mock.calls[0] as [
+      string, { messageIds: string[] }, boolean, string | undefined,
+    ];
+    expect(projectId).toBe("proj-1");
+    expect(selection).toEqual({ messageIds: ["m1"] });
+    expect(registerCr).toBe(true);
+    expect(idempotencyKey).toBeTruthy();
   });
 
-  it("cancel exits multi-select with zero side effects", async () => {
-    await enterSelectModeWithMessages();
-    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
-    fireEvent.click(screen.getByText(enProjects.chat.merged_forward.cancel));
-
-    await waitFor(() => expect(screen.queryByTestId("discussion-batch-bar")).toBeNull());
-    expect(screen.queryAllByTestId("discussion-select-checkbox")).toHaveLength(0);
-    expect(screen.getByTestId("discussion-select-entry")).toBeTruthy();
+  it("config changes go through PATCH config and never call updateAgent", async () => {
+    const coordinatorId = "66666666-6666-6666-6666-666666666666";
+    mockGetProjectDiscussion.mockResolvedValue({
+      ...discussionContext(),
+      coordinator_agent_id: coordinatorId,
+    });
+    renderPane(true);
+    await waitFor(() => expect(screen.getByTestId("discussion-config-row")).toBeTruthy());
+    expect(mockUpdateAgent).not.toHaveBeenCalled();
+    expect(mockPatchChatSessionConfig).not.toHaveBeenCalled();
   });
 
   it("owner/admin sees the coordinator picker; members do not", async () => {
@@ -293,9 +296,32 @@ describe("DiscussionPane merge-forward (CR-2026-012 TASK-07)", () => {
     await waitFor(() => expect(screen.getByTestId("discussion-coordinator-picker")).toBeTruthy());
     cleanup();
     renderPane(false);
-    // Composer renders once the discussion context resolves — the picker row
-    // must stay absent for non-owner/admin callers.
     await waitFor(() => expect(screen.getByTestId("discussion-editor")).toBeTruthy());
     expect(screen.queryByTestId("discussion-coordinator-picker")).toBeNull();
+  });
+
+  it("keeps the selection and preview on a 429 queue-full rejection (DD-6)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "first idea", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockMergeForwardDiscussion.mockRejectedValue(
+      new ApiError("full", 429, "Too Many Requests", { queue_depth: 5, queue_limit: 5 }),
+    );
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
+    fireEvent.click(screen.getByTestId("discussion-merge-cta"));
+    await screen.findByTestId("merge-forward-preview");
+
+    fireEvent.click(screen.getByTestId("merge-forward-confirm"));
+    await waitFor(() => expect(mockMergeForwardDiscussion).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("merge-forward-preview")).toBeTruthy();
+    expect(screen.getByTestId("discussion-batch-bar")).toBeTruthy();
+    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
   });
 });

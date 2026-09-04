@@ -203,7 +203,16 @@
     "team_agent_setup_failed": "Failed to set the Team Agent, please try again",
     "discussion": {
       "sub": "Send a message to start discussing.",
-      "composer_placeholder": "Message the team…"
+      "composer_placeholder": "Message the team…",
+      "unavailable_sub": "The shared session could not be resolved. You can retry, or keep reading older messages.",
+      "config_unavailable": "This session's config can no longer be changed.",
+      "retry": "Retry",
+      "unavailable_title": "Discussion is unavailable on this workspace",
+      "send_conflict": "The draft attachment is already bound elsewhere. Please re-upload and retry.",
+      "send_failed": "Failed to send the message. Your draft is kept.",
+      "legacy_section_title": "Earlier messages (read-only)",
+      "assistant_label": "A",
+      "unknown_member": "?"
     },
     "stream": {
       "no_earlier": "No earlier messages",
