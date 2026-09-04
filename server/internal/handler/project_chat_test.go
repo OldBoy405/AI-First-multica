@@ -39,10 +39,10 @@ func TestProjectTeamAgentID(t *testing.T) {
 	}
 }
 
-// TestGetProjectDiscussion covers the CR-2026-009 entry endpoint: it must
-// lazily create the Discussion container issue on first call and return the
-// same issue_id on every subsequent call for the same project (idempotent
-// lazy creation, mirroring GetProjectChat's contract).
+// TestGetProjectDiscussion covers the CR-2026-059 entry endpoint (AC-1): it
+// must lazily create the shared Discussion session on first call and return
+// the same session_id on every subsequent call, issue_id stays null forever,
+// and NO container issue (origin_type='project_discussion') is created.
 func TestGetProjectDiscussion(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -72,15 +72,40 @@ func TestGetProjectDiscussion(t *testing.T) {
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode response: %v", err)
 		}
-		if resp.IssueID == "" {
-			t.Fatalf("expected a non-empty issue_id")
+		if resp.SessionID == "" {
+			t.Fatalf("expected a non-empty session_id")
+		}
+		if resp.IssueID != nil {
+			t.Fatalf("issue_id must stay null, got %q", *resp.IssueID)
 		}
 		return resp
 	}
 
 	first := call()
 	second := call()
-	if second.IssueID != first.IssueID {
-		t.Fatalf("GetProjectDiscussion is not idempotent: first=%s second=%s", first.IssueID, second.IssueID)
+	if second.SessionID != first.SessionID {
+		t.Fatalf("GetProjectDiscussion is not idempotent: first=%s second=%s", first.SessionID, second.SessionID)
+	}
+
+	// AC-1: opening the pane never creates a container issue.
+	var issueCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*) FROM issue WHERE workspace_id = $1 AND origin_type = 'project_discussion'
+	`, testWorkspaceID).Scan(&issueCount); err != nil {
+		t.Fatalf("count container issues: %v", err)
+	}
+	if issueCount != 0 {
+		t.Fatalf("GetProjectDiscussion created %d container issue(s), want 0 (AC-1)", issueCount)
+	}
+
+	// The shared session row exists exactly once (kind=project_shared).
+	var sessionKind string
+	if err := testPool.QueryRow(ctx, `
+		SELECT kind FROM chat_session WHERE id = $1
+	`, first.SessionID).Scan(&sessionKind); err != nil {
+		t.Fatalf("read shared session: %v", err)
+	}
+	if sessionKind != "project_shared" {
+		t.Fatalf("session kind = %q, want project_shared", sessionKind)
 	}
 }

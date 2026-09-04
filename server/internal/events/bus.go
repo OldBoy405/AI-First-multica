@@ -28,6 +28,13 @@ type Event struct {
 	// ChatSessionID MUST set this too; the bridge fails closed (drops the
 	// event with an ERROR log) rather than fall back to broadcasting.
 	ChatRecipientID string
+
+	// ChatSessionKind mirrors chat_session.kind at production time
+	// (CR-2026-059 §3.7). Realtime routing uses it to fan shared-session
+	// events out to the workspace room. Producers MUST set it together with
+	// ChatSessionID; the bridge treats an empty value as private (fail-closed
+	// toward the narrower delivery).
+	ChatSessionKind string
 }
 
 // Handler is a function that processes an event.

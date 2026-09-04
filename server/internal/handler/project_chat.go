@@ -13,6 +13,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	publicapi "github.com/multica-ai/multica/server/pkg/publicapi/v1"
 )
 
 // ProjectChatResponse is the entry payload for a project's Team Agent group
@@ -208,19 +209,27 @@ func parseChatConfigFieldPatch(raw json.RawMessage) (service.ChatConfigFieldPatc
 }
 
 // ProjectDiscussionResponse is the entry payload for a project's Discussion
-// tab (CR-2026-009): the hidden container issue that anchors the pure-human,
-// agent-free message stream. CR-2026-012 adds the optional Discussion
-// Coordinator binding: when set, @-mentioning that agent in Discussion
-// activates it (the controlled opening of the CR-2026-009 red line).
+// tab (CR-2026-009 → CR-2026-059 §3.1): the shared chat session, not a hidden
+// container issue. issue_id stays nil forever; legacy_issue_id is the
+// read-only replay handle for the pre-CR container issue (never created,
+// never written).
 type ProjectDiscussionResponse struct {
-	IssueID string `json:"issue_id"`
-	// CoordinatorAgentID is the bound Discussion Coordinator's agent id;
-	// empty when unconfigured (Discussion stays agent-free — the red line).
-	CoordinatorAgentID string `json:"coordinator_agent_id,omitempty"`
+	SessionID           string  `json:"session_id"`
+	IssueID             *string `json:"issue_id"` // always nil (JSON null)
+	LegacyIssueID       *string `json:"legacy_issue_id"`
+	CoordinatorAgentID  string  `json:"coordinator_agent_id"`
+	Model               string  `json:"model"`
+	ThinkingLevel       string  `json:"thinking_level"`
+	ModelSource         string  `json:"model_source"`
+	ThinkingLevelSource string  `json:"thinking_level_source"`
 }
 
 // GetProjectDiscussion resolves (lazily creating on first use) the project's
-// hidden Discussion container issue. GET /api/projects/{id}/discussion.
+// shared Discussion session. GET /api/projects/{id}/discussion.
+//
+// CR-2026-059 (SDD §3.1, FR-1): the container issue is never created and
+// EnsureProjectDiscussionIssue is no longer called from this path. Non-members
+// get 403 forbidden_project_discussion; a project outside the workspace is 404.
 func (h *Handler) GetProjectDiscussion(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
 	if !ok {
@@ -247,15 +256,29 @@ func (h *Handler) GetProjectDiscussion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid user id")
 		return
 	}
-	issue, err := h.IssueService.EnsureProjectDiscussionIssue(r.Context(), project.WorkspaceID, project.ID, callerUUID)
+	// Member gate (SDD §3.1/FR-25): the project path answers 403 — unlike the
+	// session paths, existence is already confirmed by the project lookup.
+	if _, err := h.getWorkspaceMember(r.Context(), userID, h.resolveWorkspaceID(r)); err != nil {
+		writeErrorCode(w, http.StatusForbidden, "forbidden_project_discussion", "project discussion requires workspace membership")
+		return
+	}
+
+	view, err := service.EnsureProjectDiscussionSession(r.Context(), h.discussionSessionDeps(),
+		pgToUUID(project.WorkspaceID), pgToUUID(project.ID), pgToUUID(callerUUID))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve project discussion")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, ProjectDiscussionResponse{
-		IssueID:            uuidToString(issue.ID),
-		CoordinatorAgentID: projectTeamAgentSetting(project.Settings, service.ProjectSettingDiscussionCoordinatorID),
+		SessionID:           view.SessionID,
+		IssueID:             nil,
+		LegacyIssueID:       view.LegacyIssueID,
+		CoordinatorAgentID:  view.CoordinatorAgentID,
+		Model:               view.Model,
+		ThinkingLevel:       view.ThinkingLevel,
+		ModelSource:         view.ModelSource,
+		ThinkingLevelSource: view.ThinkingLevelSource,
 	})
 }
 
@@ -630,6 +653,10 @@ func writePresenterRequired(w http.ResponseWriter, required *service.ErrPresente
 // MergeForwardDiscussionRequest is the body of POST /api/projects/{id}/chat/merge-forward.
 type MergeForwardDiscussionRequest struct {
 	CommentIDs []string `json:"comment_ids"`
+	// MessageIDs is the CR-2026-059 shared-session selection arm. The two arms
+	// are mutually exclusive: a request carrying both is rejected with
+	// invalid_merge_forward_selection.
+	MessageIDs []string `json:"message_ids"`
 	// RegisterCR appends the requirement-register instruction block to the
 	// merged message (DD-8): pure comment text, zero server-side CR writes.
 	RegisterCR bool `json:"register_cr"`
@@ -642,17 +669,23 @@ const mergeForwardMaxComments = 50
 
 // MergeForwardDiscussion forwards a member's multi-select of Discussion
 // messages to the project Team Agent as ONE merged message + ONE task
-// (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12). POST /api/projects/{id}/chat/merge-forward.
+// (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12 + CR-2026-059 §3.5/§4.6).
+// POST /api/projects/{id}/chat/merge-forward.
 //
-// The request carries no session_id: the active session is ensured (created
-// on first use) inside the service, and the send kernel's lock-internal
-// checks surface a concurrent rebind as 409. The success body carries the
-// ensured session_id and the bound issue_id on top of the existing
-// comment/task fields (SDD §3.1).
+// The request carries no session_id: the active Team Agent session is ensured
+// (created on first use) inside the service, and the send kernel's
+// lock-internal checks surface a concurrent rebind as 409. Two source arms:
 //
-// Errors: 400 invalid_comment_selection (empty / over cap / any comment
-// outside this project's Discussion container; malformed ids get the generic
-// 400 from parseUUIDSliceOrBadRequest); the rest matches
+//   - message_ids (shared-session messages): mutually exclusive with
+//     comment_ids; dedup-preserving order; every message must belong to THIS
+//     project's shared Discussion session; Idempotency-Key header required;
+//     replay returns the stored first response.
+//   - comment_ids (legacy container): byte-for-byte unchanged, no header.
+//
+// Errors: 400 invalid_merge_forward_selection / invalid_message_selection /
+// invalid_comment_selection / idempotency_key_required; 403
+// forbidden_project_discussion (non-member) + kernel presenter_required; 409
+// idempotency_key_reused / team_agent_not_configured; the rest matches
 // SendProjectChatMessage's shared kernel mapping.
 func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request) {
 	projectUUID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "project id")
@@ -672,19 +705,9 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	invalidSelection := func(msg string) {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_comment_selection", msg)
-	}
-	if len(req.CommentIDs) == 0 {
-		invalidSelection("comment_ids must not be empty")
-		return
-	}
-	if len(req.CommentIDs) > mergeForwardMaxComments {
-		invalidSelection("comment_ids exceeds the 50-message cap")
-		return
-	}
-	commentUUIDs, ok := parseUUIDSliceOrBadRequest(w, req.CommentIDs, "comment_ids")
-	if !ok {
+	// Mutual exclusion first (SDD §3.5/FR-23): never merge the two arms.
+	if len(req.CommentIDs) > 0 && len(req.MessageIDs) > 0 {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_merge_forward_selection", "comment_ids and message_ids are mutually exclusive")
 		return
 	}
 
@@ -698,6 +721,27 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 	callerUUID, err := util.ParseUUID(userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	if req.MessageIDs != nil {
+		h.mergeForwardDiscussionMessages(w, r, project, callerUUID, req)
+		return
+	}
+
+	invalidSelection := func(msg string) {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_comment_selection", msg)
+	}
+	if len(req.CommentIDs) == 0 {
+		invalidSelection("comment_ids must not be empty")
+		return
+	}
+	if len(req.CommentIDs) > mergeForwardMaxComments {
+		invalidSelection("comment_ids exceeds the 50-message cap")
+		return
+	}
+	commentUUIDs, ok := parseUUIDSliceOrBadRequest(w, req.CommentIDs, "comment_ids")
+	if !ok {
 		return
 	}
 
@@ -730,6 +774,102 @@ func (h *Handler) MergeForwardDiscussion(w http.ResponseWriter, r *http.Request)
 	result, err := h.IssueService.MergeForwardDiscussion(r.Context(),
 		project.WorkspaceID, project.ID, callerUUID, comments, nil, req.RegisterCR, "")
 	if err != nil {
+		writeProjectChatSendError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, SendProjectChatMessageResponse{
+		SessionID: result.SessionID,
+		IssueID:   result.IssueID,
+		CommentID: result.CommentID,
+		TaskID:    result.TaskID,
+	})
+}
+
+// mergeForwardDiscussionMessages runs the shared-session message_ids arm
+// (SDD §3.5, FR-23/FR-24): Idempotency-Key gate, dedup-preserving selection
+// validation against THIS project's shared Discussion session (active OR
+// archived), an instant membership re-check before dispatch, then the
+// extended service path (idempotent around the unchanged kernel).
+func (h *Handler) mergeForwardDiscussionMessages(w http.ResponseWriter, r *http.Request, project db.Project, callerUUID pgtype.UUID, req MergeForwardDiscussionRequest) {
+	invalidMessage := func(msg string) {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_message_selection", msg)
+	}
+	// Membership (SDD §3.5): the project path answers 403.
+	if _, err := h.getWorkspaceMember(r.Context(), uuidToString(callerUUID), uuidToString(project.WorkspaceID)); err != nil {
+		writeErrorCode(w, http.StatusForbidden, "forbidden_project_discussion", "project discussion requires workspace membership")
+		return
+	}
+	// Idempotency-Key is required for the message_ids arm only (SDD §3.5).
+	idempotencyKey := r.Header.Get(publicapi.HeaderIdempotencyKey)
+	if idempotencyKey == "" || len(idempotencyKey) > publicapi.MaxIdempotencyBytes {
+		writeErrorCode(w, http.StatusBadRequest, "idempotency_key_required", "Idempotency-Key header is required (at most 255 bytes)")
+		return
+	}
+	if len(req.MessageIDs) > mergeForwardMaxComments {
+		invalidMessage("message_ids exceeds the 50-message cap")
+		return
+	}
+	// Dedup by first occurrence (SDD §3.5, same semantics as the comment
+	// arm); a duplicate renders the message twice otherwise.
+	seen := make(map[pgtype.UUID]struct{}, len(req.MessageIDs))
+	messageUUIDs := make([]pgtype.UUID, 0, len(req.MessageIDs))
+	for _, raw := range req.MessageIDs {
+		id, err := util.ParseUUID(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "message_ids must be UUIDs")
+			return
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		messageUUIDs = append(messageUUIDs, id)
+	}
+	if len(messageUUIDs) == 0 {
+		invalidMessage("message_ids must not be empty")
+		return
+	}
+
+	// Every message must belong to THIS project's shared Discussion session
+	// (active or archived); private sessions, other projects and ordinary
+	// issues are rejected wholesale (SDD §3.5).
+	messages := make([]db.ChatMessage, 0, len(messageUUIDs))
+	for _, id := range messageUUIDs {
+		message, merr := h.Queries.GetChatMessageInWorkspace(r.Context(), db.GetChatMessageInWorkspaceParams{
+			ID: id, WorkspaceID: project.WorkspaceID,
+		})
+		if merr != nil {
+			invalidMessage("every message must belong to this project's shared Discussion")
+			return
+		}
+		session, serr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+			ID: message.ChatSessionID, WorkspaceID: project.WorkspaceID,
+		})
+		if serr != nil || session.Kind != chatSessionKindProjectShared || session.ProjectID != project.ID {
+			invalidMessage("every message must belong to this project's shared Discussion")
+			return
+		}
+		messages = append(messages, message)
+	}
+
+	// Instant membership re-check right before dispatch (SDD §3.5): the
+	// kernel's presenter guard + revoke-side presenter reclaim is the second
+	// layer; this read covers the member-row delete race.
+	if _, err := h.Queries.GetMemberByUserAndWorkspace(r.Context(), db.GetMemberByUserAndWorkspaceParams{
+		UserID: callerUUID, WorkspaceID: project.WorkspaceID,
+	}); err != nil {
+		writeErrorCode(w, http.StatusForbidden, "forbidden_project_discussion", "project discussion requires workspace membership")
+		return
+	}
+
+	result, err := h.IssueService.MergeForwardDiscussion(r.Context(),
+		project.WorkspaceID, project.ID, callerUUID, nil, messages, req.RegisterCR, idempotencyKey)
+	if err != nil {
+		if errors.Is(err, service.ErrIdempotencyKeyReused) {
+			writeErrorCode(w, http.StatusConflict, "idempotency_key_reused", "Idempotency-Key was already used with a different request")
+			return
+		}
 		writeProjectChatSendError(w, err)
 		return
 	}

@@ -87,6 +87,9 @@ func (r *recordingManagedRelay) Stop()                               {}
 func (r *recordingManagedRelay) Wait()                               {}
 func (r *recordingManagedRelay) BroadcastToWorkspace(string, []byte) {}
 func (r *recordingManagedRelay) Broadcast([]byte)                    {}
+func (r *recordingManagedRelay) DisconnectWorkspaceUser(userID, workspaceID string) {
+	r.PublishWithID(ScopeUser, userID, "", NewDisconnectWorkspaceControlFrame(workspaceID), "")
+}
 
 func (r *recordingManagedRelay) BroadcastToScope(scopeType, scopeID string, frame []byte) {
 	r.PublishWithID(scopeType, scopeID, "", frame, "")

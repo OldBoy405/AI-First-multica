@@ -120,6 +120,10 @@ const (
 	chatDraftAttachmentSweepInterval = 1 * time.Hour
 	// chatDraftAttachmentSweepBatchSize bounds candidates per tick.
 	chatDraftAttachmentSweepBatchSize = 100
+	// chatIdempotencySweepInterval is the cadence of the idempotency-record
+	// TTL sweeper (CR-2026-059, SDD §4.6): strictly-older-than-24h rows are
+	// deleted hourly on its own ticker, same shape as the draft sweeper.
+	chatIdempotencySweepInterval = 1 * time.Hour
 )
 
 type runtimeGCTxStarter interface {
@@ -183,6 +187,30 @@ func runChatDraftAttachmentSweeper(ctx context.Context, txStarter runtimeGCTxSta
 			}
 			if deleted > 0 {
 				slog.Info("draft attachment sweeper: deleted expired drafts", "count", deleted)
+			}
+		}
+	}
+}
+
+// runChatIdempotencySweeper deletes idempotency records strictly older than
+// 24h (CR-2026-059, SDD §4.6, FR-24). Own 1h ticker beside the draft sweeper;
+// the strict threshold keeps rows exactly 24h old this round (retention lower
+// bound semantics, matching the draft sweeper's 168h boundary).
+func runChatIdempotencySweeper(ctx context.Context, queries *db.Queries) {
+	ticker := time.NewTicker(chatIdempotencySweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := service.SweepChatIdempotency(ctx, queries, time.Now().Add(-24*time.Hour))
+			if err != nil {
+				slog.Warn("chat idempotency sweeper: sweep failed", "error", err)
+				continue
+			}
+			if deleted > 0 {
+				slog.Info("chat idempotency sweeper: deleted expired records", "count", deleted)
 			}
 		}
 	}

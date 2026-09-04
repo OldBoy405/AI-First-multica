@@ -118,8 +118,8 @@ func (q *Queries) GetChatIdempotencyByKey(ctx context.Context, arg GetChatIdempo
 
 const insertChatIdempotencyReservation = `-- name: InsertChatIdempotencyReservation :one
 
-INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint, response_status)
+VALUES ($1, $2, $3, $4, $5, $6, 0)
 ON CONFLICT ON CONSTRAINT chat_idempotency_pkey DO NOTHING
 RETURNING workspace_id, user_id, scope_type, scope_id, key, fingerprint, response_status, response_body, created_at
 `
@@ -142,8 +142,9 @@ type InsertChatIdempotencyReservationParams struct {
 // Reservation inside the send transaction. On a unique conflict PostgreSQL
 // blocks until the concurrent winner commits/rolls back, then returns no
 // rows (pgx.ErrNoRows); the caller reads the winner via
-// GetChatIdempotencyByKey. response_body stays NULL (placeholder) until the
-// owning transaction finalizes.
+// GetChatIdempotencyByKey. response_body stays NULL (placeholder) and
+// response_status stays 0 (the 487 column is NOT NULL) until the owning
+// transaction finalizes.
 func (q *Queries) InsertChatIdempotencyReservation(ctx context.Context, arg InsertChatIdempotencyReservationParams) (ChatIdempotency, error) {
 	row := q.db.QueryRow(ctx, insertChatIdempotencyReservation,
 		arg.WorkspaceID,

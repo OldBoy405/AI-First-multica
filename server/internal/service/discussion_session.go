@@ -33,8 +33,8 @@ const chatSessionKindProjectShared = "project_shared"
 
 // Discussion idempotency scope values (migration 487 CHECK enum).
 const (
-	discussionIdempotencyScopeMessage        = "discussion_message"
-	discussionIdempotencyScopeMergeForward   = "merge_forward_messages"
+	discussionIdempotencyScopeMessage      = "discussion_message"
+	discussionIdempotencyScopeMergeForward = "merge_forward_messages"
 )
 
 func discussionSessionAdvisoryKey(workspaceID, projectID pgtype.UUID) string {
@@ -46,9 +46,9 @@ func discussionSessionAdvisoryKey(workspaceID, projectID pgtype.UUID) string {
 // wires one shared instance; the service package never imports the handler
 // package (layering: handler -> service -> db).
 type DiscussionSessionDeps struct {
-	Queries *db.Queries // all DB access: WithTx, session/member/idempotency/attachment queries, agent/runtime reads
-	TxStarter TxStarter // Begin() transaction entry; handlers pass TaskService.TxStarter (single implementation)
-	TaskSvc *TaskService // mergeChatConfigContext combination, SnapshotAgentDefaults, ChatCatalog port (§4.4 L1/L2 single authority)
+	Queries   *db.Queries  // all DB access: WithTx, session/member/idempotency/attachment queries, agent/runtime reads
+	TxStarter TxStarter    // Begin() transaction entry; handlers pass TaskService.TxStarter (single implementation)
+	TaskSvc   *TaskService // mergeChatConfigContext combination, SnapshotAgentDefaults, ChatCatalog port (§4.4 L1/L2 single authority)
 }
 
 // ProjectDiscussionSessionView is the resolved display payload for
@@ -250,13 +250,13 @@ func (e *DiscussionSendError) Error() string { return "discussion send: " + e.Co
 
 // Discussion send error codes (handler mapping in TASK-03).
 const (
-	discussionErrSessionNotFound         = "chat_session_not_found"
-	discussionErrSessionClosedOrChanged  = "chat_session_closed_or_changed"
+	discussionErrSessionNotFound          = "chat_session_not_found"
+	discussionErrSessionClosedOrChanged   = "chat_session_closed_or_changed"
 	discussionErrCoordinatorNotConfigured = "discussion_coordinator_not_configured"
-	discussionErrCoordinatorUnavailable  = "discussion_coordinator_unavailable"
-	discussionErrInvalidModel            = "invalid_model_or_thinking_level"
-	discussionErrAttachmentAlreadyBound  = "attachment_already_bound"
-	discussionErrIdempotencyKeyReused    = "idempotency_key_reused"
+	discussionErrCoordinatorUnavailable   = "discussion_coordinator_unavailable"
+	discussionErrInvalidModel             = "invalid_model_or_thinking_level"
+	discussionErrAttachmentAlreadyBound   = "attachment_already_bound"
+	discussionErrIdempotencyKeyReused     = "idempotency_key_reused"
 	// discussionErrInvocationNotAllowed reuses the dispatch invocation model
 	// (ReasonInvocationNotAllowed) — no new permission enum is created.
 	discussionErrInvocationNotAllowed = "invocation_not_allowed"
@@ -716,7 +716,189 @@ func (s *TaskService) CanMemberInvokeAgent(ctx context.Context, agent db.Agent, 
 	return false
 }
 
-// UpdateProjectSettingsWithDiscussionCoordinator applies the Coordinator
+// PatchProjectDiscussionSessionConfig applies the three-state config PATCH to
+// a shared Discussion session (SDD §3.2/§4.4, FR-8/FR-9): owner/admin only,
+// workspace member gate, active-status check, then the L1/L2 provider/catalog
+// authority ladder — all inside ONE transaction on the locked session row
+// (same shape as the Private Ask patch). It NEVER calls UpdateAgent (AC-9).
+//
+// Lock order (B-AUTH-2, never reorder): LockSubscriberWrites -> session row
+// lock. A revoke that committed first surfaces as 404 at the membership
+// re-check; the whole transaction rolls back with zero writes.
+func PatchProjectDiscussionSessionConfig(ctx context.Context, deps DiscussionSessionDeps, wsID, sessionID, callerID uuid.UUID, modelPatch, thinkingPatch ChatConfigFieldPatch) (*ProjectDiscussionSessionView, error) {
+	if deps.Queries == nil || deps.TxStarter == nil || deps.TaskSvc == nil {
+		return nil, fmt.Errorf("patch project discussion session config: deps incomplete")
+	}
+	ws := pgtype.UUID{Bytes: wsID, Valid: true}
+	sid := pgtype.UUID{Bytes: sessionID, Valid: true}
+	caller := pgtype.UUID{Bytes: callerID, Valid: true}
+
+	tx, err := deps.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := deps.Queries.WithTx(tx)
+
+	// First lock: the same (workspace, user) advisory revokeAndRemoveMember
+	// takes first — send/PATCH and revoke serialize (B-AUTH-2).
+	if err := qtx.LockSubscriberWrites(ctx, db.LockSubscriberWritesParams{
+		WorkspaceID: ws, UserID: caller,
+	}); err != nil {
+		return nil, ErrChatSessionNotFound
+	}
+	// In-transaction membership re-check (advisory-visible latest state).
+	member, err := qtx.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+		UserID: caller, WorkspaceID: ws,
+	})
+	if err != nil {
+		return nil, ErrChatSessionNotFound
+	}
+	if !isOwnerOrAdmin(member.Role) {
+		return nil, ErrForbiddenChatConfig
+	}
+
+	session, err := qtx.LockChatSessionInWorkspace(ctx, db.LockChatSessionInWorkspaceParams{
+		ID: sid, WorkspaceID: ws,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChatSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock chat session: %w", err)
+	}
+	if session.Kind != chatSessionKindProjectShared || !session.ProjectID.Valid {
+		return nil, ErrChatSessionNotFound
+	}
+	if session.Status != "active" {
+		return nil, ErrChatSessionClosedOrChanged
+	}
+
+	modelOverride := applyChatConfigFieldPatch(session.ModelOverride, modelPatch)
+	thinkingOverride := applyChatConfigFieldPatch(session.ThinkingLevelOverride, thinkingPatch)
+	resolved := ResolveChatConfig(
+		session.BaseModel, modelOverride, pgtype.Text{},
+		session.BaseThinkingLevel, thinkingOverride, pgtype.Text{},
+	)
+
+	project, err := qtx.GetProjectInWorkspace(ctx, db.GetProjectInWorkspaceParams{
+		ID: session.ProjectID, WorkspaceID: ws,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reload project under session lock: %w", err)
+	}
+	configured := discussionCoordinatorIDFromSettings(project.Settings)
+
+	if err := validateProjectDiscussionConfig(ctx, qtx, deps.TaskSvc, ws, configured, resolved); err != nil {
+		return nil, err
+	}
+
+	updated, err := qtx.PatchChatSessionConfig(ctx, db.PatchChatSessionConfigParams{
+		ID:                    sid,
+		WorkspaceID:           ws,
+		ModelOverride:         modelOverride,
+		ThinkingLevelOverride: thinkingOverride,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("patch shared session config: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit config patch: %w", err)
+	}
+
+	view := ResolveChatConfig(
+		updated.BaseModel, updated.ModelOverride, pgtype.Text{},
+		updated.BaseThinkingLevel, updated.ThinkingLevelOverride, pgtype.Text{},
+	)
+	return &ProjectDiscussionSessionView{
+		SessionID:           util.UUIDToString(updated.ID),
+		CoordinatorAgentID:  discussionCoordinatorSettingRaw(project.Settings),
+		Model:               view.Model,
+		ModelSource:         string(view.ModelSource),
+		ThinkingLevel:       view.ThinkingLevel,
+		ThinkingLevelSource: string(view.ThinkingLevelSource),
+	}, nil
+}
+
+// validateProjectDiscussionConfig runs the §4.4 provider/catalog authority
+// ladder — the SINGLE validation shared by the shared PATCH and the coordinator
+// enqueue preflight (AC-21: only ResolveChatConfig / LoadChatCatalogForConfig /
+// ValidateResolvedChatConfig / runtimeVerdict are reused; no second rule set).
+//
+//   - L1: settings name a Coordinator whose agent row exists (routable or
+//     archived) → that agent is the authority (archived → Blocked → reject).
+//   - L2: unconfigured, or the configured agent was hard-deleted → the
+//     workspace ready-runtime union is the authority: a pure sentinel
+//     (both values empty) passes; otherwise the value must be accepted by at
+//     least one ready runtime's catalog, at most one bounded 30s LiveLoad
+//     round per PATCH. All rejected → fail closed.
+func validateProjectDiscussionConfig(ctx context.Context, qtx *db.Queries, taskSvc *TaskService, ws, configured pgtype.UUID, resolved ResolvedChatConfig) error {
+	if configured.Valid {
+		agent, err := qtx.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{
+			ID: configured, WorkspaceID: ws,
+		})
+		if err == nil {
+			// L1: authority = the configured agent row.
+			provider := ""
+			if agent.RuntimeID.Valid {
+				if rt, rerr := qtx.GetAgentRuntimeForWorkspace(ctx, db.GetAgentRuntimeForWorkspaceParams{
+					ID: agent.RuntimeID, WorkspaceID: ws,
+				}); rerr == nil {
+					provider = rt.Provider
+				}
+			}
+			if provider == "" || taskSvc == nil || taskSvc.ChatCatalog == nil {
+				return ErrInvalidModelOrThinkingLevel
+			}
+			catalog, cerr := LoadChatCatalogForConfig(ctx, qtx, taskSvc.ChatCatalog, agent)
+			if cerr != nil {
+				return cerr
+			}
+			return ValidateResolvedChatConfig(resolved.Model, resolved.ThinkingLevel, provider, catalog)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load configured coordinator: %w", err)
+		}
+		// Hard-deleted configured agent: fall through to L2.
+	}
+
+	// L2: workspace ready-runtime union.
+	if resolved.Model == "" && resolved.ThinkingLevel == "" {
+		return nil // pure sentinel: runtime defaults take over (FR-8)
+	}
+	if taskSvc == nil || taskSvc.ChatCatalog == nil {
+		return ErrInvalidModelOrThinkingLevel
+	}
+	runtimes, err := qtx.ListAgentRuntimes(ctx, ws)
+	if err != nil {
+		return fmt.Errorf("list agent runtimes: %w", err)
+	}
+	liveLoaded := false
+	for _, rt := range runtimes {
+		if !runtimeVerdict(rt).Ready() {
+			continue
+		}
+		runtimeID := util.UUIDToString(rt.ID)
+		catalog, ok, cerr := taskSvc.ChatCatalog.CacheLoad(ctx, runtimeID)
+		if cerr != nil || !ok {
+			if liveLoaded {
+				continue // one bounded LiveLoad round per PATCH (SDD §4.4)
+			}
+			liveCtx, cancel := context.WithTimeout(ctx, chatConfigLiveLoadTimeout)
+			catalog, cerr = taskSvc.ChatCatalog.LiveLoad(liveCtx, runtimeID)
+			cancel()
+			liveLoaded = true
+			if cerr != nil || catalog.Fallback || len(catalog.Models) == 0 {
+				continue
+			}
+		}
+		if ValidateResolvedChatConfig(resolved.Model, resolved.ThinkingLevel, rt.Provider, catalog) == nil {
+			return nil // any ready runtime accepting the value is enough
+		}
+	}
+	return ErrInvalidModelOrThinkingLevel
+}
+
 // binding change (bind / replace / unbind) in ONE transaction under the
 // Discussion session advisory (SDD §4.5, FR-26): the settings bag is the write
 // authority (written first), then the session's agent_id projection is updated

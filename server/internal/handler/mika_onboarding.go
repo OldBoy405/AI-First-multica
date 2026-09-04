@@ -184,7 +184,7 @@ func (h *Handler) StartMikaOnboarding(w http.ResponseWriter, r *http.Request) {
 		Role:          "assistant",
 		Content:       opened.Opening.Content,
 		CreatedAt:     timestampToString(opened.Opening.CreatedAt),
-	})
+	}, "private")
 
 	writeJSON(w, http.StatusCreated, startMikaOnboardingResponse{
 		Started:   true,

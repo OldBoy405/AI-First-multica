@@ -243,6 +243,14 @@ func (h *Handler) revokeAndRemoveMember(ctx context.Context, workspaceID, userID
 		return empty, err
 	}
 
+	// CR-2026-059 §4.7 (FR-25/AC-29): after the member row is gone, terminate
+	// every remaining socket of this user in this workspace — independent of
+	// revocationResult.isEmpty() (a member with no runtimes may still hold a
+	// live WS connection, and publishRevocation returns early on empty
+	// results, so it cannot carry this step). Local + cross-node via the
+	// user-scope control frame; idempotent on every relay mode.
+	h.disconnectWorkspaceUser(userID, workspaceID)
+
 	return result, nil
 }
 

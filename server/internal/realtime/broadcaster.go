@@ -39,6 +39,12 @@ type Broadcaster interface {
 	// Broadcast fans a message out to every connection on this node.
 	// Used for daemon:* events that have no workspace scope.
 	Broadcast(message []byte)
+
+	// DisconnectWorkspaceUser closes every live connection of userID in
+	// workspaceID (CR-2026-059 §4.7): a removed member's sockets are
+	// terminated server-side, locally and — via a user-scope control frame —
+	// on every node that holds one of their connections. Idempotent.
+	DisconnectWorkspaceUser(userID, workspaceID string)
 }
 
 // DaemonRuntimeDeliverer consumes daemon-runtime scoped relay frames.

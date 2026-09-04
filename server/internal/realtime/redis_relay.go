@@ -109,6 +109,13 @@ func deliverEnvelope(hub *Hub, daemonRuntime DaemonRuntimeDeliverer, ev envelope
 	if ev.PayloadJSON == "" {
 		return
 	}
+	// CR-2026-059 §4.7: server-internal control envelopes are acted on
+	// locally and NEVER fanned out to client sockets (the only branch added
+	// to this function; every existing scope fanout is byte-for-byte).
+	if ev.EventType == ControlFrameType {
+		hub.HandleControlFrame(ev.ScopeID, []byte(ev.PayloadJSON))
+		return
+	}
 	frame := injectEventID([]byte(ev.PayloadJSON), ev.EventID)
 	switch ev.Scope {
 	case ScopeDaemonRuntime:
@@ -688,10 +695,43 @@ func (d *DualWriteBroadcaster) Broadcast(message []byte) {
 	_ = d.relay.PublishWithID("global", "all", "", message, id)
 }
 
+// DisconnectWorkspaceUser runs the local hub disconnect immediately and
+// publishes the control frame to the user scope for every other node
+// (CR-2026-059 §4.7 consumption matrix). The loopback envelope is consumed by
+// this node too and disconnects again — idempotent no-op.
+func (d *DualWriteBroadcaster) DisconnectWorkspaceUser(userID, workspaceID string) {
+	d.local.DisconnectWorkspaceUser(userID, workspaceID)
+	publishControlFrameWithRetry(d.relay, userID, workspaceID)
+}
+
 // PublishWithID is like publish but uses a caller-supplied event id so the
 // dual-write path can dedup.
 func (r *RedisRelay) PublishWithID(scopeType, scopeID, exclude string, frame []byte, id string) error {
 	return r.publishWithID(scopeType, scopeID, exclude, frame, id)
+}
+
+// DisconnectWorkspaceUser publishes the server-internal control frame onto
+// the user's scope stream (CR-2026-059 §4.7): every node holding at least one
+// of the user's connections consumes the user stream and disconnects locally.
+// XADD failure is retried once, then only recorded — request-level membership
+// gates and reconnect rejection are the security boundary.
+func (r *RedisRelay) DisconnectWorkspaceUser(userID, workspaceID string) {
+	publishControlFrameWithRetry(r, userID, workspaceID)
+}
+
+// publishControlFrameWithRetry writes the disconnect control envelope to the
+// user-scope stream via the RelayPublisher, retrying an XADD failure once
+// (CR-2026-059 §4.7).
+func publishControlFrameWithRetry(p RelayPublisher, userID, workspaceID string) {
+	frame := NewDisconnectWorkspaceControlFrame(workspaceID)
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := p.PublishWithID(ScopeUser, userID, "", frame, ulid.Make().String()); err != nil {
+			slog.Warn("realtime: disconnect control frame publish failed",
+				"user_id", userID, "workspace_id", workspaceID, "attempt", attempt+1, "error", err)
+			continue
+		}
+		return
+	}
 }
 
 var _ Broadcaster = (*RedisRelay)(nil)

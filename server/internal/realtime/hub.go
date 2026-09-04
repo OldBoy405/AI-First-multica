@@ -582,6 +582,79 @@ func (h *Hub) Broadcast(message []byte) {
 	h.broadcast <- message
 }
 
+// DisconnectWorkspaceUser closes every live connection of userID in
+// workspaceID (CR-2026-059 §4.7): a removed member's sockets are terminated
+// server-side. removeClient closes the send channel and the connection pumps
+// tear the socket down; room cleanup goes through the existing removeClient
+// path. Idempotent — no matching connection is a no-op.
+func (h *Hub) DisconnectWorkspaceUser(userID, workspaceID string) {
+	if userID == "" || workspaceID == "" {
+		return
+	}
+	h.mu.Lock()
+	var victims []*Client
+	for client := range h.clients {
+		if client.userID == userID && client.workspaceID == workspaceID {
+			victims = append(victims, client)
+		}
+	}
+	h.mu.Unlock()
+	// removeClient takes the hub lock itself — collect under the lock, then
+	// release it and remove each victim (same shape as evictSlow).
+	for _, client := range victims {
+		h.removeClient(client)
+	}
+	if len(victims) > 0 {
+		slog.Info("realtime: disconnected workspace user",
+			"user_id", userID, "workspace_id", workspaceID, "connections", len(victims))
+	}
+}
+
+// ControlFrameType is the reserved server-internal envelope type
+// (CR-2026-059 §4.7). Frames of this type never reach client sockets:
+// deliverEnvelope routes them to HandleControlFrame instead of the fanout.
+const ControlFrameType = "realtime.control"
+
+// controlFrame is the wire shape of a server-internal control envelope.
+type controlFrame struct {
+	Type        string `json:"type"`
+	Action      string `json:"action"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// HandleControlFrame executes one server-internal control envelope on the
+// local hub (CR-2026-059 §4.7). scopeID is the user-scope the frame was
+// published on (the user whose connections the frame targets). Malformed or
+// unknown frames are logged and dropped — they must never fan out to clients.
+func (h *Hub) HandleControlFrame(scopeID string, frame []byte) {
+	var ctl controlFrame
+	if err := json.Unmarshal(frame, &ctl); err != nil || ctl.Type != ControlFrameType {
+		slog.Warn("realtime: dropped malformed control frame", "scope_id", scopeID, "error", err)
+		return
+	}
+	switch ctl.Action {
+	case "disconnect_workspace":
+		h.DisconnectWorkspaceUser(scopeID, ctl.WorkspaceID)
+	default:
+		slog.Warn("realtime: dropped unknown control action", "action", ctl.Action)
+	}
+}
+
+// NewDisconnectWorkspaceControlFrame renders the user-scope control envelope
+// that asks every node holding the user's connections to close the
+// workspace's sockets (CR-2026-059 §4.7).
+func NewDisconnectWorkspaceControlFrame(workspaceID string) []byte {
+	frame, err := json.Marshal(controlFrame{
+		Type:        ControlFrameType,
+		Action:      "disconnect_workspace",
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return []byte(`{"type":"realtime.control","action":"disconnect_workspace","workspace_id":""}`)
+	}
+	return frame
+}
+
 // fanoutUser delivers a message to all clients in the user scope, optionally
 // excluding clients in excludeWorkspace and deduping against eventID.
 func (h *Hub) fanoutUser(userID string, message []byte, excludeWorkspace, eventID string) {

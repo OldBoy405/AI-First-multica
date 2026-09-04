@@ -262,6 +262,13 @@ func (r *ShardedStreamRelay) Broadcast(message []byte) {
 	_ = r.PublishWithID("global", "all", "", message, ulid.Make().String())
 }
 
+// DisconnectWorkspaceUser publishes the disconnect control frame to the
+// user-scope shard stream (CR-2026-059 §4.7); every node's shard consumer
+// routes it to HandleControlFrame via the shared deliverEnvelope branch.
+func (r *ShardedStreamRelay) DisconnectWorkspaceUser(userID, workspaceID string) {
+	publishControlFrameWithRetry(r, userID, workspaceID)
+}
+
 func (r *ShardedStreamRelay) PublishWithID(scopeType, scopeID, exclude string, frame []byte, id string) error {
 	ev := newEnvelope(r.nodeID, scopeType, scopeID, exclude, frame, id)
 	shard := r.shardFor(scopeType, scopeID)

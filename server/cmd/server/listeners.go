@@ -261,6 +261,16 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 		// invalidate/refetch patterns self-heal from a missed event, a leaked
 		// private payload cannot be unsent.
 		if e.ChatSessionID != "" {
+			// CR-2026-059 §3.7: a shared Discussion session event fans out to the
+			// workspace room (every member sees it). Everything else keeps the
+			// CR-2026-008 creator-only contract. The shared branch requires the
+			// workspace hint too; an empty/unknown kind fails closed toward the
+			// recipient path, and a missing recipient is still dropped + ERROR.
+			if e.ChatSessionKind == "project_shared" && e.WorkspaceID != "" {
+				realtime.M.RecordEvent(e.Type)
+				b.BroadcastToWorkspace(e.WorkspaceID, data)
+				return
+			}
 			if e.ChatRecipientID == "" {
 				slog.Error("chat event without recipient dropped",
 					"event_type", e.Type, "chat_session_id", e.ChatSessionID)

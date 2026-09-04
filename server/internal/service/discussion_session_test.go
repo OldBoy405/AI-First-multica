@@ -51,72 +51,72 @@ func TestDetectCoordinatorTriggerMatrix(t *testing.T) {
 		want     triggerDecision
 	}{
 		{
-			name: "analyze with routable coordinator enqueues",
+			name:    "analyze with routable coordinator enqueues",
 			request: "analyze", conf: configured, routable: routable,
 			want: triggerDecision{NeedTask: true, Reason: "none"},
 		},
 		{
-			name: "summarize with routable coordinator enqueues",
+			name:    "summarize with routable coordinator enqueues",
 			request: "summarize", conf: configured, routable: routable,
 			want: triggerDecision{NeedTask: true, Reason: "none"},
 		},
 		{
-			name: "analyze with archived coordinator is unavailable",
+			name:    "analyze with archived coordinator is unavailable",
 			request: "analyze", conf: configured,
 			want: triggerDecision{Reason: "unavailable"},
 		},
 		{
-			name: "summarize with hard-deleted coordinator is unavailable",
+			name:    "summarize with hard-deleted coordinator is unavailable",
 			request: "summarize", conf: configured,
 			want: triggerDecision{Reason: "unavailable"},
 		},
 		{
 			name:    "analyze without any coordinator is not_configured",
 			request: "analyze", conf: nilUUID,
-			want:    triggerDecision{Reason: "not_configured"},
+			want: triggerDecision{Reason: "not_configured"},
 		},
 		{
-			name: "mention of configured routable coordinator enqueues",
+			name:    "mention of configured routable coordinator enqueues",
 			content: mentionContent, request: "none", conf: configured, routable: routable,
 			want: triggerDecision{NeedTask: true, Reason: "none"},
 		},
 		{
-			name: "mention of configured archived coordinator is unavailable",
+			name:    "mention of configured archived coordinator is unavailable",
 			content: mentionContent, request: "none", conf: configured,
 			want: triggerDecision{Reason: "unavailable"},
 		},
 		{
-			name: "mention of configured hard-deleted coordinator is unavailable",
+			name:    "mention of configured hard-deleted coordinator is unavailable",
 			content: mentionContent, request: "none", conf: configured,
 			want: triggerDecision{Reason: "unavailable"},
 		},
 		{
-			name: "mention of another agent is an ordinary message",
+			name:    "mention of another agent is an ordinary message",
 			content: otherMentionContent, request: "none", conf: configured, routable: routable,
 			want: triggerDecision{Reason: "none"},
 		},
 		{
-			name: "mention of another agent with unconfigured project is ordinary",
+			name:    "mention of another agent with unconfigured project is ordinary",
 			content: otherMentionContent, request: "none", conf: nilUUID,
 			want: triggerDecision{Reason: "none"},
 		},
 		{
-			name: "mention of another agent while coordinator unavailable is ordinary",
+			name:    "mention of another agent while coordinator unavailable is ordinary",
 			content: otherMentionContent, request: "none", conf: configured,
 			want: triggerDecision{Reason: "none"},
 		},
 		{
-			name: "request=mention with routable coordinator mention enqueues once",
+			name:    "request=mention with routable coordinator mention enqueues once",
 			content: mentionContent, request: "mention", conf: configured, routable: routable,
 			want: triggerDecision{NeedTask: true, Reason: "none"},
 		},
 		{
-			name: "request=mention with archived configured coordinator is unavailable",
+			name:    "request=mention with archived configured coordinator is unavailable",
 			content: mentionContent, request: "mention", conf: configured,
 			want: triggerDecision{Reason: "unavailable"},
 		},
 		{
-			name: "no trigger at all",
+			name:    "no trigger at all",
 			content: "hello", request: "none", conf: configured, routable: routable,
 			want: triggerDecision{Reason: "none"},
 		},

@@ -239,6 +239,10 @@ type RouterOptions struct {
 	// any test that happened to have the variable set. nil means unset, which
 	// is what tests and NewRouter get.
 	LLMMaxRetries *llm.RetryOverride
+	// RealtimeBroadcaster is the node's full broadcaster (DualWrite/hub). The
+	// handler uses it for server-side member disconnects (CR-2026-059 §4.7);
+	// nil falls back to the local hub.
+	RealtimeBroadcaster realtime.Broadcaster
 }
 
 func buildChannelSupervisor(
@@ -411,6 +415,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	// CR-2026-059 §4.7: the full broadcaster (DualWrite/hub) powers server-side
+	// member disconnects; nil keeps the local-hub fallback for tests.
+	h.RealtimeBroadcaster = opts.RealtimeBroadcaster
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)

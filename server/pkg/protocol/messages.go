@@ -199,6 +199,11 @@ type ChatMessagePayload struct {
 	Content       string `json:"content"`
 	TaskID        string `json:"task_id,omitempty"`
 	CreatedAt     string `json:"created_at"`
+	// AuthorType / AuthorID are additive nullable fields for shared
+	// Discussion messages (CR-2026-059 §3.3, M486 columns). Older clients
+	// ignore them.
+	AuthorType *string `json:"author_type,omitempty"`
+	AuthorID   *string `json:"author_id,omitempty"`
 }
 
 // Chat message kinds (chat_message.message_kind). Additive: unknown values

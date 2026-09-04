@@ -9,10 +9,11 @@
 -- Reservation inside the send transaction. On a unique conflict PostgreSQL
 -- blocks until the concurrent winner commits/rolls back, then returns no
 -- rows (pgx.ErrNoRows); the caller reads the winner via
--- GetChatIdempotencyByKey. response_body stays NULL (placeholder) until the
--- owning transaction finalizes.
-INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint)
-VALUES ($1, $2, $3, $4, $5, $6)
+-- GetChatIdempotencyByKey. response_body stays NULL (placeholder) and
+-- response_status stays 0 (the 487 column is NOT NULL) until the owning
+-- transaction finalizes.
+INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint, response_status)
+VALUES ($1, $2, $3, $4, $5, $6, 0)
 ON CONFLICT ON CONSTRAINT chat_idempotency_pkey DO NOTHING
 RETURNING *;
 

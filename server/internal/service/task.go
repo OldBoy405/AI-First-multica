@@ -6952,7 +6952,7 @@ func (s *TaskService) ReportProgress(ctx context.Context, task db.AgentTaskQueue
 	}
 	if task.ChatSessionID.Valid {
 		evt.ChatSessionID = util.UUIDToString(task.ChatSessionID)
-		evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+		evt.ChatRecipientID, evt.ChatSessionKind = s.ChatSessionCreatorAndKind(ctx, task.ChatSessionID)
 	}
 	s.Bus.Publish(evt)
 }
@@ -7263,7 +7263,7 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 	}
 	if task.ChatSessionID.Valid {
 		evt.ChatSessionID = util.UUIDToString(task.ChatSessionID)
-		evt.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+		evt.ChatRecipientID, evt.ChatSessionKind = s.ChatSessionCreatorAndKind(ctx, task.ChatSessionID)
 	}
 	s.Bus.Publish(evt)
 }
@@ -7351,8 +7351,10 @@ func (s *TaskService) taskEvent(ctx context.Context, eventType, workspaceID stri
 		payload["chat_session_id"] = chatSessionID
 		e.ChatSessionID = chatSessionID
 		// AIFIRST: chat-task lifecycle events carry private-session context and
-		// are delivered per-user, never on the workspace fanout (CR-2026-008).
-		e.ChatRecipientID = s.ChatSessionCreatorID(ctx, task.ChatSessionID)
+		// are delivered per-user, never on the workspace fanout (CR-2026-008);
+		// the kind rides the same cached read for shared-session fanout
+		// (CR-2026-059 §3.7).
+		e.ChatRecipientID, e.ChatSessionKind = s.ChatSessionCreatorAndKind(ctx, task.ChatSessionID)
 	}
 	for _, fields := range extra {
 		for key, value := range fields {
