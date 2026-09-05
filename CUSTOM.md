@@ -355,7 +355,7 @@ fork 的 36 个迁移原占 362–397，上游 `upstream/main` 因自身 PR 撞�
 
 | 包 / 测试 | 性质 | 确认方式 / 依据 | 记录日期 |
 |---|---|---|---|
-| `server/pkg/agent`：`TestTraecliBlockedArgsFiltering` / `TestQoderBackendInvokesACPFlagAndFiltersBlockedArgs` / `TestQoderFiltersRemoteMcpWhenInitializeDoesNotAdvertiseCapability` | 环境假设 | `git stash` 摘除本地全部改动后仍失败（Windows + 本机装有 Qoder 的环境）；根因未诊断，疑与测试对本机环境的隐含假设有关 | 2026-07-31 |
+| `server/pkg/agent`：`TestTraecliBlockedArgsFiltering` / `TestQoderBackendInvokesACPFlagAndFiltersBlockedArgs` / `TestQoderFiltersRemoteMcpWhenInitializeDoesNotAdvertiseCapability`；**2026-09-05 全包复跑 163 项**：fake CLI 可执行文件不带 `.exe`（grok/qoder/kiro/zeroclaw/kimi/claude 等后端，exec 找不到可执行文件）、路径引号/shell 安全断言与 Windows 分隔符不符（`TestExplainExecError*` 等） | 环境假设 | `git stash` 摘除本地全部改动后仍失败（Windows + 本机装有 Qoder 的环境）；根因未诊断，疑与测试对本机环境的隐含假设有关。**CR-2026-059 cmd-03（`go test ./internal/handler/ ./pkg/agent/ -count=1`）本机 163 项失败：未改动 multica 主克隆同命令 A/B 失败名单逐条一致；AC-21 覆盖子集（`ValidateChatConfig` 等）单独全绿；本 CR diff 零 `pkg/agent` 文件；经 Ray 人工核定不计入本 CR 回归** | 2026-07-31 / 2026-09-05 |
 | `server/cmd/multica`：`TestNewAPIClient_LeftoverMarkerActionableError` 等 7 项 | 环境假设 | 未改动的 main 检出 A/B 复跑结果完全一致（CR-2026-002 TASK-05 全量基线时发现）；多为 Windows 路径分隔符/本机环境假设 | 2026-07-31 |
 | `server/internal/cli`：`TestCLIConfig_BackwardCompat_*`、`TestCLIConfig_OpenClawOverride_*`、`TestCLIConfig_ProfileCommandOverrides_*` 4 项 | 上游既有 | 未改动 trunk 检出 A/B 失败名单一致（2026-07-31）；已在 `upstream/main` 基线 worktree 复现同样失败（2026-08-07） | 2026-07-31 |
 | `server/internal/daemon`：`TestEnsureDaemonID_Persists` / `TestListRuntimeLocalSkills_*` 等 26 项 | 环境假设 | 未改动 trunk 检出 A/B 失败名单逐条一致（T10 全量时发现）；典型根因：测试改 `HOME` 但 Windows 代码走 `USERPROFILE`（daemon.id 写进真实家目录路径失败）、本机已装 IDE 的 skill 根目录被真实发现。上游 Windows 环境假设缺陷 | 2026-07-31 |
