@@ -29,6 +29,30 @@ const (
 	CodeUnavailable         = "SHELL_UNAVAILABLE"
 )
 
+// IsDenyClosedOutput reports whether a tool result body is the structured
+// deny-closed JSON emitted by `multica gitguard-exec`'s denyExit (see
+// AIFIRST: CR-2026-059 deny-closed loop guard (AIFI-21).
+// server/cmd/multica/cmd_gitguard.go). The daemon uses it to break an agent
+// loop that keeps retrying a denied git command — each retry returns the same
+// deterministic refusal, so a run whose tool results are all deny-closed is
+// burning provider quota without any chance of progress.
+//
+// Matches "code":"SHELL_UNAVAILABLE" and the FORBIDDEN_* family by prefix so a
+// future code added to this package is caught without a second edit here.
+func IsDenyClosedOutput(s string) bool {
+	for _, code := range []string{
+		`"code":"` + CodeUnavailable + `"`,
+		`"code":"` + CodeForbiddenSubcommand + `"`,
+		`"code":"` + CodeForbiddenFlag + `"`,
+		`"code":"FORBIDDEN_`,
+	} {
+		if strings.Contains(s, code) {
+			return true
+		}
+	}
+	return false
+}
+
 // EnvRulesPath names the environment variable pointing at rules.json.
 // Unset = gitguard not configured (callers fall back to their pre-guard
 // behavior); set but unreadable = fail closed (deny everything).

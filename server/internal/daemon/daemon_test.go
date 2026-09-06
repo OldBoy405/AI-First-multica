@@ -5619,3 +5619,47 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 		t.Errorf("custom = %v, want only the selector removed", strippedCustom)
 	}
 }
+
+// denialLoopBackend simulates the CR-2026-059 failure mode: the model keeps
+// re-issuing a git command the controlled shell refuses, emitting a steady
+// stream of deny-closed tool results with no other output. The idle watchdog
+// never fires (there is always fresh activity); only the deny-closed loop
+// guard can stop the run.
+type denialLoopBackend struct {
+	denials int // number of consecutive deny-closed tool results to emit
+}
+
+func (b denialLoopBackend) Execute(_ context.Context, _ string, _ agent.ExecOptions) (*agent.Session, error) {
+	msgCh := make(chan agent.Message, b.denials)
+	resCh := make(chan agent.Result)
+	for i := 0; i < b.denials; i++ {
+		msgCh <- agent.Message{
+			Type:   agent.MessageToolResult,
+			Tool:   "powershell",
+			CallID: "call-1",
+			Output: `{"error":{"attempted":"git -C","code":"SHELL_UNAVAILABLE","message":"controlled-shell rules not visible"}}`,
+		}
+	}
+	// Never close msgCh and never write resCh — the loop guard must end the run.
+	return &agent.Session{Messages: msgCh, Result: resCh}, nil
+}
+
+func TestExecuteAndDrain_DenialLoop_FiresOnConsecutiveDenials(t *testing.T) {
+	t.Parallel()
+
+	d := newTestDaemon(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	result, _, err := d.executeAndDrain(ctx, denialLoopBackend{denials: denialLoopThreshold + 2}, "p", agent.ExecOptions{}, slog.Default(), "t-deny", "", new(atomic.Int32))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "denial_loop" {
+		t.Fatalf("expected status=denial_loop, got %q (err=%q)", result.Status, result.Error)
+	}
+	if !strings.Contains(result.Error, "deny-closed") {
+		t.Fatalf("expected error to mention deny-closed, got %q", result.Error)
+	}
+}

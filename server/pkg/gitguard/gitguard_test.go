@@ -181,3 +181,23 @@ func TestFromEnvSemantics(t *testing.T) {
 		t.Fatal("configured-but-missing rules must error (fail closed at the caller)")
 	}
 }
+
+func TestIsDenyClosedOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"shell_unavailable", `{"error":{"attempted":"git -C","code":"SHELL_UNAVAILABLE","message":"..."}}`, true},
+		{"forbidden_subcommand", `{"error":{"code":"FORBIDDEN_SUBCOMMAND","message":"..."}}`, true},
+		{"forbidden_flag", `{"error":{"code":"FORBIDDEN_FLAG","message":"..."}}`, true},
+		{"forbidden_prefix_future_code", `{"error":{"code":"FORBIDDEN_SOMETHING_ELSE"}}`, true},
+		{"ordinary_tool_output", "on branch main\nnothing to commit", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := IsDenyClosedOutput(tc.in); got != tc.want {
+			t.Errorf("%s: IsDenyClosedOutput(%q) = %v, want %v", tc.name, tc.in, got, tc.want)
+		}
+	}
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/internal/selfexec"
 	"github.com/multica-ai/multica/server/pkg/agent"
+	"github.com/multica-ai/multica/server/pkg/gitguard"
 	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/skillbundle"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
@@ -7933,6 +7934,26 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			FailureReason: failureReason,
 			Usage:         usageEntries,
 		}, nil
+	case "denial_loop":
+		// The deny-closed loop guard force-stopped the run because the agent
+		// kept re-issuing a git command the controlled shell refuses. Route
+		// through the blocked path with a dedicated failure_reason; it is
+		// deliberately not in retryableReasons, so the platform does not
+		// auto-retry a loop that cannot succeed.
+		// AIFIRST: CR-2026-059 deny-closed loop guard (AIFI-21).
+		comment := result.Error
+		if comment == "" {
+			comment = denialLoopReason(denialLoopThreshold)
+		}
+		return TaskResult{
+			Status:        "blocked",
+			Comment:       comment,
+			SessionID:     result.SessionID,
+			WorkDir:       env.WorkDir,
+			EnvRoot:       env.RootDir,
+			FailureReason: "denial_loop",
+			Usage:         usageEntries,
+		}, nil
 	case "idle_watchdog":
 		// The idle watchdog force-stopped the run because the backend
 		// went silent (e.g. claude blocked on a tool call against a
@@ -8297,6 +8318,16 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	// AgentToolWatchdog budget instead of treating that silence as a hang.
 	var inFlightTools atomic.Int32
 	var idleWatchdogFired atomic.Bool
+	// denialLoopCount / denialLoopFired break the deny-closed retry loop the
+	// idle watchdog cannot see: a backend that keeps re-issuing a denied git
+	// command is actively emitting tool events, so it never trips the "no
+	// message" budget. We instead count CONSECUTIVE deny-closed tool results
+	// with no other output in between, and stop the run once they cross
+	// denialLoopThreshold. Any non-denied tool result or any text/thinking
+	// output resets the counter — real progress clears the streak.
+	// AIFIRST: CR-2026-059 deny-closed loop guard (AIFI-21).
+	var denialLoopCount atomic.Int32
+	var denialLoopFired atomic.Bool
 	// idleWatchdogThreshold records (as nanos) which silence budget actually
 	// tripped the watchdog — the idle window or the larger in-flight-tool
 	// window — so the failure message reports the real duration.
@@ -8478,6 +8509,25 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 						mu.Unlock()
 					}
 					taskLog.Info("tool_result observed", "seq", s, "tool", toolName, "call_id", msg.CallID)
+					// Deny-closed loop guard: a tool result that is the
+					// gitguard deny JSON is deterministic — re-issuing it
+					// cannot succeed. Count the streak; any other result or
+					// any text/thinking output resets it, so genuine
+					// progress clears the counter.
+					// AIFIRST: CR-2026-059 deny-closed loop guard (AIFI-21).
+					if gitguard.IsDenyClosedOutput(output) {
+						if denialLoopCount.Add(1) >= denialLoopThreshold && !denialLoopFired.Load() {
+							taskLog.Warn("deny-closed loop detected; force-stopping run",
+								"task", shortID(taskID),
+								"denials", denialLoopCount.Load(),
+								"threshold", denialLoopThreshold,
+							)
+							denialLoopFired.Store(true)
+							agentCancel()
+						}
+					} else {
+						denialLoopCount.Store(0)
+					}
 					mu.Lock()
 					batch = append(batch, TaskMessageData{
 						Seq:    int(s),
@@ -8488,12 +8538,14 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					mu.Unlock()
 				case agent.MessageThinking:
 					if msg.Content != "" {
+						denialLoopCount.Store(0)
 						mu.Lock()
 						pendingThinking.WriteString(msg.Content)
 						mu.Unlock()
 					}
 				case agent.MessageText:
 					if msg.Content != "" {
+						denialLoopCount.Store(0)
 						taskLog.Debug("agent", "text", truncateLog(msg.Content, 200))
 						mu.Lock()
 						pendingText.WriteString(msg.Content)
@@ -8549,7 +8601,16 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 	select {
 	case result := <-session.Result:
 		waitForDrain()
-		if idleWatchdogFired.Load() {
+		if denialLoopFired.Load() {
+			// Deny-closed loop forced the stop via agentCancel; re-tag so
+			// runTask reports a dedicated failure_reason rather than the
+			// aborted path's generic bucket. Checked before idle_watchdog so
+			// a stop this guard caused is never misattributed to silence.
+			result.Status = "denial_loop"
+			if result.Error == "" {
+				result.Error = denialLoopReason(denialLoopCount.Load())
+			}
+		} else if idleWatchdogFired.Load() {
 			// The backend's wait goroutine (e.g. claude.go) translates the
 			// SIGKILL we delivered via agentCancel into Status="aborted".
 			// Re-tag it as "idle_watchdog" so runTask routes the
@@ -8567,10 +8628,16 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 		// hand back (and let runTask fail-and-broadcast) a still-flushing
 		// transcript either.
 		waitForDrain()
-		// Idle watchdog cancels via agentCancel(), which propagates here as
-		// context.Canceled. Check this BEFORE the generic cancelled/timeout
-		// classifiers so a watchdog-induced stop isn't misreported as
-		// "task cancelled by server".
+		// Deny-closed loop and idle watchdog both cancel via agentCancel(),
+		// which propagates here as context.Canceled. Check them BEFORE the
+		// generic cancelled/timeout classifiers so a watchdog-induced stop
+		// isn't misreported as "task cancelled by server".
+		if denialLoopFired.Load() {
+			return agent.Result{
+				Status: "denial_loop",
+				Error:  denialLoopReason(denialLoopCount.Load()),
+			}, toolCount.Load(), nil
+		}
 		if idleWatchdogFired.Load() {
 			return agent.Result{
 				Status: "idle_watchdog",
@@ -8600,6 +8667,21 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 // drain-timeout branch in executeAndDrain emit identical wording.
 func idleWatchdogReason(window time.Duration) string {
 	return fmt.Sprintf("agent produced no new messages for %s and message queue was empty; force-stopped by idle watchdog", window)
+}
+
+// denialLoopThreshold is how many CONSECUTIVE deny-closed tool results (with
+// no other tool result, text, or thinking output in between) trip the
+// deny-closed loop guard. Picked as a count rather than a duration: the loop
+// is a discrete sequence of failed git invocations, not a silent stall, and 10
+// consecutive refusals with zero progress is beyond any healthy review run.
+// AIFIRST: CR-2026-059 deny-closed loop guard (AIFI-21).
+const denialLoopThreshold = 10
+
+// denialLoopReason formats the human-facing explanation surfaced on
+// denial_loop dispositions. Centralised so the result-arrival branch and the
+// drain-timeout branch in executeAndDrain emit identical wording.
+func denialLoopReason(denials int32) string {
+	return fmt.Sprintf("agent retried a deny-closed git command %d consecutive times with no other output; force-stopped", denials)
 }
 
 // runIdleWatchdog ticks until either agentCtx is cancelled or the backend has
