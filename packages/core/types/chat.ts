@@ -140,6 +140,13 @@ export interface ChatMessage {
   task_id: string | null;
   created_at: string;
   /**
+   * CR-2026-059 §3.3: shared Discussion author attribution (M486 columns).
+   * Additive nullable fields — null on private/legacy rows and on malformed
+   * payloads after schema degradation.
+   */
+  author_type?: "member" | "agent" | null;
+  author_id?: string | null;
+  /**
    * Attachments linked to this message via the attachment table's
    * chat_message_id FK. Populated by ListChatMessages. UI renders these
    * as file/image cards inside the bubble; the markdown URL inline in

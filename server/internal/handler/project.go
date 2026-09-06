@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -556,6 +557,14 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		// commit together under the session advisory (SDD §4.7 / FR-7).
 		teamAgentRebind := pgtype.UUID{}
 		teamAgentRebindPresent := false
+		// coordinatorChange carries the CR-2026-059 three-state binding
+		// change: bind/replace (coordinatorBind) or unbind (coordinatorUnbind).
+		// The settings write + projection run inside
+		// UpdateProjectSettingsWithDiscussionCoordinator under the Discussion
+		// advisory — never in the merged patch below.
+		coordinatorChange := false
+		coordinatorUnbind := false
+		coordinatorBind := pgtype.UUID{}
 		if v, present := req.Settings[service.ProjectSettingTeamAgentQueueLimit]; present {
 			f, isNum := v.(float64)
 			if !isNum || f < 1 || f != math.Trunc(f) {
@@ -592,24 +601,40 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		// CR-2026-012: the agent bound as the project's Discussion Coordinator.
 		// Same validation shape as team_agent_id above — a forged or stale id
 		// must not persist and surface later as a broken Discussion binding.
+		// CR-2026-059 (SDD §4.5, FR-26): three-state — a non-empty string binds
+		// or replaces; null or "" unbinds (the key is deleted from the bag and
+		// the session projection is cleared in the same transaction).
 		if v, present := req.Settings[service.ProjectSettingDiscussionCoordinatorID]; present {
-			s, isStr := v.(string)
-			if !isStr {
-				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id must be an agent id string")
+			switch t := v.(type) {
+			case nil:
+				coordinatorChange = true
+				coordinatorUnbind = true
+			case string:
+				if t == "" {
+					coordinatorChange = true
+					coordinatorUnbind = true
+					break
+				}
+				agentUUID, perr := util.ParseUUID(t)
+				if perr != nil {
+					writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id is not a valid agent id")
+					return
+				}
+				if _, aerr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+					ID: agentUUID, WorkspaceID: prevProject.WorkspaceID,
+				}); aerr != nil {
+					writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id: agent not found in workspace")
+					return
+				}
+				coordinatorChange = true
+				coordinatorBind = agentUUID
+				// The settings write belongs to the service function (write
+				// authority + projection in one transaction under the
+				// Discussion advisory) — not to the merged patch below.
+			default:
+				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id must be an agent id string or null")
 				return
 			}
-			agentUUID, perr := util.ParseUUID(s)
-			if perr != nil {
-				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id is not a valid agent id")
-				return
-			}
-			if _, aerr := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
-				ID: agentUUID, WorkspaceID: prevProject.WorkspaceID,
-			}); aerr != nil {
-				writeError(w, http.StatusBadRequest, "settings.discussion_coordinator_agent_id: agent not found in workspace")
-				return
-			}
-			patch[service.ProjectSettingDiscussionCoordinatorID] = s
 		}
 		if len(patch) > 0 {
 			patchJSON, merr := json.Marshal(patch)
@@ -636,6 +661,23 @@ func (h *Handler) UpdateProject(w http.ResponseWriter, r *http.Request) {
 				ID: prevProject.ID, WorkspaceID: prevProject.WorkspaceID, Patch: patchJSON,
 			}); uerr != nil {
 				writeError(w, http.StatusInternalServerError, "failed to update project settings")
+				return
+			}
+		}
+		// CR-2026-059 (SDD §4.5, FR-26): the Coordinator binding change runs
+		// in its own transaction under the Discussion session advisory — write
+		// authority first, then the in-place session projection (first bind
+		// backfills base_*; replace keeps the snapshot; unbind clears to NULL).
+		if coordinatorChange {
+			var newCoordinatorID *uuid.UUID
+			if !coordinatorUnbind && coordinatorBind.Valid {
+				id := uuid.UUID(coordinatorBind.Bytes)
+				newCoordinatorID = &id
+			}
+			if cerr := service.UpdateProjectSettingsWithDiscussionCoordinator(r.Context(),
+				h.discussionSessionDeps(),
+				pgToUUID(prevProject.WorkspaceID), pgToUUID(prevProject.ID), newCoordinatorID); cerr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update discussion coordinator binding")
 				return
 			}
 		}

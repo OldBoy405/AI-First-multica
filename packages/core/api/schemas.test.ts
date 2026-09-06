@@ -82,6 +82,10 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   PrivateAskChatSchema,
   EMPTY_PRIVATE_ASK_CHAT,
+  ProjectDiscussionSchema,
+  EMPTY_PROJECT_DISCUSSION,
+  DiscussionSendResultSchema,
+  ChatMessageSchema,
 } from "./schemas";
 import { parseWithFallback } from "./schema";
 
@@ -2239,5 +2243,107 @@ describe("PrivateAskChatSchema (CR-2026-056 BLOCK-007)", () => {
       expect(parsed).toEqual(EMPTY_PRIVATE_ASK_CHAT);
       expect(parsed.session_id).toBe("");
     }
+  });
+});
+
+// ─── Shared Discussion (CR-2026-059 TASK-04, AC-17/NFR-8) ──────────────────
+
+describe("ProjectDiscussionSchema (shared session identity)", () => {
+  const base = {
+    session_id: VALID_SESSION_ID,
+    issue_id: null,
+    coordinator_agent_id: "",
+    model: "",
+    thinking_level: "",
+    model_source: "session_default",
+    thinking_level_source: "session_default",
+  };
+
+  it("accepts the shared-session shape with issue_id null and a valid session_id", () => {
+    const parsed = ProjectDiscussionSchema.parse(base);
+    expect(parsed.session_id).toBe(VALID_SESSION_ID);
+    expect(parsed.issue_id).toBeNull();
+    expect(parsed.degraded).toBe(false);
+  });
+
+  it("carries legacy_issue_id and config fields through", () => {
+    const parsed = ProjectDiscussionSchema.parse({
+      ...base,
+      legacy_issue_id: VALID_SESSION_ID,
+      coordinator_agent_id: "agent-1",
+      model: "claude-opus-5",
+      model_source: "override",
+    });
+    expect(parsed.legacy_issue_id).toBe(VALID_SESSION_ID);
+    expect(parsed.coordinator_agent_id).toBe("agent-1");
+    expect(parsed.model).toBe("claude-opus-5");
+    expect(parsed.model_source).toBe("override");
+  });
+
+  it("hard-degrades missing/empty/non-UUID session_id to the read-only fallback (AC-17)", () => {
+    const missing = { ...base } as Record<string, unknown>;
+    delete missing.session_id;
+    for (const raw of [missing, { ...base, session_id: "" }, { ...base, session_id: "not-a-uuid" }]) {
+      const parsed = parseWithFallback(raw, ProjectDiscussionSchema, EMPTY_PROJECT_DISCUSSION, {
+        endpoint: "GET /api/projects/:id/discussion",
+      });
+      expect(parsed.session_id).toBe("");
+      expect(parsed.degraded).toBe(true);
+      expect(parsed.issue_id).toBeNull();
+    }
+  });
+
+  it("does not treat a non-null issue_id as a writable container", () => {
+    // The schema keeps issue_id null-able and the pane never reads it for
+    // writes — session_id is the only writable identity.
+    const parsed = ProjectDiscussionSchema.parse({ ...base, issue_id: "legacy-issue" });
+    expect(parsed.session_id).toBe(VALID_SESSION_ID);
+    expect(parsed.degraded).toBe(false);
+  });
+});
+
+describe("ChatMessageSchema author fields (CR-2026-059 §3.3)", () => {
+  const messageBase = {
+    id: "m-1",
+    chat_session_id: VALID_SESSION_ID,
+    role: "user",
+    content: "hello",
+    task_id: null,
+    created_at: "2026-01-01T00:00:00Z",
+  };
+
+  it("parses member/agent authors and NULL authors", () => {
+    const member = ChatMessageSchema.parse({ ...messageBase, author_type: "member", author_id: "u-1" });
+    expect(member.author_type).toBe("member");
+    expect(member.author_id).toBe("u-1");
+    const agent = ChatMessageSchema.parse({ ...messageBase, author_type: "agent", author_id: "a-1" });
+    expect(agent.author_type).toBe("agent");
+    const missing = ChatMessageSchema.parse(messageBase);
+    expect(missing.author_type).toBeUndefined();
+  });
+
+  it("degrades malformed author fields to null without poisoning the message", () => {
+    const malformed = ChatMessageSchema.parse({
+      ...messageBase,
+      author_type: "robot",
+      author_id: 42,
+    });
+    expect(malformed.content).toBe("hello");
+    expect(malformed.author_type).toBeNull();
+    expect(malformed.author_id).toBeNull();
+  });
+});
+
+describe("DiscussionSendResultSchema", () => {
+  it("parses the 201 shape with issue_id null and optional task_id", () => {
+    const parsed = DiscussionSendResultSchema.parse({
+      session_id: VALID_SESSION_ID,
+      message_id: VALID_SESSION_ID,
+      issue_id: null,
+      task_id: null,
+    });
+    expect(parsed.session_id).toBe(VALID_SESSION_ID);
+    expect(parsed.issue_id).toBeNull();
+    expect(parsed.task_id).toBeNull();
   });
 });

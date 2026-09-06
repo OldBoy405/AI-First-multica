@@ -81,6 +81,22 @@ func (r *MirroredRelay) Broadcast(message []byte) {
 	_ = r.PublishWithID("global", "all", "", message, ulid.Make().String())
 }
 
+// DisconnectWorkspaceUser publishes the disconnect control frame to BOTH
+// stream families (primary and mirror) — each side's consumers execute the
+// same control branch (CR-2026-059 §4.7 consumption matrix); the loopback
+// execution is idempotent.
+func (r *MirroredRelay) DisconnectWorkspaceUser(userID, workspaceID string) {
+	frame := NewDisconnectWorkspaceControlFrame(workspaceID)
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := r.PublishWithID(ScopeUser, userID, "", frame, ulid.Make().String()); err != nil {
+			slog.Warn("realtime: disconnect control frame publish failed (mirrored)",
+				"user_id", userID, "workspace_id", workspaceID, "attempt", attempt+1, "error", err)
+			continue
+		}
+		return
+	}
+}
+
 func (r *MirroredRelay) PublishWithID(scopeType, scopeID, exclude string, frame []byte, id string) error {
 	primaryErr := r.primary.PublishWithID(scopeType, scopeID, exclude, frame, id)
 	if scopeType == ScopeDaemonRuntime {

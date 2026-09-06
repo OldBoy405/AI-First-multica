@@ -31,7 +31,7 @@ func (h *Handler) ChannelChatStarted(event engine.ChannelChatStartedEvent) {
 			ChannelType: string(event.ChannelType), InstallationID: uuidToString(event.InstallationID), RouteRevision: event.RouteRevision,
 		},
 		IsCurrentChannelRoute: true,
-	})
+	}, "private")
 }
 
 // ChannelChatTitleInitialized publishes the deterministic first-message or
@@ -41,7 +41,7 @@ func (h *Handler) ChannelChatTitleInitialized(workspaceID, creatorID, sessionID 
 	h.publishChat(protocol.EventChatSessionUpdated, uuidToString(workspaceID), "member", uuidToString(creatorID), uuidToString(sessionID), uuidToString(creatorID), protocol.ChatSessionUpdatedPayload{
 		ChatSessionID: uuidToString(sessionID),
 		Title:         title,
-	})
+	}, "private")
 }
 
 // GenerateChannelChatTitle reuses the existing LLM + CAS title path after the
@@ -142,7 +142,7 @@ func (h *Handler) maybeGenerateChatTitleAsync(workspaceID, userID string, sessio
 			ChatSessionID: resolvedSessionID,
 			Title:         updated.Title,
 			UpdatedAt:     timestampToString(updated.UpdatedAt),
-		})
+		}, "private")
 	}()
 }
 

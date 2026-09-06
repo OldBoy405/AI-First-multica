@@ -326,7 +326,7 @@ func (h *Handler) GetChatSession(w http.ResponseWriter, r *http.Request) {
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
 
-	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, false)
 	if !ok {
 		return
 	}
@@ -372,7 +372,7 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, true)
 	if !ok {
 		return
 	}
@@ -462,7 +462,7 @@ func (h *Handler) UpdateChatSession(w http.ResponseWriter, r *http.Request) {
 		projectID := uuidToPtr(updated.ProjectID)
 		payload.ProjectID = &projectID
 	}
-	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, payload)
+	h.publishChat(protocol.EventChatSessionUpdated, workspaceID, "member", userID, resolvedSessionID, userID, payload, "private")
 
 	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
 }
@@ -489,7 +489,7 @@ func (h *Handler) SetChatSessionPinned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, true)
 	if !ok {
 		return
 	}
@@ -510,7 +510,7 @@ func (h *Handler) SetChatSessionPinned(w http.ResponseWriter, r *http.Request) {
 		Title:         updated.Title,
 		Pinned:        &pinned,
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
-	})
+	}, "private")
 
 	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
 }
@@ -558,7 +558,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	session, ok := h.gateChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, true)
 	if !ok {
 		return
 	}
@@ -660,7 +660,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 		Title:         updated.Title,
 		Status:        &status,
 		UpdatedAt:     timestampToString(updated.UpdatedAt),
-	})
+	}, "private")
 
 	writeJSON(w, http.StatusOK, chatSessionToResponse(updated))
 }
@@ -677,6 +677,19 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
+
+	// CR-2026-059 §3.6: a shared Discussion session is never deletable —
+	// history retention is the FR-16 semantic.
+	if wsUUID, werr := util.ParseUUID(workspaceID); werr == nil {
+		if sidUUID, serr := util.ParseUUID(sessionID); serr == nil {
+			if session, lerr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+				ID: sidUUID, WorkspaceID: wsUUID,
+			}); lerr == nil && session.Kind == chatSessionKindProjectShared {
+				writeErrorCode(w, http.StatusForbidden, "forbidden_chat_config", "project shared sessions cannot be deleted")
+				return
+			}
+		}
+	}
 
 	session, ok := h.loadChatSessionForUser(w, r, userID, workspaceID, sessionID)
 	if !ok {
@@ -784,7 +797,7 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	resolvedSessionID := uuidToString(session.ID)
 	h.publishChat(protocol.EventChatSessionDeleted, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionDeletedPayload{
 		ChatSessionID: resolvedSessionID,
-	})
+	}, "private")
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -796,6 +809,10 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 type SendChatMessageRequest struct {
 	Content       string   `json:"content"`
 	AttachmentIDs []string `json:"attachment_ids"`
+	// CoordinatorRequest is the CR-2026-059 shared-Discussion coordinator
+	// trigger arm ("none" | "mention" | "analyze" | "summarize"). Ignored on
+	// private sessions; the shared send path validates the enum.
+	CoordinatorRequest string `json:"coordinator_request,omitempty"`
 }
 
 type SendChatMessageResponse struct {
@@ -901,6 +918,14 @@ func (h *Handler) PatchChatSessionConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// CR-2026-059 kind dispatch: the shared Discussion session takes the
+	// owner/admin member path with the §4.4 authority ladder; the private
+	// flow below is byte-for-byte untouched.
+	if session.Kind == chatSessionKindProjectShared {
+		h.patchSharedDiscussionConfig(w, r, wsUUID, sessionUUID, callerUUID, modelPatch, thinkingPatch)
+		return
+	}
+
 	// SDD §3.2 error boundaries must not depend on the agent's runtime
 	// state (review BLOCK-003): the creator / project-bound gates run FIRST
 	// on the workspace-scoped pre-load, so a non-creator or an ordinary 1:1
@@ -964,6 +989,19 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	// CR-2026-059: shared Discussion sessions take a dedicated send path
+	// (member-only, coordinator trigger, Idempotency-Key required). The kind
+	// pre-load leaves the private flow below byte-for-byte untouched.
+	if wsUUID, werr := util.ParseUUID(workspaceID); werr == nil {
+		if sidUUID, serr := util.ParseUUID(sessionID); serr == nil {
+			if session, lerr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+				ID: sidUUID, WorkspaceID: wsUUID,
+			}); lerr == nil && session.Kind == chatSessionKindProjectShared {
+				h.sendSharedDiscussionMessage(w, r, userID, workspaceID, session, req)
+				return
+			}
+		}
 	}
 	if req.Content == "" {
 		writeError(w, http.StatusBadRequest, "content is required")
@@ -1123,7 +1161,7 @@ func (h *Handler) SendChatMessage(w http.ResponseWriter, r *http.Request) {
 		Content:       req.Content,
 		TaskID:        uuidToString(task.ID),
 		CreatedAt:     timestampToString(msg.CreatedAt),
-	})
+	}, "private")
 
 	// First user message → kick off best-effort LLM auto-titling (MUL-4295).
 	// Fire-and-forget and non-blocking: the response below is written whether
@@ -1306,6 +1344,19 @@ func (h *Handler) ListChatMessages(w http.ResponseWriter, r *http.Request) {
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
 
+	// CR-2026-059 kind dispatch: shared sessions return the page object with
+	// member-level access; the private flow below is byte-for-byte untouched.
+	if wsUUID, werr := util.ParseUUID(workspaceID); werr == nil {
+		if sidUUID, serr := util.ParseUUID(sessionID); serr == nil {
+			if session, lerr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+				ID: sidUUID, WorkspaceID: wsUUID,
+			}); lerr == nil && session.Kind == chatSessionKindProjectShared {
+				h.loadChatMessagesShared(w, r, userID, workspaceID, session)
+				return
+			}
+		}
+	}
+
 	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
 	if !ok {
 		return
@@ -1338,6 +1389,20 @@ func (h *Handler) ListChatMessagesPage(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
+
+	// CR-2026-059 kind dispatch: shared sessions return the page object with
+	// member-level access and invalid_cursor error codes; the private flow
+	// below is byte-for-byte untouched.
+	if wsUUID, werr := util.ParseUUID(workspaceID); werr == nil {
+		if sidUUID, serr := util.ParseUUID(sessionID); serr == nil {
+			if session, lerr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+				ID: sidUUID, WorkspaceID: wsUUID,
+			}); lerr == nil && session.Kind == chatSessionKindProjectShared {
+				h.loadChatMessagesShared(w, r, userID, workspaceID, session)
+				return
+			}
+		}
+	}
 
 	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
 	if !ok {
@@ -1457,7 +1522,7 @@ func (h *Handler) MarkChatSessionRead(w http.ResponseWriter, r *http.Request) {
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
 
-	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, false)
 	if !ok {
 		return
 	}
@@ -1470,7 +1535,7 @@ func (h *Handler) MarkChatSessionRead(w http.ResponseWriter, r *http.Request) {
 	resolvedSessionID := uuidToString(session.ID)
 	h.publishChat(protocol.EventChatSessionRead, workspaceID, "member", userID, resolvedSessionID, userID, protocol.ChatSessionReadPayload{
 		ChatSessionID: resolvedSessionID,
-	})
+	}, "private")
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1509,7 +1574,7 @@ func (h *Handler) ListChatDraftRestores(w http.ResponseWriter, r *http.Request) 
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
 
-	session, ok := h.loadChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForOwnerGate(w, r, userID, workspaceID, sessionID, false)
 	if !ok {
 		return
 	}
@@ -1773,7 +1838,7 @@ func (h *Handler) GetPendingChatTask(w http.ResponseWriter, r *http.Request) {
 	workspaceID := ctxWorkspaceID(r.Context())
 	sessionID := chi.URLParam(r, "sessionId")
 
-	session, ok := h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
+	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, false)
 	if !ok {
 		return
 	}
@@ -2197,6 +2262,11 @@ type ChatMessageResponse struct {
 	// agent can `multica attachment download <id>` rather than guessing
 	// from a markdown URL that may expire.
 	Attachments []AttachmentResponse `json:"attachments,omitempty"`
+	// AuthorType / AuthorID attribute shared Discussion messages (M486
+	// columns, CR-2026-059 §3.3). Additive nullable fields: JSON null on
+	// private/legacy rows.
+	AuthorType *string `json:"author_type"` // "member" | "agent"
+	AuthorID   *string `json:"author_id"`
 }
 
 func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
@@ -2227,6 +2297,8 @@ func chatMessageToResponse(m db.ChatMessage, attachments []AttachmentResponse) C
 		MessageKind:   normalizeMessageKind(m.MessageKind),
 		QuickActions:  decodeChatQuickActions(m.QuickActions),
 		Attachments:   attachments,
+		AuthorType:    textToPtr(m.AuthorType),
+		AuthorID:      uuidToPtr(m.AuthorID),
 	}
 }
 

@@ -4686,12 +4686,15 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	// Chat tasks: resolve the session once for the per-user delivery target —
 	// task:message frames carry the streamed transcript, the most
-	// privacy-sensitive chat payload (CR-2026-008).
-	chatSessionID, chatRecipientID := "", ""
+	// privacy-sensitive chat payload (CR-2026-008). The kind rides the same
+	// row for kind-aware routing (CR-2026-059 §3.7: shared sessions fan out
+	// to the workspace room; empty kind fails closed to the recipient path).
+	chatSessionID, chatRecipientID, chatSessionKind := "", "", ""
 	if task.ChatSessionID.Valid {
 		chatSessionID = uuidToString(task.ChatSessionID)
 		if cs, err := h.Queries.GetChatSession(r.Context(), task.ChatSessionID); err == nil {
 			chatRecipientID = uuidToString(cs.CreatorID)
+			chatSessionKind = cs.Kind
 		}
 	}
 
@@ -4798,6 +4801,7 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 				TaskID:          taskID,
 				ChatSessionID:   chatSessionID,
 				ChatRecipientID: chatRecipientID,
+				ChatSessionKind: chatSessionKind,
 				Payload:         taskMessageToPayload(db.TaskMessage(m), taskID, uuidToString(task.IssueID)),
 			})
 		}

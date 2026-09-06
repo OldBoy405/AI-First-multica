@@ -19,6 +19,10 @@ type fakeBroadcaster struct {
 	broadcastCalled int
 }
 
+// DisconnectWorkspaceUser records the CR-2026-059 control-frame call; the
+// listener tests only assert fanout routing, so nothing is recorded here.
+func (f *fakeBroadcaster) DisconnectWorkspaceUser(userID, workspaceID string) {}
+
 func TestRegisterListeners_ChatSessionCreatedGoesOnlyToCreator(t *testing.T) {
 	bus := events.New()
 	fb := &fakeBroadcaster{}

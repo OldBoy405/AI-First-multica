@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -161,19 +164,33 @@ func (s *IssueService) SendProjectChatMessage(ctx context.Context, workspaceID, 
 	return s.sendProjectChatCore(ctx, workspaceID, projectID, sessionID, callerID, content, attachmentIDs)
 }
 
+// ErrIdempotencyKeyReused: a merge-forward Idempotency-Key was replayed with
+// a different fingerprint (handler: 409 idempotency_key_reused, SDD §3.5/§4.6).
+var ErrIdempotencyKeyReused = errors.New("idempotency key reused")
+
 // MergeForwardDiscussion posts a member's multi-select of Discussion messages
 // as ONE merged message on the project Team Agent chat and enqueues exactly
-// one Team Agent run for it (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12): one
-// confirmation = one comment + one task. The request carries no session_id —
-// the active session is ensured first (created on first use, base_* snapshot
-// included); a concurrent rebind that closes it surfaces as 409
-// chat_session_closed_or_changed from the send kernel's lock-internal check.
+// one Team Agent run for it (CR-2026-012 DD-7/DD-8 + CR-2026-056 §4.12 +
+// CR-2026-059 §3.5/§4.6): one confirmation = one comment + one task. The
+// request carries no session_id — the active session is ensured first
+// (created on first use, base_* snapshot included); a concurrent rebind that
+// closes it surfaces as 409 chat_session_closed_or_changed from the send
+// kernel's lock-internal check.
+//
+// Two source paths, mutually exclusive at the call site:
+//   - messages non-empty + idempotencyKey non-empty: the shared-session
+//     message_ids path (rendered via buildMergedForwardContentFromMessages,
+//     idempotent under scope merge_forward_messages/scope_id=project_id).
+//   - otherwise: the legacy comment_ids path, byte-for-byte unchanged.
 //
 // comments must already be validated as belonging to the project's Discussion
 // container and are rendered in created_at ascending order inside the merged
 // markdown. registerCR appends the requirement-register instruction block —
 // pure comment text, the server keeps zero CR write paths (DD-8).
-func (s *IssueService) MergeForwardDiscussion(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID, comments []db.Comment, registerCR bool) (*SendProjectChatMessageResult, error) {
+func (s *IssueService) MergeForwardDiscussion(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID, comments []db.Comment, messages []db.ChatMessage, registerCR bool, idempotencyKey string) (*SendProjectChatMessageResult, error) {
+	if len(messages) > 0 && idempotencyKey != "" {
+		return s.mergeForwardDiscussionMessages(ctx, workspaceID, projectID, callerID, messages, registerCR, idempotencyKey)
+	}
 	sorted := append([]db.Comment(nil), comments...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt.Time.Before(sorted[j].CreatedAt.Time) })
 	content := buildMergedForwardContent(ctx, s.TaskService, sorted, registerCR)
@@ -190,6 +207,157 @@ func (s *IssueService) MergeForwardDiscussion(ctx context.Context, workspaceID, 
 		return nil, fmt.Errorf("parse ensured session id: %w", err)
 	}
 	return s.sendProjectChatCore(ctx, workspaceID, projectID, sessionID, callerID, content, nil)
+}
+
+// mergeForwardDiscussionMessages runs the shared-session message_ids path
+// (SDD §3.5/§4.6, FR-23/FR-24): rendered merged content + idempotency around
+// the unchanged sendProjectChatCore kernel (NFR-7 zero_diff).
+//
+//   - fingerprint = dedup-preserving-order message ids + register_cr, canonical
+//     JSON sha256;
+//   - a short reservation transaction inserts the row; a conflict reads the
+//     winner: same fingerprint + stored body => replay the stored response
+//     (kernel NOT re-run); same fingerprint + NULL body => this request takes
+//     over and finalizes; different fingerprint => ErrIdempotencyKeyReused;
+//   - the kernel runs its own transaction and cannot be wrapped; on failure
+//     the reservation is released so the key stays reusable.
+func (s *IssueService) mergeForwardDiscussionMessages(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID, messages []db.ChatMessage, registerCR bool, idempotencyKey string) (*SendProjectChatMessageResult, error) {
+	sorted := append([]db.ChatMessage(nil), messages...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].CreatedAt.Time.Before(sorted[j].CreatedAt.Time) })
+	content := buildMergedForwardContentFromMessages(ctx, s.TaskService, sorted, registerCR)
+
+	fingerprint := mergeForwardMessageFingerprint(sorted, registerCR)
+
+	// Short reservation transaction (SDD §4.6 step 2).
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin merge-forward idempotency tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+	if _, err := qtx.InsertChatIdempotencyReservation(ctx, db.InsertChatIdempotencyReservationParams{
+		WorkspaceID: workspaceID, UserID: callerID,
+		ScopeType: "merge_forward_messages", ScopeID: projectID,
+		Key: idempotencyKey, Fingerprint: fingerprint,
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("reserve merge-forward idempotency: %w", err)
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		winner, werr := qtx.GetChatIdempotencyByKey(ctx, db.GetChatIdempotencyByKeyParams{
+			WorkspaceID: workspaceID, UserID: callerID,
+			ScopeType: "merge_forward_messages", ScopeID: projectID, Key: idempotencyKey,
+		})
+		if werr != nil {
+			if !errors.Is(werr, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("load merge-forward idempotency winner: %w", werr)
+			}
+			// Winner rolled back; the key is free again.
+		} else if winner.Fingerprint != fingerprint {
+			return nil, ErrIdempotencyKeyReused
+		} else if winner.ResponseBody != nil {
+			// 201 replay: return the stored first-attempt response; nothing was
+			// written in this transaction.
+			var replayed SendProjectChatMessageResult
+			if uerr := json.Unmarshal(winner.ResponseBody, &replayed); uerr != nil {
+				return nil, fmt.Errorf("decode merge-forward replay body: %w", uerr)
+			}
+			return &replayed, nil
+		}
+		// Same fingerprint with a NULL body: the previous execution was
+		// interrupted after reserving. This request takes over, re-runs the
+		// kernel and finalizes the winner row.
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit merge-forward reservation: %w", err)
+	}
+
+	view, err := s.EnsureProjectChatSession(ctx, workspaceID, projectID, callerID)
+	if err != nil {
+		s.releaseMergeForwardReservation(ctx, workspaceID, projectID, callerID, idempotencyKey)
+		return nil, err
+	}
+	if view.SessionID == "" {
+		s.releaseMergeForwardReservation(ctx, workspaceID, projectID, callerID, idempotencyKey)
+		return nil, ErrTeamAgentNotConfigured
+	}
+	sessionID, err := util.ParseUUID(view.SessionID)
+	if err != nil {
+		s.releaseMergeForwardReservation(ctx, workspaceID, projectID, callerID, idempotencyKey)
+		return nil, fmt.Errorf("parse ensured session id: %w", err)
+	}
+
+	// Kernel: zero_diff — it owns its transaction and is deliberately not
+	// wrapped (SDD §4.6 honest note: a crash between the kernel commit and
+	// finalize re-runs the kernel on retry; a normal replay never does).
+	result, err := s.sendProjectChatCore(ctx, workspaceID, projectID, sessionID, callerID, content, nil)
+	if err != nil {
+		s.releaseMergeForwardReservation(ctx, workspaceID, projectID, callerID, idempotencyKey)
+		return nil, err
+	}
+
+	// Finalize: store the committed response in a short transaction.
+	body, err := json.Marshal(result)
+	if err != nil {
+		s.releaseMergeForwardReservation(ctx, workspaceID, projectID, callerID, idempotencyKey)
+		return nil, fmt.Errorf("encode merge-forward response: %w", err)
+	}
+	ftx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin merge-forward finalize tx: %w", err)
+	}
+	defer ftx.Rollback(ctx)
+	fqtx := s.Queries.WithTx(ftx)
+	updated, ferr := fqtx.FinalizeChatIdempotency(ctx, db.FinalizeChatIdempotencyParams{
+		WorkspaceID: workspaceID, UserID: callerID,
+		ScopeType: "merge_forward_messages", ScopeID: projectID,
+		Key: idempotencyKey, ResponseStatus: 201, ResponseBody: body,
+	})
+	if ferr != nil || updated != 1 {
+		return nil, fmt.Errorf("finalize merge-forward idempotency: rows=%d err=%v", updated, ferr)
+	}
+	if err := ftx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit merge-forward finalize: %w", err)
+	}
+	return result, nil
+}
+
+// releaseMergeForwardReservation deletes the reservation row after a kernel
+// failure so the Idempotency-Key stays reusable (SDD §4.6 step 4).
+func (s *IssueService) releaseMergeForwardReservation(ctx context.Context, workspaceID, projectID, callerID pgtype.UUID, idempotencyKey string) {
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+	if _, err := qtx.DeleteChatIdempotencyByKey(ctx, db.DeleteChatIdempotencyByKeyParams{
+		WorkspaceID: workspaceID, UserID: callerID,
+		ScopeType: "merge_forward_messages", ScopeID: projectID, Key: idempotencyKey,
+	}); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
+// mergeForwardMessageFingerprint is the canonical fingerprint for the
+// message_ids path (SDD §4.6): dedup-preserving-order message ids + register_cr.
+// Duplicates collapse at the handler before this point, mirroring the comment
+// path; the order is preserved by design (PRD mandates it, no sorting).
+func mergeForwardMessageFingerprint(messages []db.ChatMessage, registerCR bool) string {
+	seen := make(map[pgtype.UUID]struct{}, len(messages))
+	ids := make([]string, 0, len(messages))
+	for _, m := range messages {
+		if _, dup := seen[m.ID]; dup {
+			continue
+		}
+		seen[m.ID] = struct{}{}
+		ids = append(ids, util.UUIDToString(m.ID))
+	}
+	canonical, _ := json.Marshal(struct {
+		MessageIDs []string `json:"message_ids"`
+		RegisterCR bool     `json:"register_cr"`
+	}{MessageIDs: ids, RegisterCR: registerCR})
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 // sendProjectChatCore is the single Team Agent send kernel behind messages
@@ -540,4 +708,68 @@ func commentAuthorDisplayName(ctx context.Context, s *TaskService, c db.Comment)
 		}
 	}
 	return c.AuthorType
+}
+
+// buildMergedForwardContentFromMessages renders selected shared-session
+// Discussion messages into the merged markdown posted on the Team Agent chat
+// (CR-2026-059 SDD §3.5): a trigger-message blockquote quoting the earliest
+// message in full, a chronological history list of ALL selected messages, and
+// optionally the register-CR instruction block. Structure mirrors
+// buildMergedForwardContent (decision D-10: a parallel function, never a
+// generalized interface — the legacy comment path stays byte-identical).
+// Attribution reads the M486 author columns; a NULL author degrades to the
+// role literal (aligned with commentAuthorDisplayName best-effort semantics).
+// Callers pass messages sorted by created_at ascending.
+func buildMergedForwardContentFromMessages(ctx context.Context, taskSvc *TaskService, msgs []db.ChatMessage, registerCR bool) string {
+	var b strings.Builder
+
+	b.WriteString("## Trigger message\n")
+	first := msgs[0]
+	for _, line := range strings.Split(strings.TrimRight(first.Content, "\n"), "\n") {
+		b.WriteString("> ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n## Conversation history (")
+	b.WriteString(strconv.Itoa(len(msgs)))
+	b.WriteString(" messages)\n")
+	for _, m := range msgs {
+		b.WriteString("- [")
+		b.WriteString(chatMessageAuthorDisplayName(ctx, taskSvc, m))
+		b.WriteString(" ")
+		b.WriteString(m.CreatedAt.Time.UTC().Format(time.RFC3339))
+		b.WriteString("] ")
+		// Flatten newlines so each message stays one list item.
+		b.WriteString(strings.Join(strings.Fields(m.Content), " "))
+		b.WriteString("\n")
+	}
+
+	if registerCR {
+		b.WriteString("\n")
+		b.WriteString(mergedForwardRegisterCRBlock)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// chatMessageAuthorDisplayName resolves a shared-session message author's
+// display name for the merged-forward rendering (CR-2026-059 SDD §3.5): the
+// M486 author columns win; a NULL author (private/legacy rows) degrades to the
+// role literal. Attribution stays best-effort.
+func chatMessageAuthorDisplayName(ctx context.Context, s *TaskService, m db.ChatMessage) string {
+	if !m.AuthorID.Valid {
+		return m.Role
+	}
+	switch m.AuthorType.String {
+	case "member":
+		if u, err := s.Queries.GetUser(ctx, m.AuthorID); err == nil {
+			return u.Name
+		}
+	case "agent":
+		if a, err := s.Queries.GetAgent(ctx, m.AuthorID); err == nil {
+			return a.Name
+		}
+	}
+	return m.Role
 }

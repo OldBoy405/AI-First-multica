@@ -6,6 +6,7 @@ package db
 
 import (
 	"net/netip"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -481,6 +482,18 @@ type ChatDraftRestore struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
+type ChatIdempotency struct {
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	UserID         pgtype.UUID `json:"user_id"`
+	ScopeType      string      `json:"scope_type"`
+	ScopeID        pgtype.UUID `json:"scope_id"`
+	Key            string      `json:"key"`
+	Fingerprint    string      `json:"fingerprint"`
+	ResponseStatus int32       `json:"response_status"`
+	ResponseBody   []byte      `json:"response_body"`
+	CreatedAt      time.Time   `json:"created_at"`
+}
+
 type ChatMessage struct {
 	ID                            pgtype.UUID        `json:"id"`
 	ChatSessionID                 pgtype.UUID        `json:"chat_session_id"`
@@ -499,6 +512,8 @@ type ChatMessage struct {
 	ChannelOutboundInstallationID pgtype.UUID        `json:"channel_outbound_installation_id"`
 	ChannelOutboundChatID         pgtype.Text        `json:"channel_outbound_chat_id"`
 	ChannelOutboundMessageIds     []string           `json:"channel_outbound_message_ids"`
+	AuthorType                    pgtype.Text        `json:"author_type"`
+	AuthorID                      pgtype.UUID        `json:"author_id"`
 }
 
 type ChatPinnedAgent struct {
@@ -532,6 +547,7 @@ type ChatSession struct {
 	BaseThinkingLevel     pgtype.Text        `json:"base_thinking_level"`
 	ModelOverride         pgtype.Text        `json:"model_override"`
 	ThinkingLevelOverride pgtype.Text        `json:"thinking_level_override"`
+	Kind                  string             `json:"kind"`
 }
 
 type ClientUsageDaily struct {

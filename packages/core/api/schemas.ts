@@ -832,6 +832,11 @@ export const ChatMessageSchema = z.object({
   // Optional additive data degrades independently: a malformed suggestion
   // must not hide the assistant reply that contains it.
   quick_actions: z.array(ChatQuickActionSchema).catch([]).optional().default([]),
+  // CR-2026-059 §3.3: shared Discussion author attribution (M486 columns).
+  // Malformed values degrade to null WITHOUT poisoning the whole message
+  // (same independent-degradation contract as quick_actions).
+  author_type: z.enum(["member", "agent"]).nullable().catch(null).optional(),
+  author_id: z.string().nullable().catch(null).optional(),
 }).loose();
 
 export const ChatMessageListSchema = z.array(ChatMessageSchema).default([]);
@@ -1393,25 +1398,90 @@ export const EMPTY_PROJECT_CHAT: ProjectChat = {
   degraded: true,
 };
 
-// Project Discussion context (CR-2026-009): the backing container issue id.
-// CR-2026-012 adds the optional Discussion Coordinator binding: when set,
-// @-mentioning that agent in Discussion activates it (controlled opening of
-// the CR-2026-009 red line); empty keeps Discussion agent-free.
+// Project Discussion context (CR-2026-009 → CR-2026-059 §3.1): the shared
+// chat session (session_id) is the only writable identity; issue_id stays null
+// forever and legacy_issue_id is the read-only replay handle for the pre-CR
+// container issue. Hard degradation (AC-17/NFR-8): a response whose session_id
+// is missing/empty/not-a-UUID degrades the WHOLE context to the read-only
+// fallback (degraded=true) — the pane then retries GET and never PATCHes or
+// sends against an empty id.
 export interface ProjectDiscussion {
-  issue_id: string;
+  session_id: string;
+  issue_id: string | null;
+  legacy_issue_id: string | null;
   coordinator_agent_id: string;
+  model: string;
+  thinking_level: string;
+  model_source: string;
+  thinking_level_source: string;
+  degraded: boolean;
 }
 
-export const ProjectDiscussionSchema = z
+export const ProjectDiscussionSchema = z.union([
+  z
+    .object({
+      session_id: z.string().uuid(),
+      issue_id: z.string().nullable().default(null),
+      legacy_issue_id: z.string().uuid().nullable().catch(null).optional(),
+      coordinator_agent_id: z.string().default(""),
+      model: z.string().default(""),
+      thinking_level: z.string().default(""),
+      model_source: z.string().default("session_default"),
+      thinking_level_source: z.string().default("session_default"),
+      degraded: z.literal(false).default(false),
+    })
+    .loose(),
+  z
+    .object({
+      session_id: z.literal(""),
+      issue_id: z.string().nullable().default(null),
+      legacy_issue_id: z.string().uuid().nullable().catch(null).optional(),
+      coordinator_agent_id: z.string().default(""),
+      model: z.string().default(""),
+      thinking_level: z.string().default(""),
+      model_source: z.string().default("session_default"),
+      thinking_level_source: z.string().default("session_default"),
+      degraded: z.literal(true).default(true),
+    })
+    .loose(),
+]);
+
+export const EMPTY_PROJECT_DISCUSSION: ProjectDiscussion = {
+  session_id: "",
+  issue_id: null,
+  legacy_issue_id: null,
+  coordinator_agent_id: "",
+  model: "",
+  thinking_level: "",
+  model_source: "session_default",
+  thinking_level_source: "session_default",
+  degraded: true,
+};
+
+// Shared Discussion send result (CR-2026-059 §3.4): issue_id stays null; the
+// message id anchors the optimistic composer entry and the task id is null for
+// ordinary messages.
+export interface DiscussionSendResult {
+  session_id: string;
+  message_id: string;
+  issue_id: string | null;
+  task_id: string | null;
+}
+
+export const DiscussionSendResultSchema = z
   .object({
-    issue_id: z.string().default(""),
-    coordinator_agent_id: z.string().default(""),
+    session_id: z.string().uuid(),
+    message_id: z.string().uuid(),
+    issue_id: z.string().nullable().default(null),
+    task_id: z.string().uuid().nullable().catch(null).optional(),
   })
   .loose();
 
-export const EMPTY_PROJECT_DISCUSSION: ProjectDiscussion = {
-  issue_id: "",
-  coordinator_agent_id: "",
+export const EMPTY_DISCUSSION_SEND_RESULT: DiscussionSendResult = {
+  session_id: "",
+  message_id: "",
+  issue_id: null,
+  task_id: null,
 };
 
 // Result of posting a Team Agent chat message (CR-2026-006 TASK-02 /

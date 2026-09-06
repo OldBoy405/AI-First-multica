@@ -567,6 +567,10 @@ func main() {
 		FeatureFlags:        flags,
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
+		// CR-2026-059 §4.7: cross-node member disconnects ride the same
+		// broadcaster the listeners use (nil in single-node/no-Redis mode is
+		// fine — the handler falls back to the local hub).
+		RealtimeBroadcaster: broadcaster,
 	})
 
 	srv := &http.Server{
@@ -617,6 +621,8 @@ func main() {
 	// 168h. Its own 1h ticker beside the runtime sweeper; nil storage keeps
 	// every candidate for the next tick.
 	go runChatDraftAttachmentSweeper(sweepCtx, pool, queries, h.Storage)
+	// CR-2026-059 (SDD §4.6): hourly idempotency-record TTL sweeper.
+	go runChatIdempotencySweeper(sweepCtx, queries)
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	if autopilotSvc.QuotaEnabled() {

@@ -757,6 +757,20 @@ func (h *Handler) loadAttachmentForRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "attachment not found")
 		return db.Attachment{}, false
 	}
+	// CR-2026-059 §4.8 (FR-25): a row bound to a shared Discussion session is
+	// workspace-member-visible only. Non-members get 404 — existence of the
+	// attachment is never confirmed. Private sessions and unbound drafts keep
+	// their existing gates.
+	if att.ChatSessionID.Valid {
+		if session, serr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+			ID: att.ChatSessionID, WorkspaceID: wsUUID,
+		}); serr == nil && session.Kind == chatSessionKindProjectShared {
+			if _, merr := h.getWorkspaceMember(r.Context(), requestUserID(r), workspaceID); merr != nil {
+				writeError(w, http.StatusNotFound, "attachment not found")
+				return db.Attachment{}, false
+			}
+		}
+	}
 
 	return att, true
 }

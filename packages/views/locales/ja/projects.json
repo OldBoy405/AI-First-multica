@@ -201,7 +201,16 @@
     "team_agent_setup_failed": "Team Agent の設定に失敗しました。もう一度お試しください",
     "discussion": {
       "sub": "メッセージを送って話し合いを始めましょう。",
-      "composer_placeholder": "チームにメッセージ…"
+      "composer_placeholder": "チームにメッセージ…",
+      "unavailable_sub": "共有セッションを解決できませんでした。再試行するか、過去のメッセージをお読みください。",
+      "config_unavailable": "このセッションの設定は変更できなくなりました。",
+      "retry": "再試行",
+      "unavailable_title": "このワークスペースではディスカッションを利用できません",
+      "send_conflict": "下書きの添付ファイルはすでに別の場所に紐付けられています。再アップロードして再試行してください。",
+      "send_failed": "メッセージの送信に失敗しました。下書きは保持されています。",
+      "legacy_section_title": "以前のメッセージ（読み取り専用）",
+      "assistant_label": "A",
+      "unknown_member": "?"
     },
     "stream": {
       "no_earlier": "これより前のメッセージはありません",

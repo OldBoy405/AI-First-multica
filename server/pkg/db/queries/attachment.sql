@@ -348,3 +348,27 @@ WHERE id = $1
   AND source_context_id IS NULL
   AND created_at < now() - interval '168 hours'
 FOR UPDATE SKIP LOCKED;
+
+-- AIFIRST: CR-2026-059 TASK-01 (SDD §4.2, FR-15): shared Discussion draft
+-- binding. Same shape as BindUnboundDraftAttachments but binds to the chat
+-- targets (chat_session_id/chat_message_id/task_id) and never reuses
+-- LinkAttachmentsToChatMessage (which tolerates chat_session_id already set
+-- and never writes task_id). The uploader gate is caller-derived from the
+-- authenticated request identity (always "member"), never the request body:
+-- zero rows (cross-uploader bind) => 409 attachment_already_bound.
+-- name: BindDraftAttachmentsToChatMessage :many
+UPDATE attachment
+SET chat_session_id = sqlc.arg(chat_session_id),
+    chat_message_id = sqlc.arg(chat_message_id),
+    task_id = sqlc.arg(task_id)
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND id = ANY(sqlc.arg(attachment_ids)::uuid[])
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND uploader_type = sqlc.arg(uploader_type)
+  AND uploader_id = sqlc.arg(uploader_id)
+RETURNING id;

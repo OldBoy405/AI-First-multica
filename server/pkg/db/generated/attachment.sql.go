@@ -53,6 +53,69 @@ func (q *Queries) BindChatAttachmentsToMessage(ctx context.Context, arg BindChat
 	return items, nil
 }
 
+const bindDraftAttachmentsToChatMessage = `-- name: BindDraftAttachmentsToChatMessage :many
+UPDATE attachment
+SET chat_session_id = $1,
+    chat_message_id = $2,
+    task_id = $3
+WHERE workspace_id = $4
+  AND id = ANY($5::uuid[])
+  AND issue_id IS NULL
+  AND comment_id IS NULL
+  AND chat_session_id IS NULL
+  AND chat_message_id IS NULL
+  AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND uploader_type = $6
+  AND uploader_id = $7
+RETURNING id
+`
+
+type BindDraftAttachmentsToChatMessageParams struct {
+	ChatSessionID pgtype.UUID   `json:"chat_session_id"`
+	ChatMessageID pgtype.UUID   `json:"chat_message_id"`
+	TaskID        pgtype.UUID   `json:"task_id"`
+	WorkspaceID   pgtype.UUID   `json:"workspace_id"`
+	AttachmentIds []pgtype.UUID `json:"attachment_ids"`
+	UploaderType  string        `json:"uploader_type"`
+	UploaderID    pgtype.UUID   `json:"uploader_id"`
+}
+
+// AIFIRST: CR-2026-059 TASK-01 (SDD §4.2, FR-15): shared Discussion draft
+// binding. Same shape as BindUnboundDraftAttachments but binds to the chat
+// targets (chat_session_id/chat_message_id/task_id) and never reuses
+// LinkAttachmentsToChatMessage (which tolerates chat_session_id already set
+// and never writes task_id). The uploader gate is caller-derived from the
+// authenticated request identity (always "member"), never the request body:
+// zero rows (cross-uploader bind) => 409 attachment_already_bound.
+func (q *Queries) BindDraftAttachmentsToChatMessage(ctx context.Context, arg BindDraftAttachmentsToChatMessageParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, bindDraftAttachmentsToChatMessage,
+		arg.ChatSessionID,
+		arg.ChatMessageID,
+		arg.TaskID,
+		arg.WorkspaceID,
+		arg.AttachmentIds,
+		arg.UploaderType,
+		arg.UploaderID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const bindUnboundDraftAttachments = `-- name: BindUnboundDraftAttachments :many
 UPDATE attachment
 SET issue_id = $1,

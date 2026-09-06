@@ -201,7 +201,16 @@
     "team_agent_setup_failed": "团队智能体设置失败，请重试",
     "discussion": {
       "sub": "发送消息开始讨论。",
-      "composer_placeholder": "给团队发消息…"
+      "composer_placeholder": "给团队发消息…",
+      "unavailable_sub": "无法解析共享会话。您可以重试，或继续阅读更早的消息。",
+      "config_unavailable": "此会话的配置已无法再修改。",
+      "retry": "重试",
+      "unavailable_title": "此工作区的讨论暂不可用",
+      "send_conflict": "草稿附件已被绑定到别处，请重新上传后重试。",
+      "send_failed": "消息发送失败，草稿已保留。",
+      "legacy_section_title": "更早的消息（只读）",
+      "assistant_label": "A",
+      "unknown_member": "?"
     },
     "stream": {
       "no_earlier": "没有更早的消息",

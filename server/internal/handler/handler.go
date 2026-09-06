@@ -181,6 +181,10 @@ type Handler struct {
 	// visible-id snapshot without adding mutable state to the shared Handler.
 	issueTableWindowCache  *issueTableWindowCache
 	Hub                    *realtime.Hub
+	// RealtimeBroadcaster is the node's full broadcaster (DualWrite/hub). When
+	// nil the handler falls back to the local hub for server-side disconnects
+	// (CR-2026-059 §4.7). Wired by cmd/server/router.go.
+	RealtimeBroadcaster   realtime.Broadcaster
 	DaemonHub              *daemonws.Hub
 	DaemonProfileRefresh   RuntimeProfileRefreshNotifier
 	DaemonWorkspaceRefresh WorkspaceSetRefreshNotifier
@@ -739,12 +743,14 @@ func (h *Handler) publishTask(eventType, workspaceID, actorType, actorID, taskID
 	})
 }
 
-// publishChat is publish() plus the ChatSessionID hint and the recipient the
-// WS bridge delivers the event to. Chat sessions are creator-private, so
-// recipientID is the session creator — at every current call site the caller
-// IS the creator (the HTTP layer enforces it), so callers pass their own
-// user id (CR-2026-008).
-func (h *Handler) publishChat(eventType, workspaceID, actorType, actorID, chatSessionID, recipientID string, payload any) {
+// publishChat is publish() plus the ChatSessionID hint, the recipient the
+// WS bridge delivers the event to, and the session kind the bridge routes on
+// (CR-2026-059 §3.7: project_shared events fan out to the workspace room;
+// private sessions keep the creator-only recipient path). Chat sessions are
+// creator-private by default, so recipientID is the session creator — at every
+// existing private call site the caller IS the creator (the HTTP layer
+// enforces it), so callers pass their own user id (CR-2026-008).
+func (h *Handler) publishChat(eventType, workspaceID, actorType, actorID, chatSessionID, recipientID string, payload any, kind string) {
 	h.Bus.Publish(events.Event{
 		Type:            eventType,
 		WorkspaceID:     workspaceID,
@@ -752,8 +758,26 @@ func (h *Handler) publishChat(eventType, workspaceID, actorType, actorID, chatSe
 		ActorID:         actorID,
 		ChatSessionID:   chatSessionID,
 		ChatRecipientID: recipientID,
+		ChatSessionKind: kind,
 		Payload:         payload,
 	})
+}
+
+// disconnectWorkspaceUser terminates every socket of userID in workspaceID
+// after a membership revoke committed (CR-2026-059 §4.7). The full
+// broadcaster (DualWrite/hub) is preferred so other nodes disconnect too;
+// the local hub is the single-node fallback. Both are idempotent.
+func (h *Handler) disconnectWorkspaceUser(userID, workspaceID pgtype.UUID) {
+	if !userID.Valid || !workspaceID.Valid {
+		return
+	}
+	if h.RealtimeBroadcaster != nil {
+		h.RealtimeBroadcaster.DisconnectWorkspaceUser(util.UUIDToString(userID), util.UUIDToString(workspaceID))
+		return
+	}
+	if h.Hub != nil {
+		h.Hub.DisconnectWorkspaceUser(util.UUIDToString(userID), util.UUIDToString(workspaceID))
+	}
 }
 
 func isNotFound(err error) bool {
