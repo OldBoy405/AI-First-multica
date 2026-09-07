@@ -4,12 +4,55 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestInvalidatePiSession(t *testing.T) {
+	t.Parallel()
+
+	if err := InvalidatePiSession(""); err != nil {
+		t.Fatalf("empty session ID: %v", err)
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(outsidePath, []byte("session"), 0o644); err != nil {
+		t.Fatalf("write outside session: %v", err)
+	}
+	if err := InvalidatePiSession(outsidePath); err != nil {
+		t.Fatalf("outside session: %v", err)
+	}
+	if _, err := os.Stat(outsidePath); err != nil {
+		t.Fatalf("outside session was removed: %v", err)
+	}
+
+	sessionDir, err := PiSessionDir()
+	if err != nil {
+		t.Fatalf("PiSessionDir: %v", err)
+	}
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("create session directory: %v", err)
+	}
+	sessionPath := filepath.Join(sessionDir, "invalidate-test-"+strings.ReplaceAll(t.Name(), "/", "-")+".jsonl")
+	t.Cleanup(func() { _ = os.Remove(sessionPath) })
+	if err := os.WriteFile(sessionPath, []byte("session"), 0o644); err != nil {
+		t.Fatalf("write Pi session: %v", err)
+	}
+	if err := InvalidatePiSession(sessionPath); err != nil {
+		t.Fatalf("Pi session: %v", err)
+	}
+	if _, err := os.Stat(sessionPath); !os.IsNotExist(err) {
+		t.Fatalf("Pi session still exists, stat error = %v", err)
+	}
+
+	if err := InvalidatePiSession(sessionPath); err != nil {
+		t.Fatalf("missing Pi session: %v", err)
+	}
+}
 
 func TestBuildPiArgsNoToolAllowlist(t *testing.T) {
 	// Extension tools registered via Pi's registerTool() must not be

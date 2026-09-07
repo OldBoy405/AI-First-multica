@@ -771,6 +771,28 @@ func ensurePiSessionFile(path string) error {
 	return f.Close()
 }
 
+// InvalidatePiSession removes a Pi-family session file when its owning
+// worktree is confirmed gone, so a later claim never resumes into a
+// recycled cwd (Pi exits immediately on a missing stored workdir).
+func InvalidatePiSession(sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	dir, err := piSessionDir()
+	if err != nil {
+		return err
+	}
+	// Only remove files directly inside pi-sessions; never treat sessionID as
+	// an arbitrary path supplied by a caller.
+	if filepath.Clean(filepath.Dir(sessionID)) != filepath.Clean(dir) {
+		return nil
+	}
+	if err := os.Remove(sessionID); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // PiSessionDir exposes piSessionDir to other packages in this module.
 func PiSessionDir() (string, error) {
 	return piSessionDir()
