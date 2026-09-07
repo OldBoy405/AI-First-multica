@@ -7782,6 +7782,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				if localAssignment != nil {
 					taskResult.DurableWorkDir = localAssignment.AbsPath
 				}
+				// Finalize confirmed that the worktree is gone, so a Pi session
+				// referring to its cwd must not be resumed by a later claim.
+				if err := agent.InvalidatePiSession(taskResult.SessionID); err != nil {
+					taskLog.Warn("invalidate pi session after worktree finalize",
+						"session_id", taskResult.SessionID, "error", err)
+				}
 				return
 			}
 			// Finalize could not complete its delivery contract, so the task
