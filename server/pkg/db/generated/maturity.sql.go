@@ -853,7 +853,7 @@ func (q *Queries) MaturityOrgAdminProjectID(ctx context.Context, workspaceID pgt
 }
 
 const maturityOrgAdminScheduleTrigger = `-- name: MaturityOrgAdminScheduleTrigger :one
-SELECT id, autopilot_id, kind, enabled, cron_expression, timezone, next_run_at, webhook_token, label, last_fired_at, created_at, updated_at, provider, signing_secret, event_filters, published_by_type, published_by_id
+SELECT id, autopilot_id, kind, enabled, cron_expression, timezone, next_run_at, webhook_token, label, last_fired_at, created_at, updated_at, provider, signing_secret, event_filters, published_by_type, published_by_id, created_by_type, created_by_id
 FROM autopilot_trigger
 WHERE autopilot_id = $1 AND kind = 'schedule'
 LIMIT 1
@@ -880,6 +880,8 @@ func (q *Queries) MaturityOrgAdminScheduleTrigger(ctx context.Context, autopilot
 		&i.EventFilters,
 		&i.PublishedByType,
 		&i.PublishedByID,
+		&i.CreatedByType,
+		&i.CreatedByID,
 	)
 	return i, err
 }

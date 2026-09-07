@@ -23,7 +23,7 @@ export function ContainerJumpBanner({
   const { t } = useT("inbox");
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-      <MessagesSquare className="h-8 w-8 text-muted-foreground/50" />
+      <MessagesSquare className="h-8 w-8 text-muted-foreground" />
       <p className="text-sm text-muted-foreground">
         {t(($) => $.container_jump[mode])}
       </p>

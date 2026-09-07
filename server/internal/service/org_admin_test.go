@@ -20,7 +20,7 @@ import (
 
 func TestMaturityReportBuiltinSkillContract(t *testing.T) {
 	var content string
-	for _, skill := range loadBuiltinSkills() {
+	for _, skill := range loadBuiltinSkills("") {
 		if skill.Name == "multica-maturity-weekly-report" {
 			content = skill.Content
 			break

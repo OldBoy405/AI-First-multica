@@ -227,7 +227,7 @@ func (s *RedisModelListStore) PopPending(ctx context.Context, runtimeID string) 
 	return nil, nil
 }
 
-func (s *RedisModelListStore) Complete(ctx context.Context, id string, models []ModelEntry, supported, fallback bool) error {
+func (s *RedisModelListStore) Complete(ctx context.Context, id string, models []ModelEntry, unavailable []UnavailableModelEntry, supported, fallback bool) error {
 	req, err := s.loadRequest(ctx, id)
 	if err != nil {
 		return err
@@ -237,6 +237,7 @@ func (s *RedisModelListStore) Complete(ctx context.Context, id string, models []
 	}
 	req.Status = ModelListCompleted
 	req.Models = models
+	req.UnavailableModels = unavailable
 	req.Supported = supported
 	req.Fallback = fallback
 	req.UpdatedAt = time.Now()

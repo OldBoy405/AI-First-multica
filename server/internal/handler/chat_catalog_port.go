@@ -94,7 +94,7 @@ func (p *ChatCatalogPort) LiveLoad(ctx context.Context, runtimeID string) (agent
 			// Warm the cache so the next validation hits the fast path
 			// (handler-side Put after a successful live round, SDD §4.3).
 			if p.cache != nil {
-				if err := p.cache.Put(ctx, runtimeID, got.Models, got.Supported); err != nil {
+				if err := p.cache.Put(ctx, runtimeID, got.Models, got.UnavailableModels, got.Supported); err != nil {
 					slog.Warn("chat config catalog cache write failed", "error", err, "runtime_id", runtimeID)
 				}
 			}

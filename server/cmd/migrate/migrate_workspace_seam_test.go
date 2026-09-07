@@ -116,25 +116,25 @@ func runSQLFile(t *testing.T, conn *pgx.Conn, path string) error {
 }
 
 var wsUps = []string{
-	"461_cr_sync_event_workspace_id.up.sql",
-	"462_cr_sync_event_workspace_uniq.up.sql",
-	"463_cr_sync_event_trace_spec_idx.up.sql",
-	"464_cr_sync_event_ws_unprocessed_idx.up.sql",
-	"465_drop_cr_sync_event_old_uniq.up.sql",
-	"466_drop_cr_sync_event_unprocessed_idx.up.sql",
-	"467_approval_workspace_approve_uniq.up.sql",
-	"468_drop_approval_record_approve_uniq.up.sql",
+	"475_cr_sync_event_workspace_id.up.sql",
+	"476_cr_sync_event_workspace_uniq.up.sql",
+	"477_cr_sync_event_trace_spec_idx.up.sql",
+	"478_cr_sync_event_ws_unprocessed_idx.up.sql",
+	"479_drop_cr_sync_event_old_uniq.up.sql",
+	"480_drop_cr_sync_event_unprocessed_idx.up.sql",
+	"481_approval_workspace_approve_uniq.up.sql",
+	"482_drop_approval_record_approve_uniq.up.sql",
 }
 
 var wsDowns = []string{
-	"468_drop_approval_record_approve_uniq.down.sql",
-	"467_approval_workspace_approve_uniq.down.sql",
-	"466_drop_cr_sync_event_unprocessed_idx.down.sql",
-	"465_drop_cr_sync_event_old_uniq.down.sql",
-	"464_cr_sync_event_ws_unprocessed_idx.down.sql",
-	"463_cr_sync_event_trace_spec_idx.down.sql",
-	"462_cr_sync_event_workspace_uniq.down.sql",
-	"461_cr_sync_event_workspace_id.down.sql",
+	"482_drop_approval_record_approve_uniq.down.sql",
+	"481_approval_workspace_approve_uniq.down.sql",
+	"480_drop_cr_sync_event_unprocessed_idx.down.sql",
+	"479_drop_cr_sync_event_old_uniq.down.sql",
+	"478_cr_sync_event_ws_unprocessed_idx.down.sql",
+	"477_cr_sync_event_trace_spec_idx.down.sql",
+	"476_cr_sync_event_workspace_uniq.down.sql",
+	"475_cr_sync_event_workspace_id.down.sql",
 }
 
 func TestCRSyncEventWorkspaceMigrationHappyPath(t *testing.T) {

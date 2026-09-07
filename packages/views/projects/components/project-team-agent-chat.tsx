@@ -313,7 +313,7 @@ export function TeamAgentStreamView({
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-3">
       <div
         data-testid="project-chat-no-earlier"
-        className="text-center text-xs text-muted-foreground/70"
+        className="text-center text-xs text-muted-foreground"
       >
         {t(($) => $.chat.stream.no_earlier)}
       </div>
@@ -388,7 +388,7 @@ function UserBubble({
           {withdrawnBadge}
         </div>
         <div className="flex items-start gap-1.5">
-          <div className="min-w-0 flex-1 text-sm leading-relaxed text-foreground/85">
+          <div className="min-w-0 flex-1 text-sm leading-relaxed text-foreground">
             <ReadonlyContent content={entry.content ?? ""} attachments={entry.attachments} />
           </div>
           {copyButton}
@@ -432,8 +432,8 @@ function PresenterNoticeCard({ entry }: { entry: TimelineEntry }) {
     >
       <Mic className="h-3 w-3 shrink-0" />
       <span>{text}</span>
-      <span className="text-muted-foreground/60">·</span>
-      <span className="tabular-nums text-muted-foreground/70">{timeAgo(entry.created_at)}</span>
+      <span className="text-muted-foreground">·</span>
+      <span className="tabular-nums text-muted-foreground">{timeAgo(entry.created_at)}</span>
     </div>
   );
 }
@@ -576,7 +576,7 @@ function TaskExecutionCard({
             {b.label}
           </span>
           {duration && !running && (
-            <span className="tabular-nums text-muted-foreground/70">{duration}</span>
+            <span className="tabular-nums text-muted-foreground">{duration}</span>
           )}
           {canStop && (
             <Button
@@ -595,7 +595,7 @@ function TaskExecutionCard({
         {filterOn ? (
           kind === "done" && (
             <div
-              className="text-sm leading-relaxed text-foreground/85"
+              className="text-sm leading-relaxed text-foreground"
               data-testid="project-chat-task-summary-output"
             >
               {taskResultOutput(task.result) || t(($) => $.chat.stream.no_text_reply)}
@@ -605,7 +605,7 @@ function TaskExecutionCard({
           items.length > 0 && <TimelineView items={items} isStreaming={running} />
         )}
         {kind === "error" && task.error && (
-          <div className="text-xs text-destructive/90">{task.error}</div>
+          <div className="text-xs text-destructive">{task.error}</div>
         )}
       </div>
     </div>

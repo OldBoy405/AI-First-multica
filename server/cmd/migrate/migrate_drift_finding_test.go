@@ -23,8 +23,8 @@ func driftMigrations(t *testing.T, dir string) []string {
 	t.Helper()
 	var files []string
 	for _, v := range []string{
-		"456_drift_finding", "457_drift_finding_id_uidx", "458_drift_finding_primary_key",
-		"459_drift_finding_dedup_idx", "460_drift_finding_keyset",
+		"470_drift_finding", "471_drift_finding_id_uidx", "472_drift_finding_primary_key",
+		"473_drift_finding_dedup_idx", "474_drift_finding_keyset",
 	} {
 		files = append(files, filepath.Join(dir, v+".up.sql"))
 	}
@@ -174,11 +174,11 @@ func TestDriftFindingMigrationsUpDownRoundtrip(t *testing.T) {
 
 	// Down roundtrip in reverse order leaves a clean schema.
 	downs := []string{
-		filepath.Join(migrationsDir, "460_drift_finding_keyset.down.sql"),
-		filepath.Join(migrationsDir, "459_drift_finding_dedup_idx.down.sql"),
-		filepath.Join(migrationsDir, "458_drift_finding_primary_key.down.sql"),
-		filepath.Join(migrationsDir, "457_drift_finding_id_uidx.down.sql"),
-		filepath.Join(migrationsDir, "456_drift_finding.down.sql"),
+		filepath.Join(migrationsDir, "474_drift_finding_keyset.down.sql"),
+		filepath.Join(migrationsDir, "473_drift_finding_dedup_idx.down.sql"),
+		filepath.Join(migrationsDir, "472_drift_finding_primary_key.down.sql"),
+		filepath.Join(migrationsDir, "471_drift_finding_id_uidx.down.sql"),
+		filepath.Join(migrationsDir, "470_drift_finding.down.sql"),
 	}
 	for _, p := range downs {
 		execFileOnConn(t, conn.Conn(), p)

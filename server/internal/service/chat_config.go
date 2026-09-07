@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -123,7 +124,7 @@ const chatConfigLiveLoadTimeout = 30 * time.Second
 // Every rejection returns ErrInvalidModelOrThinkingLevel, which the handler
 // maps to 400 invalid_model_or_thinking_level.
 func LoadChatCatalogForConfig(ctx context.Context, q *db.Queries, port ChatCatalogPort, agentRow db.Agent) (agent.Catalog, error) {
-	verdict, err := AgentReadiness(ctx, q, agentRow)
+	verdict, err := AgentReadiness(ctx, RuntimeLookup{Queries: q, Source: obsmetrics.RuntimeLookupSourceChat}, agentRow)
 	if err != nil {
 		return agent.Catalog{}, err
 	}

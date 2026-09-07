@@ -578,7 +578,7 @@ function MergeForwardPreviewDialog({
             <ul className="space-y-1" data-testid="merge-forward-history">
               {items.map((c) => (
                 <li key={c.id} className="text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground/80">[{timeAgo(c.created_at)}]</span>{" "}
+                  <span className="font-medium text-foreground">[{timeAgo(c.created_at)}]</span>{" "}
                   <span className="whitespace-pre-wrap">{c.content.replace(/\s+/g, " ").trim()}</span>
                 </li>
               ))}
@@ -644,7 +644,7 @@ function DiscussionMessageStream({
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-1 px-4 py-3">
       <div
         data-testid="discussion-no-earlier"
-        className="pb-2 text-center text-xs text-muted-foreground/70"
+        className="pb-2 text-center text-xs text-muted-foreground"
       >
         {t(($) => $.chat.stream.no_earlier)}
       </div>
@@ -715,7 +715,7 @@ function SharedDiscussionMessage({
         )}
         <span className="text-xs text-muted-foreground">{timeAgo(message.created_at)}</span>
       </div>
-      <div className="pl-[38px] text-sm leading-relaxed text-foreground/85">
+      <div className="pl-[38px] text-sm leading-relaxed text-foreground">
         <ReadonlyContent content={message.content} attachments={message.attachments} />
       </div>
       <AttachmentList attachments={message.attachments} content={message.content} className="mt-1.5 pl-[38px]" />
@@ -777,7 +777,7 @@ function LegacyDiscussionStream({
             <span className="text-sm font-medium">{getActorName(entry.actor_type, entry.actor_id)}</span>
             <span className="text-xs text-muted-foreground">{timeAgo(entry.created_at)}</span>
           </div>
-          <div className="pl-[38px] text-sm leading-relaxed text-foreground/85">
+          <div className="pl-[38px] text-sm leading-relaxed text-foreground">
             <ReadonlyContent content={entry.content ?? ""} attachments={entry.attachments} />
           </div>
         </div>

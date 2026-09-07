@@ -136,7 +136,7 @@ export function ApprovalCard({
       <div className="mb-1.5 flex items-center gap-2">
         <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600" />
         <span className="font-medium text-muted-foreground">{cr.cr_id}</span>
-        <span className="text-muted-foreground/70">·</span>
+        <span className="text-muted-foreground">·</span>
         <span className="font-medium">{stageLabel(stage)}</span>
       </div>
 
@@ -253,7 +253,7 @@ function BlockedCard({ cr, node }: { cr: ProjectGateCR; node: GateNode }) {
       <div className="mb-1.5 flex items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-destructive" />
         <span className="font-medium text-muted-foreground">{cr.cr_id}</span>
-        <span className="text-muted-foreground/70">·</span>
+        <span className="text-muted-foreground">·</span>
         <span className="font-medium text-destructive">
           {t(($) => $.governance.review_blocked)}
         </span>
@@ -268,7 +268,7 @@ function BlockedCard({ cr, node }: { cr: ProjectGateCR; node: GateNode }) {
               {b.location && <span className="font-medium">{b.location}: </span>}
               {b.issue}
               {b.suggestion && (
-                <div className="text-muted-foreground/70">{b.suggestion}</div>
+                <div className="text-muted-foreground">{b.suggestion}</div>
               )}
             </li>
           ))}
@@ -323,7 +323,7 @@ function HistoryRow({ cr, node }: { cr: ProjectGateCR; node: GateNode }) {
         ) : (
           <XCircle className="h-3 w-3 shrink-0 text-muted-foreground" />
         )}
-        <span className="font-medium text-muted-foreground/90">{cr.cr_id}</span>
+        <span className="font-medium text-muted-foreground">{cr.cr_id}</span>
         <span>{label}</span>
         {node.attempt > 1 && (
           <span className={cn("tabular-nums")}>

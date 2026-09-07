@@ -141,14 +141,14 @@ function QueueBarItem({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 text-xs">
           <span className="truncate font-medium text-muted-foreground">{name}</span>
-          <span className="shrink-0 text-muted-foreground/70">
+          <span className="shrink-0 text-muted-foreground">
             {statusLabel(t, item.status)}
           </span>
-          <span className="shrink-0 tabular-nums text-muted-foreground/70">
+          <span className="shrink-0 tabular-nums text-muted-foreground">
             {formatRelativeDate(item.created_at)}
           </span>
         </div>
-        <div className="truncate text-sm text-foreground/85">{summary}</div>
+        <div className="truncate text-sm text-foreground">{summary}</div>
       </div>
       {canCancel && (
         <Button

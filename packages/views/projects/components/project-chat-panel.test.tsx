@@ -85,6 +85,7 @@ function makeNavAdapter(overrides: Partial<NavigationAdapter> = {}): NavigationA
     back: () => {},
     pathname: "/",
     searchParams: new URLSearchParams(),
+    hash: "",
     getShareableUrl: (p) => p,
     ...overrides,
   };

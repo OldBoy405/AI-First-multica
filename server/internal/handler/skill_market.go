@@ -77,7 +77,7 @@ func (h *Handler) GetSkillMarket(w http.ResponseWriter, r *http.Request) {
 			Source:      skillpkg.ParseSkillMetadata(s.Content).Fields["source"],
 		})
 	}
-	for _, b := range h.TaskService.BuiltinSkills() {
+	for _, b := range h.TaskService.AllBuiltinSkills() {
 		out.Builtin = append(out.Builtin, MarketBuiltin{
 			Name:        b.Name,
 			Description: b.Description,

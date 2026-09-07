@@ -32,7 +32,11 @@ export type InboxItemType =
   | "presenter_approved"
   | "presenter_rejected"
   | "presenter_transferred"
-  | "presenter_revoked";
+  | "presenter_revoked"
+  // System notifications are intentionally issue-less. Keep them in the
+  // same Inbox model so read/archive/realtime behavior remains consistent.
+  | "autopilot_paused"
+  | "autopilot_quota_exceeded";
 
 /**
  * One workspace's unread inbox count in the cross-workspace summary

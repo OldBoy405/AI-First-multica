@@ -61,6 +61,27 @@ var commentContentBigramIndex = usableIndexRequirement{
 	Extension:     "pg_bigm",
 }
 
+// extensionOperatorClass names an operator class a migration writes literally
+// into a CREATE INDEX, together with the extension that must own it. A
+// migration cannot both build concurrently and swallow a missing extension in a
+// DO ... EXCEPTION block, so the ones that need an optional opclass are gated on
+// this instead.
+type extensionOperatorClass struct {
+	AccessMethod  string
+	OperatorClass string
+	Extension     string
+}
+
+// issuePropertiesBigramOperatorClass gates migration 446. pg_bigm ships with
+// neither core Postgres nor the pgvector image CI and self-hosted deployments
+// run, so the index it builds is best-effort; the contains prefilter it
+// accelerates stays correct without it.
+var issuePropertiesBigramOperatorClass = extensionOperatorClass{
+	AccessMethod:  "gin",
+	OperatorClass: "gin_bigm_ops",
+	Extension:     "pg_bigm",
+}
+
 // preMigrationHooks wires migration version → hook. The version key is
 // the file basename without the `.up.sql` suffix, matching what
 // `migrations.ExtractVersion` returns.
@@ -244,25 +265,25 @@ var concurrentIndexCleanups = map[string]string{
 	"358_autopilot_quota_reservation_state_index":               "idx_autopilot_quota_reservation_state",
 	"361_issue_last_activity_index":                             "idx_issue_workspace_last_activity",
 	// AIFIRST: CR-2026-047 TASK-02 concurrent-index retry cleanup.
-	"440_atq_project_active_index":                "idx_atq_project_active",
-	"442_pipeline_run_architecture_active_unique": "idx_pipeline_run_architecture_active_cr",
-	"443_agent_task_pipeline_node_active_unique":  "idx_agent_task_queue_pipeline_node_active",
-	"447_maturity_snapshot_identity":              "maturity_snapshot_identity_uidx",
-	"449_maturity_snapshot_scope_date":            "maturity_snapshot_scope_date_idx",
-	"450_maturity_report_history":                 "idx_atq_maturity_report_history",
+	"454_atq_project_active_index":                "idx_atq_project_active",
+	"456_pipeline_run_architecture_active_unique": "idx_pipeline_run_architecture_active_cr",
+	"457_agent_task_pipeline_node_active_unique":  "idx_agent_task_queue_pipeline_node_active",
+	"461_maturity_snapshot_identity":              "maturity_snapshot_identity_uidx",
+	"463_maturity_snapshot_scope_date":            "maturity_snapshot_scope_date_idx",
+	"464_maturity_report_history":                 "idx_atq_maturity_report_history",
 	// AIFIRST: CR-2026-048 TASK-01 (Skill Market telemetry + appeal lookup).
-	"453_skill_usage_event_task_id":    "skill_usage_event_task_id_idx",
-	"454_skill_usage_event_scope":      "skill_usage_event_scope_idx",
-	"455_skill_appeal_activity_index":  "skill_appeal_activity_idx",
+	"467_skill_usage_event_task_id":    "skill_usage_event_task_id_idx",
+	"468_skill_usage_event_scope":      "skill_usage_event_scope_idx",
+	"469_skill_appeal_activity_index":  "skill_appeal_activity_idx",
 	// AIFIRST: CR-2026-049 TASK-04 (drift_finding PK/dedup/keyset).
-	"457_drift_finding_id_uidx":  "drift_finding_id_uidx",
-	"459_drift_finding_dedup_idx": "drift_finding_dedup_idx",
-	"460_drift_finding_keyset":   "drift_finding_keyset_idx",
+	"471_drift_finding_id_uidx":  "drift_finding_id_uidx",
+	"473_drift_finding_dedup_idx": "drift_finding_dedup_idx",
+	"474_drift_finding_keyset":   "drift_finding_keyset_idx",
 	// AIFIRST: CR-2026-049 TASK-05 (cr_sync_event workspace scoping + approval idempotency).
-	"462_cr_sync_event_workspace_uniq":    "cr_sync_event_workspace_dedup_idx",
-	"463_cr_sync_event_trace_spec_idx":    "cr_sync_event_trace_spec_idx",
-	"464_cr_sync_event_ws_unprocessed_idx": "cr_sync_event_ws_unprocessed_idx",
-	"467_approval_workspace_approve_uniq":  "approval_record_approve_ws_uniq",
+	"476_cr_sync_event_workspace_uniq":    "cr_sync_event_workspace_dedup_idx",
+	"477_cr_sync_event_trace_spec_idx":    "cr_sync_event_trace_spec_idx",
+	"478_cr_sync_event_ws_unprocessed_idx": "cr_sync_event_ws_unprocessed_idx",
+	"481_approval_workspace_approve_uniq":  "approval_record_approve_ws_uniq",
 	"363_plugin_invocation_installation_index":                  "idx_plugin_invocation_installation_created",
 	"364_plugin_invocation_created_at_index":                    "idx_plugin_invocation_created_at",
 	"378_channel_chat_context_generation_key":                   "channel_chat_context_generation_session_revision_idx",
@@ -291,23 +312,29 @@ var concurrentIndexCleanups = map[string]string{
 	"428_channel_task_delivery_binding_index":                   "idx_channel_task_delivery_binding",
 	"429_channel_task_delivery_installation_index":              "idx_channel_task_delivery_installation",
 	"430_channel_outbound_message_binding_index":                "idx_channel_outbound_message_binding_route",
+	"438_agent_runtime_online_last_seen_index":                  "idx_agent_runtime_online_last_seen",
+	"439_agent_runtime_offline_last_seen_index":                 "idx_agent_runtime_offline_last_seen",
+	"440_github_pr_head_sha_index":                              "idx_github_pull_request_head_sha",
+	"443_issue_project_status_index":                            "idx_issue_project_status",
+	"445_comment_delegated_failure_unsettled_index":             "idx_comment_delegated_failure_unsettled",
+	"446_issue_properties_bigm_index":                           "idx_issue_properties_bigm",
 	// AIFIRST: CR-2026-059 TASK-01 (SDD §4.9): Discussion shared-session and
 	// idempotency index builds.
-	"483_chat_session_private_active_unique": "chat_session_private_creator_active_unique",
-	"485_chat_session_project_shared_active_unique": "chat_session_project_shared_active_unique",
-	"488_chat_idempotency_scope_key_unique": "chat_idempotency_scope_key_uidx",
-	"490_idx_chat_idempotency_created": "idx_chat_idempotency_created",
+	"497_chat_session_private_active_unique": "chat_session_private_creator_active_unique",
+	"499_chat_session_project_shared_active_unique": "chat_session_project_shared_active_unique",
+	"502_chat_idempotency_scope_key_unique": "chat_idempotency_scope_key_uidx",
+	"504_idx_chat_idempotency_created": "idx_chat_idempotency_created",
 	// AIFIRST: CR-2026-059 TASK-01 ledger completeness: these AIFIRST builds
 	// (CR-2026-052/056) predate this CR and were never registered, tripping
 	// the total-invariant tests. Registration-only; each entry costs one
 	// to_regclass lookup on a database where the migration is still pending.
-	"469_approval_continuation_record_active_unique": "idx_approval_continuation_record_active",
-	"471_approval_continuation_workspace_cr_pending_unique": "idx_approval_continuation_workspace_cr_pending",
-	"473_project_chat_session_id_uidx": "project_chat_session_id_uidx",
-	"475_project_chat_session_project_active_unique": "project_chat_session_project_active_unique",
-	"476_project_chat_session_issue_uidx": "project_chat_session_issue_uidx",
-	"477_project_chat_session_project_index": "project_chat_session_project_index",
-	"480_issue_project_chat_session_origin_uidx": "issue_project_chat_session_origin_uidx",
+	"483_approval_continuation_record_active_unique": "idx_approval_continuation_record_active",
+	"485_approval_continuation_workspace_cr_pending_unique": "idx_approval_continuation_workspace_cr_pending",
+	"487_project_chat_session_id_uidx": "project_chat_session_id_uidx",
+	"489_project_chat_session_project_active_unique": "project_chat_session_project_active_unique",
+	"490_project_chat_session_issue_uidx": "project_chat_session_issue_uidx",
+	"491_project_chat_session_project_index": "project_chat_session_project_index",
+	"494_issue_project_chat_session_origin_uidx": "issue_project_chat_session_origin_uidx",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
@@ -328,18 +355,20 @@ var concurrentDownIndexCleanups = map[string]string{
 	"303_drop_redundant_lark_chat_session_binding_index":    "idx_lark_chat_session_binding_session",
 	"312_drop_global_plugin_identity_key_index":             "idx_plugin_identity_key",
 	// AIFIRST: CR-2026-049 TASK-05 (down migrations rebuild pre-workspace indexes).
-	"466_drop_cr_sync_event_unprocessed_idx":    "idx_cr_sync_event_unprocessed",
-	"468_drop_approval_record_approve_uniq":     "approval_record_approve_uniq",
+	"480_drop_cr_sync_event_unprocessed_idx":    "idx_cr_sync_event_unprocessed",
+	"482_drop_approval_record_approve_uniq":     "approval_record_approve_uniq",
 	"371_comment_content_search_index_strategy":             "idx_comment_content_trgm",
 	"375_drop_issue_last_activity_index":                    "idx_issue_workspace_last_activity",
 	"391_drop_agent_task_queue_dispatched_prepare_index":    "idx_agent_task_queue_dispatched_prepare",
+	"437_drop_agent_runtime_last_seen_at_index":             "idx_agent_runtime_last_seen_at",
+	"450_drop_comment_delegated_failure_pending_index":      "idx_comment_delegated_failure_pending",
 	// AIFIRST: CR-2026-059 TASK-01 (SDD §4.9): the ONLY down direction that
-	// builds an index concurrently is 484.down (old wide-predicate rebuild).
-	"484_drop_chat_session_project_creator_active_unique":   "chat_session_project_creator_active_unique",
+	// builds an index concurrently is 498.down (old wide-predicate rebuild).
+	"498_drop_chat_session_project_creator_active_unique":   "chat_session_project_creator_active_unique",
 	// AIFIRST: CR-2026-059 TASK-01 ledger completeness: CR-2026-056's
-	// 479.down rebuilds issue_project_chat_unique concurrently but was never
+	// 493.down rebuilds issue_project_chat_unique concurrently but was never
 	// registered (total-invariant test failure).
-	"479_drop_issue_project_chat_unique":                    "issue_project_chat_unique",
+	"493_drop_issue_project_chat_unique":                    "issue_project_chat_unique",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {
@@ -420,6 +449,11 @@ var upMigrationConditions = map[string]migrationCondition{
 	// fallback only after proving the preferred index has the exact usable shape;
 	// pg_bigm-less self-hosted databases keep trgm and record 371 as a no-op.
 	"371_comment_content_search_index_strategy": whenIndexUsable(commentContentBigramIndex),
+	// The properties prefilter index is an optimization, not a correctness
+	// requirement: build it where pg_bigm exists and record a no-op everywhere
+	// else, rather than failing the run (and with it backend startup) on every
+	// database without the extension.
+	"446_issue_properties_bigm_index": whenOperatorClassAvailable(issuePropertiesBigramOperatorClass),
 }
 
 func hooksForDirection(direction string) map[string]preMigrationHook {
@@ -478,6 +512,42 @@ func whenIndexNotUsable(requirement usableIndexRequirement) migrationCondition {
 		}
 		if usable {
 			return false, fmt.Sprintf("preferred index %s is ready", requirement.IndexRegclass), nil
+		}
+		return true, "", nil
+	}
+}
+
+// whenOperatorClassAvailable lets a migration's SQL run only where the operator
+// class it names is installed, owned by the expected extension, and visible on
+// the search_path the migration itself will resolve the unqualified name
+// against — the condition runs on the same pinned connection as the SQL.
+//
+// Checking the extension alone would be weaker: an opclass in a schema outside
+// the search_path still fails the CREATE INDEX, which would abort the run.
+func whenOperatorClassAvailable(opclass extensionOperatorClass) migrationCondition {
+	return func(ctx context.Context, conn *pgxpool.Conn) (bool, string, error) {
+		var available bool
+		if err := conn.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_opclass opc
+				JOIN pg_am am ON am.oid = opc.opcmethod
+				JOIN pg_depend dep
+				  ON dep.classid = 'pg_opclass'::regclass
+				 AND dep.objid = opc.oid
+				 AND dep.refclassid = 'pg_extension'::regclass
+				 AND dep.deptype = 'e'
+				JOIN pg_extension ext ON ext.oid = dep.refobjid
+				WHERE opc.opcname = $1
+				  AND am.amname = $2
+				  AND ext.extname = $3
+				  AND pg_opclass_is_visible(opc.oid)
+			)
+		`, opclass.OperatorClass, opclass.AccessMethod, opclass.Extension).Scan(&available); err != nil {
+			return false, "", fmt.Errorf("inspect operator class %q: %w", opclass.OperatorClass, err)
+		}
+		if !available {
+			return false, fmt.Sprintf("operator class %s (%s) is not installed", opclass.OperatorClass, opclass.Extension), nil
 		}
 		return true, "", nil
 	}

@@ -182,7 +182,11 @@ func TestDiscussionContainerExcludedFromSqlcQueries(t *testing.T) {
 	})
 
 	t.Run("GetProjectIssueStats excludes the container", func(t *testing.T) {
-		rows, err := testHandler.Queries.GetProjectIssueStats(ctx, []pgtype.UUID{util.MustParseUUID(fx.ProjectID)})
+		rows, err := testHandler.Queries.GetProjectIssueStats(ctx, db.GetProjectIssueStatsParams{
+			WorkspaceID:        util.MustParseUUID(testWorkspaceID),
+			ProjectIds:         []pgtype.UUID{util.MustParseUUID(fx.ProjectID)},
+			TerminalStatusKeys: []string{"done", "cancelled"},
+		})
 		if err != nil {
 			t.Fatalf("GetProjectIssueStats: %v", err)
 		}

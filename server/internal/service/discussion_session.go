@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/multica-ai/multica/server/internal/attribution"
+	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -196,7 +197,7 @@ func routableDiscussionCoordinator(ctx context.Context, q *db.Queries, wsID, con
 	if err != nil {
 		return nil, fmt.Errorf("load discussion coordinator: %w", err)
 	}
-	verdict, err := AgentReadiness(ctx, q, agent)
+	verdict, err := AgentReadiness(ctx, RuntimeLookup{Queries: q, Source: obsmetrics.RuntimeLookupSourceChat}, agent)
 	if err != nil {
 		return nil, err
 	}

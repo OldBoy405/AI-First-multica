@@ -168,7 +168,7 @@ func TestApprovalReminderCardTokenInvalidation(t *testing.T) {
 		fake.sendN.Add(1)
 		sendCalls++
 		if sendCalls == 1 {
-			writeJSON(w, map[string]any{"code": codeTokenExpired, "msg": "expired"})
+			writeJSON(w, map[string]any{"code": codeTenantTokenInvalid, "msg": "expired"})
 			return
 		}
 		writeJSON(w, map[string]any{"code": 0, "data": map[string]string{"message_id": "om_ok"}})
