@@ -89,6 +89,11 @@ const (
 	// replay, while leaving it out would cost another wedged cache.
 	codeTenantTokenInvalid = 99991663
 	codeAppTokenInvalid    = 99991664
+
+	// codeNoAvailability means the bot cannot send a private message to the
+	// user because they are outside the bot's visible scope. Keep the
+	// group-level reply path visible so users still get guidance.
+	codeNoAvailability = 230013
 )
 
 // HTTPClientConfig configures the production Lark HTTP APIClient.
