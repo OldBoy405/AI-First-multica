@@ -14,6 +14,7 @@ package handler
 // on any mismatch (fail closed).
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -126,4 +127,75 @@ func (h *Handler) publishCRUpdated(r *http.Request, workspaceID string, crID str
 		},
 	})
 	slog.Debug("cr bind: published cr:updated", "cr_id", crID, "workspace_id", workspaceID)
+}
+
+// HandleBindPromotionRun is POST /api/crs/{crID}/bind-promotion-run
+// (CR-2026-061 SDD §3.2): binds the promotion pre-built pipeline run to a
+// newly registered CR. Same family as HandleBindCurrentTask: task-token only
+// (401 TASK_CONTEXT_REQUIRED), identity server-derived, every error row uses
+// the {"error":"<code>"} shape (writeJSON/writeError family, NOT
+// writeErrorCode — SDD §3.2 shape note).
+func (h *Handler) HandleBindPromotionRun(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Actor-Source") != "task_token" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "TASK_CONTEXT_REQUIRED"})
+		return
+	}
+	workspaceIDRaw := r.Header.Get("X-Workspace-ID")
+	if workspaceIDRaw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_RUN_ID"})
+		return
+	}
+	workspaceID, err := util.ParseUUID(workspaceIDRaw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_RUN_ID"})
+		return
+	}
+	crID := chi.URLParam(r, "crID")
+	if crID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_RUN_ID"})
+		return
+	}
+	var req struct {
+		RunID string `json:"run_id"`
+	}
+	if derr := json.NewDecoder(r.Body).Decode(&req); derr != nil || req.RunID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_RUN_ID"})
+		return
+	}
+	runID, err := util.ParseUUID(req.RunID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "INVALID_RUN_ID"})
+		return
+	}
+
+	result, err := h.TaskService.BindPromotionRunToCR(r.Context(), runID, workspaceID, crID)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrPromotionBindRunNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "RUN_NOT_FOUND"})
+		case errors.Is(err, service.ErrPromotionBindCRNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "CR_NOT_FOUND"})
+		case errors.Is(err, service.ErrPromotionBindRunCRConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "RUN_CR_CONFLICT"})
+		case errors.Is(err, service.ErrPromotionBindCRIssueConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "CR_ISSUE_CONFLICT"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "CR_BIND_FAILED"})
+		}
+		return
+	}
+
+	// Transaction committed. Publish cr:updated only when the bind actually
+	// changed state (same-value replay must not emit a refresh event, same
+	// contract as HandleBindCurrentTask).
+	if result.Changed {
+		h.publishCRUpdated(r, uuidToString(workspaceID), crID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cr_id":    result.CRID,
+		"run_id":   uuidToString(result.RunID),
+		"issue_id": uuidToString(result.IssueID),
+		"changed":  result.Changed,
+	})
 }

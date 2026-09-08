@@ -8515,3 +8515,148 @@ func agentToMap(a db.Agent) map[string]any {
 		"archived_by":          util.UUIDToPtr(a.ArchivedBy),
 	}
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// AIFIRST: CR-2026-061 (SDD §4.5): promotion run → CR binding. Same family as
+// BindCurrentTaskToCR (task-token identity, CAS, activity_log audit) but
+// independent: the pre-built requirement-authoring run is the subject instead
+// of a task row, and the first node (seq1) is marked passed in the same
+// transaction (D-5).
+
+// PromotionRunBindResult is the success payload of BindPromotionRunToCR
+// (SDD §3.2).
+type PromotionRunBindResult struct {
+	CRID    string      `json:"cr_id"`
+	RunID   pgtype.UUID `json:"run_id"`
+	IssueID pgtype.UUID `json:"issue_id"`
+	Changed bool        `json:"changed"`
+}
+
+// Promotion-bind sentinel errors (SDD §3.2 error table).
+var (
+	ErrPromotionBindRunNotFound     = errors.New("RUN_NOT_FOUND")
+	ErrPromotionBindCRNotFound      = errors.New("CR_NOT_FOUND")
+	ErrPromotionBindRunCRConflict   = errors.New("RUN_CR_CONFLICT")
+	ErrPromotionBindCRIssueConflict = errors.New("CR_ISSUE_CONFLICT")
+	ErrPromotionBindFailed          = errors.New("CR_BIND_FAILED")
+)
+
+// BindPromotionRunToCR binds a pre-built promotion run to a newly registered
+// CR (SDD §4.5): cr_id NULL → CR-ID on the SAME run row, cr.shell_issue_id
+// CAS, first node running → passed, activity_log audit — all in one
+// transaction. Same-run-same-CR replay returns changed=false with zero
+// writes; a run already bound to a DIFFERENT CR is the fixed 409
+// RUN_CR_CONFLICT.
+func (s *TaskService) BindPromotionRunToCR(ctx context.Context, runID, actorWorkspaceID pgtype.UUID, crID string) (PromotionRunBindResult, error) {
+	if !runID.Valid || !actorWorkspaceID.Valid || crID == "" {
+		return PromotionRunBindResult{}, ErrPromotionBindRunNotFound
+	}
+	tx, err := s.TxStarter.Begin(ctx)
+	if err != nil {
+		slog.Error("promotion bind: begin tx failed", "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.Queries.WithTx(tx)
+
+	// 1) Lock the run row, scoped to the token workspace. Non-promotion
+	// shapes (other pipeline / issue-less / terminal) are indistinguishable
+	// from absence (404 RUN_NOT_FOUND — no existence leak).
+	run, err := qtx.FindUnboundPromotionRunByID(ctx, db.FindUnboundPromotionRunByIDParams{
+		ID:          runID,
+		WorkspaceID: actorWorkspaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PromotionRunBindResult{}, ErrPromotionBindRunNotFound
+	}
+	if err != nil {
+		slog.Error("promotion bind: lock run failed", "run_id", util.UUIDToString(runID), "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	if run.PipelineID != "requirement-authoring" || !run.IssueID.Valid ||
+		(run.Status != "running" && run.Status != "waiting_approval") {
+		return PromotionRunBindResult{}, ErrPromotionBindRunNotFound
+	}
+	if run.CrID.Valid && run.CrID.String != crID {
+		// Fixed second-bind conflict (SDD §3.2): the run is already bound
+		// to a different CR. Deterministic, never overwrites.
+		return PromotionRunBindResult{}, ErrPromotionBindRunCRConflict
+	}
+	if run.CrID.Valid && run.CrID.String == crID {
+		// Idempotent replay: same run + same CR → changed=false, zero
+		// writes (same AC-B3 mode as bind-current-task).
+		return PromotionRunBindResult{CRID: crID, RunID: run.ID, IssueID: run.IssueID, Changed: false}, nil
+	}
+
+	// 2) Lock the CR projection row, scoped to the token workspace.
+	cr, err := qtx.LockCrForCrBind(ctx, db.LockCrForCrBindParams{
+		WorkspaceID: actorWorkspaceID,
+		CrID:        crID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PromotionRunBindResult{}, ErrPromotionBindCRNotFound
+	}
+	if err != nil {
+		slog.Error("promotion bind: lock cr failed", "cr_id", crID, "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	if cr.ShellIssueID.Valid && cr.ShellIssueID != run.IssueID {
+		return PromotionRunBindResult{}, ErrPromotionBindCRIssueConflict
+	}
+
+	// 3) CAS writes + first-node completion + audit, one transaction.
+	bound, err := qtx.BindPromotionRunIfNull(ctx, db.BindPromotionRunIfNullParams{
+		ID:   run.ID,
+		CrID: pgtype.Text{String: crID, Valid: true},
+	})
+	if err != nil || bound != 1 {
+		slog.Error("promotion bind: cas run.cr_id failed", "run_id", util.UUIDToString(run.ID), "rows", bound, "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	if _, err := qtx.BindCrShellIssueIfNull(ctx, db.BindCrShellIssueIfNullParams{
+		WorkspaceID:  actorWorkspaceID,
+		CrID:         crID,
+		ShellIssueID: run.IssueID,
+	}); err != nil {
+		slog.Error("promotion bind: cas cr.shell_issue_id failed", "cr_id", crID, "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	// D-5: the first node's completion signal is written HERE (the
+	// projector never writes skill nodes); running → passed, same
+	// transaction.
+	if _, err := qtx.MarkPipelineNodePassed(ctx, db.MarkPipelineNodePassedParams{
+		RunID:  run.ID,
+		NodeID: promotionFirstNodeID,
+	}); err != nil {
+		slog.Error("promotion bind: mark first node passed failed", "run_id", util.UUIDToString(run.ID), "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	// Audit (SDD §4.5): action=promotion_run_bound; a failed audit insert
+	// fails the bind closed (same pattern as bind-current-task).
+	details, derr := json.Marshal(map[string]any{
+		"cr_id":    crID,
+		"run_id":   util.UUIDToString(run.ID),
+		"issue_id": util.UUIDToString(run.IssueID),
+		"note":     "promotion pre-built run bound to CR",
+	})
+	if derr != nil {
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	if _, err := qtx.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: actorWorkspaceID,
+		IssueID:     run.IssueID,
+		ActorType:   pgtype.Text{String: "agent", Valid: true},
+		ActorID:     run.StartedBy,
+		Action:      "promotion_run_bound",
+		Details:     details,
+	}); err != nil {
+		slog.Error("promotion bind: activity insert failed", "run_id", util.UUIDToString(run.ID), "cr_id", crID, "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("promotion bind: commit failed", "error", err)
+		return PromotionRunBindResult{}, ErrPromotionBindFailed
+	}
+	return PromotionRunBindResult{CRID: crID, RunID: run.ID, IssueID: run.IssueID, Changed: true}, nil
+}
