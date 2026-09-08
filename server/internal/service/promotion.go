@@ -116,9 +116,12 @@ type PromotionResult struct {
 	RunID       pgtype.UUID               `json:"run_id"`
 }
 
-// promotionContextRefEntry is the issue.context_refs array element written by
-// promotion (SDD §2.1). Unknown extra fields from other entry kinds are
-// tolerated by json.Unmarshal (rewrites re-marshal the same fields only).
+// promotionContextRefEntry is a READ-only view of the issue.context_refs
+// array element written by promotion (SDD §2.1). Unknown extra fields are
+// tolerated by json.Unmarshal and are never re-marshaled from this type:
+// the backfill write is a server-side jsonb element merge
+// (MergeIssueContextRefPipelineRun), so non-promotion entries and unknown
+// extension fields are preserved verbatim (B-CODE-01).
 type promotionContextRefEntry struct {
 	Kind          string   `json:"kind"`
 	SessionID     string   `json:"session_id"`
@@ -647,7 +650,7 @@ func (s *IssueService) PromoteDiscussion(ctx context.Context, p PromoteDiscussio
 		if perr != nil {
 			return PromotionResult{}, perr
 		}
-		entry, idx, ok := findPromotionEntry(entries, dedupeKey)
+		entry, _, ok := findPromotionEntry(entries, dedupeKey)
 		if !ok {
 			return PromotionResult{}, fmt.Errorf("dedupe hit for key %q but entry missing from context_refs", dedupeKey)
 		}
@@ -666,9 +669,13 @@ func (s *IssueService) PromoteDiscussion(ctx context.Context, p PromoteDiscussio
 				runID = rid
 			} else {
 				// Backfill: no run yet — create one and merge its id into
-				// the entry (SDD §4.3/§4.5: backfill and bind can never
-				// interleave because a bindable run implies the entry
-				// already carried pipeline_run_id).
+				// the matched element IN PLACE (SDD §4.3/§4.5). The merge
+				// is a server-side jsonb element-level `||` — never a
+				// Go-side re-marshal of the whole array — so historical
+				// entries and unknown extension fields survive verbatim
+				// (SDD §2.1 append semantics, B-CODE-01). Backfill and
+				// bind can never interleave because a bindable run implies
+				// the entry already carried pipeline_run_id.
 				plan, perr := s.buildPromotionRunPlan(p, dbid.NewV7())
 				if perr != nil {
 					return PromotionResult{}, perr
@@ -678,17 +685,27 @@ func (s *IssueService) PromoteDiscussion(ctx context.Context, p PromoteDiscussio
 					return PromotionResult{}, aerr
 				}
 				runID = adopted
-				entry.PipelineRunID = util.UUIDToString(runID)
-				entries[idx] = entry
-				merged, merr := json.Marshal(entries)
+				merged, merr := qtx.MergeIssueContextRefPipelineRun(ctx, db.MergeIssueContextRefPipelineRunParams{
+					ID:            issue.ID,
+					DedupeKey:     dedupeKey,
+					PipelineRunID: util.UUIDToString(runID),
+				})
 				if merr != nil {
-					return PromotionResult{}, fmt.Errorf("encode merged promotion context refs: %w", merr)
+					return PromotionResult{}, fmt.Errorf("merge promotion pipeline run ref: %w", merr)
 				}
-				if uerr := qtx.SetIssueContextRefPipelineRun(ctx, db.SetIssueContextRefPipelineRunParams{
-					ID:          issue.ID,
-					ContextRefs: merged,
-				}); uerr != nil {
-					return PromotionResult{}, fmt.Errorf("set promotion pipeline run ref: %w", uerr)
+				// Fail-closed verification: the merged array must still
+				// contain the matched promotion element carrying the
+				// expected pipeline_run_id. Anything else means the merge
+				// missed its target — surface it and roll back rather than
+				// proceed with a half-merged run.
+				verify, verr := parsePromotionContextRefs(merged)
+				if verr != nil {
+					return PromotionResult{}, verr
+				}
+				ve, _, vok := findPromotionEntry(verify, dedupeKey)
+				if !vok || ve.PipelineRunID != util.UUIDToString(runID) {
+					return PromotionResult{}, fmt.Errorf(
+						"promotion backfill merge verification failed: matched entry missing or pipeline_run_id mismatch (dedupe key %q)", dedupeKey)
 				}
 			}
 		}

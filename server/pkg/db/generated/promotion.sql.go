@@ -347,18 +347,41 @@ func (q *Queries) MarkPipelineNodePassed(ctx context.Context, arg MarkPipelineNo
 	return result.RowsAffected(), nil
 }
 
-const setIssueContextRefPipelineRun = `-- name: SetIssueContextRefPipelineRun :exec
-UPDATE issue SET context_refs = $1 WHERE id = $2
+const mergeIssueContextRefPipelineRun = `-- name: MergeIssueContextRefPipelineRun :one
+UPDATE issue
+SET context_refs = COALESCE((
+    SELECT jsonb_agg(elem ORDER BY ord)
+    FROM (
+        SELECT t.ord,
+               CASE
+                   WHEN t.elem->>'kind' = 'discussion_promotion'
+                    AND t.elem->>'dedupe_key' = $1::text
+                   THEN t.elem || jsonb_build_object('pipeline_run_id', $2::text)
+                   ELSE t.elem
+               END AS elem
+        FROM jsonb_array_elements(issue.context_refs) WITH ORDINALITY AS t(elem, ord)
+    ) AS merged
+), issue.context_refs)
+WHERE id = $3
+RETURNING context_refs
 `
 
-type SetIssueContextRefPipelineRunParams struct {
-	ContextRefs []byte      `json:"context_refs"`
-	ID          pgtype.UUID `json:"id"`
+type MergeIssueContextRefPipelineRunParams struct {
+	DedupeKey     string      `json:"dedupe_key"`
+	PipelineRunID string      `json:"pipeline_run_id"`
+	ID            pgtype.UUID `json:"id"`
 }
 
-// Dedupe-hit backfill: service merges pipeline_run_id into the matched
-// entry and writes the complete array (SDD §4.3 step 10).
-func (q *Queries) SetIssueContextRefPipelineRun(ctx context.Context, arg SetIssueContextRefPipelineRunParams) error {
-	_, err := q.db.Exec(ctx, setIssueContextRefPipelineRun, arg.ContextRefs, arg.ID)
-	return err
+// Dedupe-hit backfill (SDD §4.3 step 10 / §2.1 append semantics): merge
+// pipeline_run_id into the single matched promotion element IN PLACE.
+// Every other array element and every unknown field of the matched
+// element survives verbatim — the element-level `||` merge never
+// re-marshals or drops history (B-CODE-01 regression fix). Returns the
+// merged array; the service verifies the matched element carries the
+// expected run id and fails the transaction otherwise.
+func (q *Queries) MergeIssueContextRefPipelineRun(ctx context.Context, arg MergeIssueContextRefPipelineRunParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, mergeIssueContextRefPipelineRun, arg.DedupeKey, arg.PipelineRunID, arg.ID)
+	var context_refs []byte
+	err := row.Scan(&context_refs)
+	return context_refs, err
 }

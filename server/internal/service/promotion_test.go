@@ -525,6 +525,120 @@ func TestPromoteDiscussionDedupeHitAndUpgradeBackfill(t *testing.T) {
 	}
 }
 
+// TestPromoteDiscussionBackfillPreservesHeterogeneousContextRefs is the
+// B-CODE-01 regression test: the upgrade backfill must merge pipeline_run_id
+// into ONLY the matched promotion element, leaving every other array element
+// (legacy non-promotion entry, other promotion entry) and every unknown
+// extension field byte-for-byte intact (SDD §2.1 append semantics).
+func TestPromoteDiscussionBackfillPreservesHeterogeneousContextRefs(t *testing.T) {
+	pool := newPromotionPool(t)
+	ctx := context.Background()
+	q := db.New(pool)
+	f := seedPromotionFixture(t, pool)
+	svc := NewIssueService(q, pool, events.New(), nil, &TaskService{Queries: q})
+
+	// Plain promotion first: creates the issue and the matched entry.
+	plain := PromoteDiscussionParams{
+		WorkspaceID:    f.WorkspaceID,
+		ProjectID:      f.ProjectID,
+		SessionID:      f.SessionID,
+		CallerID:       f.UserID,
+		MessageIDs:     []pgtype.UUID{f.MessageID},
+		UpgradeToCR:    false,
+		IdempotencyKey: "plain-preserve-key",
+	}
+	first, err := svc.PromoteDiscussion(ctx, plain)
+	if err != nil {
+		t.Fatalf("plain promotion: %v", err)
+	}
+
+	// Simulate historical / extension data on the SAME issue:
+	// [0] the promotion entry gains unknown extra fields (flat + nested),
+	// [1] a legacy non-promotion entry of another kind,
+	// [2] a second promotion entry for a DIFFERENT source set.
+	legacy := fmt.Sprintf(`{"kind":"source_link","source_issue_id":"%s","label":"upstream","meta":{"n":7}}`, promoMsgB)
+	const extras = `{"extra_field":"keep-me","nested_obj":{"k":"v","n":[1,2,3]}}`
+	const otherPromo = `{"kind":"discussion_promotion","session_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","message_ids":[],"attachment_ids":[],"dedupe_key":"other-dedupe","promoted_by":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","promoted_at":"2026-01-01T00:00:00Z"}`
+	if _, err := pool.Exec(ctx, `
+		UPDATE issue
+		SET context_refs = jsonb_build_array(
+			context_refs -> 0 || $2::jsonb,
+			$3::jsonb,
+			$4::jsonb
+		)
+		WHERE id = $1`, first.IssueID, extras, legacy, otherPromo); err != nil {
+		t.Fatalf("seed heterogeneous context_refs: %v", err)
+	}
+
+	// Upgrade with a NEW key: same source → dedupe hit → backfill merge.
+	upgrade := plain
+	upgrade.UpgradeToCR = true
+	upgrade.IdempotencyKey = "upgrade-preserve-key"
+	second, err := svc.PromoteDiscussion(ctx, upgrade)
+	if err != nil {
+		t.Fatalf("upgrade promotion: %v", err)
+	}
+	if second.Created || !second.UpgradeToCR || !second.RunID.Valid || second.IssueID != first.IssueID {
+		t.Fatalf("upgrade result = %+v", second)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM pipeline_run WHERE issue_id = $1`, first.IssueID); n != 1 {
+		t.Fatalf("pipeline_run rows after backfill = %d, want 1", n)
+	}
+
+	// Array length unchanged: no element added or dropped.
+	var length int
+	if err := pool.QueryRow(ctx, `SELECT jsonb_array_length(context_refs) FROM issue WHERE id = $1`, first.IssueID).Scan(&length); err != nil {
+		t.Fatalf("array length: %v", err)
+	}
+	if length != 3 {
+		t.Fatalf("context_refs length = %d, want 3", length)
+	}
+
+	// Matched element: pipeline_run_id merged in, extras preserved.
+	var runID, extra, nestedK string
+	var nestedN1 int
+	if err := pool.QueryRow(ctx, `
+		SELECT context_refs->0->>'pipeline_run_id',
+		       context_refs->0->>'extra_field',
+		       context_refs->0->'nested_obj'->>'k',
+		       (context_refs->0->'nested_obj'->'n'->>1)::int
+		FROM issue WHERE id = $1`, first.IssueID).Scan(&runID, &extra, &nestedK, &nestedN1); err != nil {
+		t.Fatalf("read matched element: %v", err)
+	}
+	if runID != util.UUIDToString(second.RunID) {
+		t.Fatalf("matched pipeline_run_id = %q, want %s", runID, util.UUIDToString(second.RunID))
+	}
+	if extra != "keep-me" || nestedK != "v" || nestedN1 != 2 {
+		t.Fatalf("matched element extras = %q/%q/%d, want keep-me/v/2", extra, nestedK, nestedN1)
+	}
+
+	// Legacy non-promotion entry: jsonb identity preserved.
+	var legacyEq bool
+	if err := pool.QueryRow(ctx, `SELECT context_refs->1 = $2::jsonb FROM issue WHERE id = $1`, first.IssueID, legacy).Scan(&legacyEq); err != nil {
+		t.Fatalf("compare legacy entry: %v", err)
+	}
+	if !legacyEq {
+		t.Fatalf("legacy entry changed by backfill")
+	}
+
+	// Other promotion entry (different source): untouched, no run id.
+	var otherRunID, otherDedupe string
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(context_refs->2->>'pipeline_run_id', ''), context_refs->2->>'dedupe_key'
+		FROM issue WHERE id = $1`, first.IssueID).Scan(&otherRunID, &otherDedupe); err != nil {
+		t.Fatalf("read other promotion entry: %v", err)
+	}
+	if otherDedupe != "other-dedupe" || otherRunID != "" {
+		t.Fatalf("unmatched promotion entry mutated: dedupe=%q run=%q", otherDedupe, otherRunID)
+	}
+
+	// The promote/dedupe read path still resolves the right source refs.
+	if second.SourceRefs.SessionID != f.SessionID || len(second.SourceRefs.MessageIDs) != 1 ||
+		second.SourceRefs.MessageIDs[0] != f.MessageID {
+		t.Fatalf("source_refs = %+v", second.SourceRefs)
+	}
+}
+
 func TestPromoteDiscussionForbiddenAndZeroWrites(t *testing.T) {
 	pool := newPromotionPool(t)
 	ctx := context.Background()
