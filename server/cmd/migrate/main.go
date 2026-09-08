@@ -335,6 +335,10 @@ var concurrentIndexCleanups = map[string]string{
 	"490_project_chat_session_issue_uidx": "project_chat_session_issue_uidx",
 	"491_project_chat_session_project_index": "project_chat_session_project_index",
 	"494_issue_project_chat_session_origin_uidx": "issue_project_chat_session_origin_uidx",
+	// AIFIRST: CR-2026-061 TASK-01 (SDD §2.5/§2.6): promotion run uniqueness
+	// guard and dedupe_key containment index builds.
+	"506_pipeline_run_promotion_active_unique": "idx_pipeline_run_promotion_active_issue",
+	"507_issue_context_refs_gin":                "idx_issue_context_refs_gin",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
