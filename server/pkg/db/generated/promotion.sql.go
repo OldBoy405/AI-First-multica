@@ -12,37 +12,37 @@ import (
 )
 
 const appendIssueContextRefs = `-- name: AppendIssueContextRefs :exec
-UPDATE issue SET context_refs = context_refs || $2::jsonb WHERE id = $1
+UPDATE issue SET context_refs = context_refs || $1::jsonb WHERE id = $2
 `
 
 type AppendIssueContextRefsParams struct {
-	ID      pgtype.UUID `json:"id"`
-	Column2 []byte      `json:"column_2"`
+	ContextRefs []byte      `json:"context_refs"`
+	ID          pgtype.UUID `json:"id"`
 }
 
 // Idempotent append of a promotion entry to the array tail (SDD §2.1);
 // never overwrites existing entries.
 func (q *Queries) AppendIssueContextRefs(ctx context.Context, arg AppendIssueContextRefsParams) error {
-	_, err := q.db.Exec(ctx, appendIssueContextRefs, arg.ID, arg.Column2)
+	_, err := q.db.Exec(ctx, appendIssueContextRefs, arg.ContextRefs, arg.ID)
 	return err
 }
 
 const bindPromotionRunIfNull = `-- name: BindPromotionRunIfNull :execrows
 UPDATE pipeline_run
-SET cr_id = $2
-WHERE id = $1 AND cr_id IS NULL AND pipeline_id = 'requirement-authoring'
+SET cr_id = $1
+WHERE id = $2 AND cr_id IS NULL AND pipeline_id = 'requirement-authoring'
 `
 
 type BindPromotionRunIfNullParams struct {
-	ID   pgtype.UUID `json:"id"`
 	CrID pgtype.Text `json:"cr_id"`
+	ID   pgtype.UUID `json:"id"`
 }
 
 // CAS write of run.cr_id (SDD §4.5 step 3). Returns the affected row
 // count; 0 rows after a locked read means a concurrent bind won — the
 // caller re-reads under the lock before deciding.
 func (q *Queries) BindPromotionRunIfNull(ctx context.Context, arg BindPromotionRunIfNullParams) (int64, error) {
-	result, err := q.db.Exec(ctx, bindPromotionRunIfNull, arg.ID, arg.CrID)
+	result, err := q.db.Exec(ctx, bindPromotionRunIfNull, arg.CrID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -93,7 +93,7 @@ LIMIT 1
 
 type FindPromotionDuplicateIssueParams struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Column2     string      `json:"column_2"`
+	DedupeKey   string      `json:"dedupe_key"`
 }
 
 // AIFIRST: CR-2026-061 TASK-01 (SDD §4.2/§4.3/§4.5): promotion data access.
@@ -106,7 +106,7 @@ type FindPromotionDuplicateIssueParams struct {
 // Dedupe lookup (SDD §4.2): containment match on the entry's dedupe_key;
 // 507 GIN index accelerates it. Caller treats ErrNoRows as "no duplicate".
 func (q *Queries) FindPromotionDuplicateIssue(ctx context.Context, arg FindPromotionDuplicateIssueParams) (Issue, error) {
-	row := q.db.QueryRow(ctx, findPromotionDuplicateIssue, arg.WorkspaceID, arg.Column2)
+	row := q.db.QueryRow(ctx, findPromotionDuplicateIssue, arg.WorkspaceID, arg.DedupeKey)
 	var i Issue
 	err := row.Scan(
 		&i.ID,
@@ -227,18 +227,18 @@ const insertPipelineRun = `-- name: InsertPipelineRun :one
 INSERT INTO pipeline_run (
     workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
 ) VALUES (
-    $1, 'requirement-authoring', $6, $2, 'running', $3, $4, $5
+    $1, 'requirement-authoring', $2, $3, 'running', $4, $5, $6
 )
 RETURNING id, workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by, created_at, completed_at
 `
 
 type InsertPipelineRunParams struct {
 	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	CrID             pgtype.Text `json:"cr_id"`
 	IssueID          pgtype.UUID `json:"issue_id"`
 	Inputs           []byte      `json:"inputs"`
 	ExecutionContext []byte      `json:"execution_context"`
 	StartedBy        pgtype.UUID `json:"started_by"`
-	CrID             pgtype.Text `json:"cr_id"`
 }
 
 // Pre-built requirement-authoring run (SDD §2.3): cr_id NULL until the
@@ -246,11 +246,11 @@ type InsertPipelineRunParams struct {
 func (q *Queries) InsertPipelineRun(ctx context.Context, arg InsertPipelineRunParams) (PipelineRun, error) {
 	row := q.db.QueryRow(ctx, insertPipelineRun,
 		arg.WorkspaceID,
+		arg.CrID,
 		arg.IssueID,
 		arg.Inputs,
 		arg.ExecutionContext,
 		arg.StartedBy,
-		arg.CrID,
 	)
 	var i PipelineRun
 	err := row.Scan(
@@ -278,7 +278,7 @@ WHERE a.id = ANY($1::uuid[])
 `
 
 type ListAttachmentsForPromotionParams struct {
-	Column1       []pgtype.UUID `json:"column_1"`
+	AttachmentIds []pgtype.UUID `json:"attachment_ids"`
 	ChatSessionID pgtype.UUID   `json:"chat_session_id"`
 }
 
@@ -286,7 +286,7 @@ type ListAttachmentsForPromotionParams struct {
 // bound to a message of the requested session (draft attachments have
 // chat_message_id IS NULL and never match). READ only — no chat writes.
 func (q *Queries) ListAttachmentsForPromotion(ctx context.Context, arg ListAttachmentsForPromotionParams) ([]Attachment, error) {
-	rows, err := q.db.Query(ctx, listAttachmentsForPromotion, arg.Column1, arg.ChatSessionID)
+	rows, err := q.db.Query(ctx, listAttachmentsForPromotion, arg.AttachmentIds, arg.ChatSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -344,17 +344,17 @@ func (q *Queries) MarkPipelineNodePassed(ctx context.Context, arg MarkPipelineNo
 }
 
 const setIssueContextRefPipelineRun = `-- name: SetIssueContextRefPipelineRun :exec
-UPDATE issue SET context_refs = $2 WHERE id = $1
+UPDATE issue SET context_refs = $1 WHERE id = $2
 `
 
 type SetIssueContextRefPipelineRunParams struct {
-	ID          pgtype.UUID `json:"id"`
 	ContextRefs []byte      `json:"context_refs"`
+	ID          pgtype.UUID `json:"id"`
 }
 
 // Dedupe-hit backfill: service merges pipeline_run_id into the matched
 // entry and writes the complete array (SDD §4.3 step 10).
 func (q *Queries) SetIssueContextRefPipelineRun(ctx context.Context, arg SetIssueContextRefPipelineRunParams) error {
-	_, err := q.db.Exec(ctx, setIssueContextRefPipelineRun, arg.ID, arg.ContextRefs)
+	_, err := q.db.Exec(ctx, setIssueContextRefPipelineRun, arg.ContextRefs, arg.ID)
 	return err
 }

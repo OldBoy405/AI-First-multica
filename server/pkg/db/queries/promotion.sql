@@ -10,19 +10,19 @@
 -- Dedupe lookup (SDD §4.2): containment match on the entry's dedupe_key;
 -- 507 GIN index accelerates it. Caller treats ErrNoRows as "no duplicate".
 SELECT * FROM issue
-WHERE workspace_id = $1
-  AND context_refs @> jsonb_build_array(jsonb_build_object('dedupe_key', $2::text))
+WHERE workspace_id = @workspace_id
+  AND context_refs @> jsonb_build_array(jsonb_build_object('dedupe_key', @dedupe_key::text))
 LIMIT 1;
 
 -- name: AppendIssueContextRefs :exec
 -- Idempotent append of a promotion entry to the array tail (SDD §2.1);
 -- never overwrites existing entries.
-UPDATE issue SET context_refs = context_refs || $2::jsonb WHERE id = $1;
+UPDATE issue SET context_refs = context_refs || @context_refs::jsonb WHERE id = @id;
 
 -- name: SetIssueContextRefPipelineRun :exec
 -- Dedupe-hit backfill: service merges pipeline_run_id into the matched
 -- entry and writes the complete array (SDD §4.3 step 10).
-UPDATE issue SET context_refs = $2 WHERE id = $1;
+UPDATE issue SET context_refs = @context_refs WHERE id = @id;
 
 -- name: InsertPipelineRun :one
 -- Pre-built requirement-authoring run (SDD §2.3): cr_id NULL until the
@@ -30,7 +30,7 @@ UPDATE issue SET context_refs = $2 WHERE id = $1;
 INSERT INTO pipeline_run (
     workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
 ) VALUES (
-    $1, 'requirement-authoring', sqlc.narg('cr_id'), $2, 'running', $3, $4, $5
+    @workspace_id, 'requirement-authoring', sqlc.narg('cr_id'), @issue_id, 'running', @inputs, @execution_context, @started_by
 )
 RETURNING *;
 
@@ -40,7 +40,7 @@ RETURNING *;
 INSERT INTO pipeline_node_run (
     run_id, node_id, ref, kind, seq, status, attempt, started_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, now()
+    @run_id, @node_id, @ref, @kind, @seq, @status, @attempt, now()
 )
 RETURNING *;
 
@@ -48,7 +48,7 @@ RETURNING *;
 -- Recognition-key read (SDD §4.3): after a 506 unique violation on a
 -- concurrent backfill, re-read the surviving run and adopt its id.
 SELECT * FROM pipeline_run
-WHERE workspace_id = $1 AND issue_id = $2
+WHERE workspace_id = @workspace_id AND issue_id = @issue_id
   AND pipeline_id = 'requirement-authoring'
   AND status IN ('running', 'waiting_approval')
 LIMIT 1;
@@ -57,7 +57,7 @@ LIMIT 1;
 -- Bind transaction step 1 (SDD §4.5): lock the run row. Caller derives
 -- RUN_NOT_FOUND / RUN_CR_CONFLICT from ErrNoRows / CrID mismatch.
 SELECT * FROM pipeline_run
-WHERE id = $1 AND workspace_id = $2
+WHERE id = @id AND workspace_id = @workspace_id
 FOR UPDATE;
 
 -- name: BindPromotionRunIfNull :execrows
@@ -65,8 +65,8 @@ FOR UPDATE;
 -- count; 0 rows after a locked read means a concurrent bind won — the
 -- caller re-reads under the lock before deciding.
 UPDATE pipeline_run
-SET cr_id = $2
-WHERE id = $1 AND cr_id IS NULL AND pipeline_id = 'requirement-authoring';
+SET cr_id = @cr_id
+WHERE id = @id AND cr_id IS NULL AND pipeline_id = 'requirement-authoring';
 
 -- name: MarkPipelineNodePassed :execrows
 -- First-node completion signal (SDD §4.5/D-5): running -> passed, in the
@@ -74,7 +74,7 @@ WHERE id = $1 AND cr_id IS NULL AND pipeline_id = 'requirement-authoring';
 -- targeted so a replay cannot resurrect a passed node.
 UPDATE pipeline_node_run
 SET status = 'passed'
-WHERE run_id = $1 AND node_id = $2 AND status = 'running';
+WHERE run_id = @run_id AND node_id = @node_id AND status = 'running';
 
 -- name: ListAttachmentsForPromotion :many
 -- Source-attachment validation (SDD §4.3 step 6): attachments must be
@@ -82,6 +82,6 @@ WHERE run_id = $1 AND node_id = $2 AND status = 'running';
 -- chat_message_id IS NULL and never match). READ only — no chat writes.
 SELECT a.* FROM attachment a
 JOIN chat_message m ON m.id = a.chat_message_id
-WHERE a.id = ANY($1::uuid[])
-  AND m.chat_session_id = $2
+WHERE a.id = ANY(@attachment_ids::uuid[])
+  AND m.chat_session_id = @chat_session_id
   AND a.chat_message_id IS NOT NULL;
