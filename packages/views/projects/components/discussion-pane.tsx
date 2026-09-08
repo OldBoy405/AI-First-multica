@@ -20,6 +20,7 @@ import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { useCommentDraftStore } from "@multica/core/issues/stores";
 import type { Attachment, ChatMessage, TimelineEntry } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
+import { selectStandaloneAttachments } from "@multica/core/attachments/image-sequence";
 import { cn } from "@multica/ui/lib/utils";
 import { Button } from "@multica/ui/components/ui/button";
 import { Checkbox } from "@multica/ui/components/ui/checkbox";
@@ -164,6 +165,11 @@ function DiscussionBody({
   // it; the selection source is mutually exclusive by construction).
   const [selectMode, setSelectMode] = useState<"messages" | "comments" | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Attachment selection (CR-2026-061 FR-11/AC-9): independent of the
+  // message selection so message-only / attachment-only / mixed promotions
+  // are all legal. Only the shared "messages" arm exposes attachment
+  // checkboxes; the legacy comments arm has no attachments.
+  const [selectedAttachments, setSelectedAttachments] = useState<Set<string>>(new Set());
   const [previewOpen, setPreviewOpen] = useState(false);
   // Promotion state (CR-2026-061 FR-11/AC-9): one Idempotency-Key per
   // attempt — retries of the SAME selection reuse it (replay semantics), a
@@ -176,14 +182,24 @@ function DiscussionBody({
   const enterSelectMode = (source: "messages" | "comments") => {
     setSelectMode(source);
     setSelected(new Set());
+    setSelectedAttachments(new Set());
   };
   const exitSelectMode = () => {
     setSelectMode(null);
     setSelected(new Set());
+    setSelectedAttachments(new Set());
     setPreviewOpen(false);
   };
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleAttachmentSelect = useCallback((id: string) => {
+    setSelectedAttachments((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -205,12 +221,14 @@ function DiscussionBody({
     void qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
   }, [qc, sessionId]);
 
-  // FR-11/AC-9: promote the selected messages into a work Issue, optionally
-  // as a CR (upgrade_to_cr). Discussion content is never reloaded on
+  // FR-11/AC-9: promote the selected messages and/or attachments into a
+  // work Issue, optionally as a CR (upgrade_to_cr). Message-only,
+  // attachment-only and mixed selections are all legal (the server rejects
+  // only a fully empty selection). Discussion content is never reloaded on
   // success; failures keep the selection and branch on the fixed error
   // codes from the error closure table.
   const handlePromote = async (upgradeToCr: boolean) => {
-    if (selected.size === 0 || promoting || selectedMessages.length === 0) return;
+    if (promoting || (selectedMessages.length === 0 && selectedAttachments.size === 0)) return;
     setPromoting(upgradeToCr ? "cr" : "issue");
     try {
       if (!promotionKeyRef.current) {
@@ -221,6 +239,7 @@ function DiscussionBody({
         {
           session_id: sessionId,
           message_ids: selectedMessages.map((m) => m.id),
+          attachment_ids: [...selectedAttachments],
           upgrade_to_cr: upgradeToCr,
         },
         promotionKeyRef.current,
@@ -284,7 +303,9 @@ function DiscussionBody({
           messages={messages}
           selectMode={selectMode === "messages"}
           selected={selected}
+          selectedAttachments={selectedAttachments}
           onToggleSelect={toggleSelect}
+          onToggleAttachmentSelect={toggleAttachmentSelect}
         />
         {legacyIssueId ? (
           <LegacyDiscussionStream
@@ -302,7 +323,9 @@ function DiscussionBody({
           className="flex shrink-0 items-center gap-2 border-t bg-muted/40 px-4 py-2"
         >
           <span className="text-xs text-muted-foreground" data-testid="discussion-selected-count">
-            {t(($) => $.chat.merged_forward.selected_count, { count: selected.size })}
+            {t(($) => $.chat.merged_forward.selected_count, {
+              count: selectMode === "messages" ? selected.size + selectedAttachments.size : selected.size,
+            })}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <Button type="button" variant="outline" size="sm" onClick={exitSelectMode}>
@@ -315,7 +338,7 @@ function DiscussionBody({
                   variant="outline"
                   size="sm"
                   data-testid="discussion-promote-cta"
-                  disabled={selected.size === 0 || promoting !== null}
+                  disabled={(selected.size === 0 && selectedAttachments.size === 0) || promoting !== null}
                   onClick={() => void handlePromote(false)}
                 >
                   {t(($) => $.chat.promotion.issue_cta)}
@@ -325,7 +348,7 @@ function DiscussionBody({
                   variant="outline"
                   size="sm"
                   data-testid="discussion-promote-cr-cta"
-                  disabled={selected.size === 0 || promoting !== null}
+                  disabled={(selected.size === 0 && selectedAttachments.size === 0) || promoting !== null}
                   onClick={() => void handlePromote(true)}
                 >
                   {promoting === "cr" ? <Loader2 className="h-4 w-4 animate-spin" /> : t(($) => $.chat.promotion.cr_cta)}
@@ -719,12 +742,16 @@ function DiscussionMessageStream({
   messages,
   selectMode,
   selected,
+  selectedAttachments,
   onToggleSelect,
+  onToggleAttachmentSelect,
 }: {
   messages: ChatMessage[];
   selectMode: boolean;
   selected: Set<string>;
+  selectedAttachments: Set<string>;
   onToggleSelect: (messageId: string) => void;
+  onToggleAttachmentSelect: (attachmentId: string) => void;
 }) {
   const { t } = useT("projects");
 
@@ -751,7 +778,9 @@ function DiscussionMessageStream({
           message={message}
           selectMode={selectMode}
           checked={selected.has(message.id)}
+          selectedAttachments={selectedAttachments}
           onToggleSelect={onToggleSelect}
+          onToggleAttachmentSelect={onToggleAttachmentSelect}
         />
       ))}
     </div>
@@ -762,16 +791,28 @@ function SharedDiscussionMessage({
   message,
   selectMode,
   checked,
+  selectedAttachments,
   onToggleSelect,
+  onToggleAttachmentSelect,
 }: {
   message: ChatMessage;
   selectMode: boolean;
   checked: boolean;
+  selectedAttachments: Set<string>;
   onToggleSelect: (messageId: string) => void;
+  onToggleAttachmentSelect: (attachmentId: string) => void;
 }) {
   const { getActorName } = useActorName();
   const { t } = useT("projects");
   const timeAgo = useTimeAgo();
+
+  // Attachment selection surface (FR-11/AC-9): the same standalone set the
+  // AttachmentList renders below (inline-referenced attachments stay part of
+  // the message content and are not listed twice).
+  const standaloneAttachments = useMemo(
+    () => selectStandaloneAttachments(message.content, message.attachments),
+    [message],
+  );
 
   // Author resolution (SDD §3.3 fallback table): member/agent via the actor
   // cache; NULL or degraded fields keep the baseline rendering (no author
@@ -815,7 +856,23 @@ function SharedDiscussionMessage({
       <div className="pl-[38px] text-sm leading-relaxed text-foreground">
         <ReadonlyContent content={message.content} attachments={message.attachments} />
       </div>
-      <AttachmentList attachments={message.attachments} content={message.content} className="mt-1.5 pl-[38px]" />
+      {selectMode ? (
+        <div className="mt-1.5 pl-[38px] flex flex-col gap-1" data-testid="discussion-attachment-selector">
+          {standaloneAttachments.map((a) => (
+            <label key={a.id} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Checkbox
+                data-testid="discussion-select-attachment-checkbox"
+                checked={selectedAttachments.has(a.id)}
+                onCheckedChange={() => onToggleAttachmentSelect(a.id)}
+                aria-label={a.id}
+              />
+              <span className="truncate">{a.filename}</span>
+            </label>
+          ))}
+        </div>
+      ) : (
+        <AttachmentList attachments={message.attachments} content={message.content} className="mt-1.5 pl-[38px]" />
+      )}
     </div>
   );
 }
