@@ -303,6 +303,15 @@
       "queue_full_error": "チーム Agent のキューがいっぱいです（{{depth}}/{{limit}}）。選択は保持されています。後で再試行してください。",
       "presenter_locked_error": "プレゼンターが単一書き込み権限を保持しています。選択は保持されています。解除後に再試行してください。"
     },
+    "promotion": {
+      "issue_cta": "作業 Issue に変換",
+      "cr_cta": "CR にアップグレード",
+      "success_label": "作成された Issue:",
+      "failed": "変換に失敗しました。選択は保持されています。再試行してください。",
+      "selection_error": "選択内容が無効です。選択は保持されています。修正して再試行してください。",
+      "forbidden_error": "このディスカッションを変換する権限がありません。",
+      "conflict_error": "このリクエストは別の内容で既に送信されています。選択は保持されています。選択内容を更新して再試行してください。"
+    },
     "dc": {
       "coordinator_label": "ディスカッションコーディネーター",
       "coordinator_pick_cta": "コーディネーターを選択",

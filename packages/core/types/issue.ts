@@ -220,4 +220,22 @@ export interface Issue {
   last_activity_at?: string | null;
   /** Present only on issue detail responses for issues created from a comment. */
   source_context?: IssueSourceContext;
+  /**
+   * Promotion source references (CR-2026-061 SDD §3.4). Absent for issues
+   * without promotion entries; always parsed with fallback [] on the client
+   * so a malformed entry from a mixed-version server never blanks the issue.
+   */
+  context_refs?: IssueContextRef[];
+}
+
+/** One context_refs array element (CR-2026-061 SDD §3.4). Every field is
+ *  optional — future entry kinds may omit any of them. */
+export interface IssueContextRef {
+  kind?: string;
+  session_id?: string;
+  message_ids?: string[];
+  attachment_ids?: string[];
+  pipeline_run_id?: string;
+  promoted_by?: string;
+  promoted_at?: string;
 }

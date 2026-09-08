@@ -44,6 +44,8 @@ import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { useT, useTimeAgo } from "../../i18n";
+import { AppLink } from "../../navigation";
+import { useWorkspacePaths } from "@multica/core/paths";
 
 // ─── Container ───────────────────────────────────────────────────────────
 //
@@ -141,6 +143,7 @@ function DiscussionBody({
 }) {
   const { t } = useT("projects");
   const qc = useQueryClient();
+  const paths = useWorkspacePaths();
 
   // Shared-session message stream (page object, invalidated by the realtime
   // layer on chat:message; shared events now reach every workspace member).
@@ -162,6 +165,13 @@ function DiscussionBody({
   const [selectMode, setSelectMode] = useState<"messages" | "comments" | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewOpen, setPreviewOpen] = useState(false);
+  // Promotion state (CR-2026-061 FR-11/AC-9): one Idempotency-Key per
+  // attempt — retries of the SAME selection reuse it (replay semantics), a
+  // fresh selection gets a fresh key. Success shows the target Issue link;
+  // failure keeps the selection for retry.
+  const [promoting, setPromoting] = useState<"issue" | "cr" | null>(null);
+  const [promotedIssue, setPromotedIssue] = useState<{ id: string; number: number } | null>(null);
+  const promotionKeyRef = useRef<string>("");
 
   const enterSelectMode = (source: "messages" | "comments") => {
     setSelectMode(source);
@@ -194,6 +204,53 @@ function DiscussionBody({
     void qc.invalidateQueries({ queryKey: chatKeys.messagesPage(sessionId) });
     void qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
   }, [qc, sessionId]);
+
+  // FR-11/AC-9: promote the selected messages into a work Issue, optionally
+  // as a CR (upgrade_to_cr). Discussion content is never reloaded on
+  // success; failures keep the selection and branch on the fixed error
+  // codes from the error closure table.
+  const handlePromote = async (upgradeToCr: boolean) => {
+    if (selected.size === 0 || promoting || selectedMessages.length === 0) return;
+    setPromoting(upgradeToCr ? "cr" : "issue");
+    try {
+      if (!promotionKeyRef.current) {
+        promotionKeyRef.current = crypto.randomUUID();
+      }
+      const result = await api.promoteDiscussion(
+        projectId,
+        {
+          session_id: sessionId,
+          message_ids: selectedMessages.map((m) => m.id),
+          upgrade_to_cr: upgradeToCr,
+        },
+        promotionKeyRef.current,
+      );
+      promotionKeyRef.current = "";
+      setPromotedIssue({ id: result.issue_id, number: result.issue_number });
+      exitSelectMode();
+    } catch (e) {
+      // Error closure recovery (AC-11): 409 → fresh key (payload changed);
+      // 400 invalid_promotion_selection → fresh key + error toast; 502/500 →
+      // same key retry stays safe (replay); every branch KEEPS the selection.
+      if (e instanceof ApiError && e.status === 409) {
+        promotionKeyRef.current = "";
+        toast.error(t(($) => $.chat.promotion.conflict_error));
+        return;
+      }
+      if (e instanceof ApiError && e.status === 400) {
+        promotionKeyRef.current = "";
+        toast.error(t(($) => $.chat.promotion.selection_error));
+        return;
+      }
+      if (e instanceof ApiError && e.status === 403) {
+        toast.error(t(($) => $.chat.promotion.forbidden_error));
+        return;
+      }
+      toast.error(t(($) => $.chat.promotion.failed));
+    } finally {
+      setPromoting(null);
+    }
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -251,6 +308,30 @@ function DiscussionBody({
             <Button type="button" variant="outline" size="sm" onClick={exitSelectMode}>
               {t(($) => $.chat.merged_forward.cancel)}
             </Button>
+            {selectMode === "messages" && (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="discussion-promote-cta"
+                  disabled={selected.size === 0 || promoting !== null}
+                  onClick={() => void handlePromote(false)}
+                >
+                  {t(($) => $.chat.promotion.issue_cta)}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="discussion-promote-cr-cta"
+                  disabled={selected.size === 0 || promoting !== null}
+                  onClick={() => void handlePromote(true)}
+                >
+                  {promoting === "cr" ? <Loader2 className="h-4 w-4 animate-spin" /> : t(($) => $.chat.promotion.cr_cta)}
+                </Button>
+              </>
+            )}
             <Button
               type="button"
               size="sm"
@@ -261,6 +342,22 @@ function DiscussionBody({
               {t(($) => $.chat.merged_forward.merge_cta)}
             </Button>
           </div>
+        </div>
+      )}
+      {promotedIssue && (
+        <div
+          data-testid="discussion-promoted-link"
+          className="flex shrink-0 items-center gap-2 border-t bg-muted/40 px-4 py-2"
+        >
+          <span className="text-xs text-muted-foreground">
+            {t(($) => $.chat.promotion.success_label)}
+          </span>
+          <AppLink
+            href={paths.issueDetail(promotedIssue.id)}
+            className="text-xs font-medium underline"
+          >
+            #{promotedIssue.number}
+          </AppLink>
         </div>
       )}
       <MergeForwardPreviewDialog

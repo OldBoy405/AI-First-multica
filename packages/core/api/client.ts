@@ -281,6 +281,9 @@ import {
   EMPTY_PROJECT_CHAT_SEND_RESULT,
   ProjectChatSendResultSchema,
   type ProjectChatSendResult,
+  EMPTY_PROMOTION_RESULT,
+  PromotionResultSchema,
+  type PromotionResult,
   EMPTY_PROJECT_GATES_RESPONSE,
   ProjectGatesResponseSchema,
   type ProjectGatesResponse,
@@ -3883,6 +3886,46 @@ export class ApiClient {
     });
     return parseWithFallback(raw, ProjectChatSendResultSchema, EMPTY_PROJECT_CHAT_SEND_RESULT, {
       endpoint: "POST /api/projects/:id/chat/merge-forward",
+    });
+  }
+
+  // Promote selected Discussion content into a work Issue, optionally
+  // pre-building the requirement-authoring run (upgrade_to_cr) — CR-2026-061
+  // SDD §3.1. The Idempotency-Key header is REQUIRED (client-enforced, same
+  // as the merge-forward message_ids arm): the caller generates a fresh key
+  // per attempt and reuses it only to retry the SAME selection. Non-2xx
+  // responses throw a structured ApiError keyed on the fixed error codes
+  // (invalid_promotion_selection / forbidden_promotion /
+  // idempotency_key_reused / pipeline_run_create_failed / …) so callers keep
+  // the selection and can retry.
+  async promoteDiscussion(
+    projectId: string,
+    body: {
+      session_id: string;
+      message_ids?: string[];
+      attachment_ids?: string[];
+      title?: string;
+      description?: string;
+      upgrade_to_cr?: boolean;
+    },
+    idempotencyKey: string,
+  ): Promise<PromotionResult> {
+    if (!idempotencyKey) {
+      // Caller's responsibility: promotion requires the header.
+      throw new ApiError(
+        "Idempotency-Key is required for discussion promotion",
+        400,
+        "Bad Request",
+        { code: "idempotency_key_required" },
+      );
+    }
+    const raw = await this.fetch<unknown>(`/api/projects/${projectId}/discussion/promote`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+    return parseWithFallback(raw, PromotionResultSchema, EMPTY_PROMOTION_RESULT, {
+      endpoint: "POST /api/projects/:id/discussion/promote",
     });
   }
 
