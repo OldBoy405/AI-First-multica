@@ -107,6 +107,7 @@ func seedPromoHandlerFixture(t *testing.T) promoHandlerFixture {
 	t.Helper()
 	projectID := dbfx.Project(t, "promotion-handler-project")
 	sessionID := dbfx.ChatSession(t, "", testutil.Cols{
+		"agent_id":   testutil.Raw("NULL"),
 		"project_id": projectID,
 		"kind":       "project_shared",
 	})
@@ -296,7 +297,7 @@ func TestPromoteProjectDiscussionSelectionAndErrorMatrix(t *testing.T) {
 	if after := dbfx.Count(t, `SELECT count(*) FROM issue WHERE workspace_id = $1::uuid`, testWorkspaceID); after != before {
 		t.Errorf("issue rows changed %d → %d on error matrix", before, after)
 	}
-	if n := dbfx.Count(t, `SELECT count(*) FROM chat_idempotency WHERE scope_type = 'discussion_promotion'`); n != 0 {
+	if n := dbfx.Count(t, `SELECT count(*) FROM chat_idempotency WHERE scope_type = 'discussion_promotion' AND scope_id = $1::uuid`, fx.ProjectID); n != 0 {
 		t.Errorf("idempotency rows = %d, want 0", n)
 	}
 }
@@ -327,7 +328,7 @@ func TestPromoteProjectDiscussionForbiddenNonMember(t *testing.T) {
 	if after := dbfx.Count(t, `SELECT count(*) FROM issue WHERE workspace_id = $1::uuid`, testWorkspaceID); after != before {
 		t.Fatalf("issue rows changed %d → %d (zero writes)", before, after)
 	}
-	if n := dbfx.Count(t, `SELECT count(*) FROM chat_idempotency WHERE scope_type = 'discussion_promotion'`); n != 0 {
+	if n := dbfx.Count(t, `SELECT count(*) FROM chat_idempotency WHERE scope_type = 'discussion_promotion' AND scope_id = $1::uuid`, fx.ProjectID); n != 0 {
 		t.Fatalf("idempotency rows = %d, want 0", n)
 	}
 }

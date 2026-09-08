@@ -569,6 +569,7 @@ func (s *IssueService) createInTx(ctx context.Context, tx pgx.Tx, qtx *db.Querie
 	}
 	if p.PromotionRun != nil {
 		if _, err := qtx.InsertPipelineRun(ctx, db.InsertPipelineRunParams{
+			ID:               p.PromotionRun.RunID,
 			WorkspaceID:      p.WorkspaceID,
 			IssueID:          issue.ID,
 			Inputs:           []byte(p.PromotionRun.Inputs),

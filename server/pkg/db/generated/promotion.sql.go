@@ -225,14 +225,15 @@ func (q *Queries) InsertPipelineNodeRun(ctx context.Context, arg InsertPipelineN
 
 const insertPipelineRun = `-- name: InsertPipelineRun :one
 INSERT INTO pipeline_run (
-    workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
+    id, workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
 ) VALUES (
-    $1, 'requirement-authoring', $2, $3, 'running', $4, $5, $6
+    $1, $2, 'requirement-authoring', $3, $4, 'running', $5, $6, $7
 )
 RETURNING id, workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by, created_at, completed_at
 `
 
 type InsertPipelineRunParams struct {
+	ID               pgtype.UUID `json:"id"`
 	WorkspaceID      pgtype.UUID `json:"workspace_id"`
 	CrID             pgtype.Text `json:"cr_id"`
 	IssueID          pgtype.UUID `json:"issue_id"`
@@ -243,8 +244,11 @@ type InsertPipelineRunParams struct {
 
 // Pre-built requirement-authoring run (SDD §2.3): cr_id NULL until the
 // bind transaction CAS-es it to the new CR-ID (same row, never a second).
+// id is the CALLER's pre-generated run id (dbid.NewV7, SDD §4.3) so the
+// first node insert can reference it in the same transaction.
 func (q *Queries) InsertPipelineRun(ctx context.Context, arg InsertPipelineRunParams) (PipelineRun, error) {
 	row := q.db.QueryRow(ctx, insertPipelineRun,
+		arg.ID,
 		arg.WorkspaceID,
 		arg.CrID,
 		arg.IssueID,

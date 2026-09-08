@@ -27,10 +27,12 @@ UPDATE issue SET context_refs = @context_refs WHERE id = @id;
 -- name: InsertPipelineRun :one
 -- Pre-built requirement-authoring run (SDD §2.3): cr_id NULL until the
 -- bind transaction CAS-es it to the new CR-ID (same row, never a second).
+-- id is the CALLER's pre-generated run id (dbid.NewV7, SDD §4.3) so the
+-- first node insert can reference it in the same transaction.
 INSERT INTO pipeline_run (
-    workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
+    id, workspace_id, pipeline_id, cr_id, issue_id, status, inputs, execution_context, started_by
 ) VALUES (
-    @workspace_id, 'requirement-authoring', sqlc.narg('cr_id'), @issue_id, 'running', @inputs, @execution_context, @started_by
+    @id, @workspace_id, 'requirement-authoring', sqlc.narg('cr_id'), @issue_id, 'running', @inputs, @execution_context, @started_by
 )
 RETURNING *;
 

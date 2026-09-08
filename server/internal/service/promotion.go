@@ -351,6 +351,7 @@ func (s *IssueService) buildPromotionRunPlan(p PromoteDiscussionParams, runID pg
 // so the caller maps 502 and the transaction rolls back (AC-8).
 func insertPromotionRun(ctx context.Context, qtx *db.Queries, workspaceID, issueID, runID, startedBy pgtype.UUID, plan *PromotionRunPlan) (pgtype.UUID, error) {
 	if _, err := qtx.InsertPipelineRun(ctx, db.InsertPipelineRunParams{
+		ID:               runID,
 		WorkspaceID:      workspaceID,
 		IssueID:          issueID,
 		Inputs:           []byte(plan.Inputs),
@@ -545,11 +546,14 @@ func (s *IssueService) PromoteDiscussion(ctx context.Context, p PromoteDiscussio
 			return PromotionResult{}, ErrIdempotencyKeyReused
 		} else if winner.ResponseBody != nil {
 			// Replay: return the stored first-attempt response; nothing was
-			// written in this transaction.
+			// written in this transaction. PRD FR-7 / SDD §3.1: a replay
+			// echoes the stored body verbatim EXCEPT created, which is always
+			// false — the row was created by the first attempt.
 			var replayed PromotionResult
 			if uerr := json.Unmarshal(winner.ResponseBody, &replayed); uerr != nil {
 				return PromotionResult{}, fmt.Errorf("decode promotion replay body: %w", uerr)
 			}
+			replayed.Created = false
 			return replayed, nil
 		}
 		// Same fingerprint + NULL body: the previous execution was
