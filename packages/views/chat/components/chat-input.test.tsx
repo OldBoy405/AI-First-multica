@@ -1645,6 +1645,144 @@ describe("ChatInputCore adapter isolation", () => {
 	});
 });
 
+// CR-2026-062: ChatInputCore visual alignment with the global composer —
+// two-layer gutter/column DOM, shared surface chrome token set, flow footer
+// with wrapping left group, accessible names, and the allowSubmitWhileRunning
+// affordance semantics (TASK-01 / SDD §3.2/§4.1/§4.2).
+describe("ChatInputCore composer alignment (CR-2026-062)", () => {
+  const ADAPTER_KEY = "project-x:align";
+
+  function makeAdapter(): ChatInputDraftAdapter {
+    return {
+      draftKey: ADAPTER_KEY,
+      editorKey: "team",
+      draft: "",
+      attachments: [] as Attachment[],
+      setDraft: vi.fn() as unknown as ChatInputDraftAdapter["setDraft"],
+      setAttachments: vi.fn() as unknown as ChatInputDraftAdapter["setAttachments"],
+      addAttachment: vi.fn() as unknown as ChatInputDraftAdapter["addAttachment"],
+      clearDraft: vi.fn() as unknown as ChatInputDraftAdapter["clearDraft"],
+    };
+  }
+
+  function renderCore(props: Partial<React.ComponentProps<typeof ChatInputCore>> = {}) {
+    const onSend = props.onSend ?? vi.fn();
+    const onUploadFile =
+      props.onUploadFile ??
+      vi.fn(async (_file: File) =>
+        makeUpload({ id: "att-align", link: "https://cdn.example/att-align.png", filename: "a.png" }),
+      );
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInputCore
+          draftAdapter={makeAdapter()}
+          onSend={onSend}
+          onUploadFile={onUploadFile}
+          agentName="Multica"
+          {...props}
+        />
+      </I18nProvider>,
+    );
+    return { onSend, onUploadFile };
+  }
+
+  function surfaceElement(): HTMLElement {
+    const surface = document.querySelector<HTMLElement>(
+      '[data-slot="chat-input-surface"]',
+    );
+    expect(surface, "surface node must exist").not.toBeNull();
+    return surface!;
+  }
+
+  it("renders the two-layer gutter/column DOM with the shared surface slot", () => {
+    renderCore();
+    const surface = surfaceElement();
+    const wrapper = surface.parentElement!;
+    // Two separate layers: the wrapper carries the gutter, the surface the
+    // reading-column geometry. A single-element merge would put both token
+    // groups on one node (the historical misalignment shape).
+    expect(wrapper).not.toBe(surface);
+    expect(wrapper.className).toContain("px-5"); // CHAT_GUTTER base
+    expect(wrapper.className).not.toContain("max-w-4xl");
+    expect(surface.className).toContain("max-w-4xl"); // CHAT_COLUMN
+    expect(surface.className).toContain("mx-auto");
+    // Surface chrome aligned with the global ChatInput card.
+    expect(surface.className).toContain("border-surface-border");
+    expect(surface.className).toContain("bg-surface");
+    expect(surface.className).toContain("rounded-lg");
+    expect(surface.className).toContain("focus-within:ring-2");
+    expect(surface.className).toContain("focus-within:ring-ring/20");
+    // Editor keeps its own scroll floor so a wrapping footer never squeezes it.
+    const editorHost = screen.getByTestId("editor").parentElement!;
+    expect(editorHost.className).toContain("min-h-8");
+    expect(editorHost.className).toContain("overflow-y-auto");
+  });
+
+  it("lays the footer out in flow: wrapping left group + fixed right group", () => {
+    renderCore();
+    const surface = surfaceElement();
+    const left = surface.querySelector<HTMLElement>(".flex.min-w-0.flex-1.flex-wrap");
+    const right = surface.querySelector<HTMLElement>(".flex.shrink-0.items-center.gap-1");
+    expect(left, "left group must render (upload enabled)").not.toBeNull();
+    expect(right, "right group must render").not.toBeNull();
+    expect(right!.contains(left!)).toBe(false);
+    expect(right!.querySelector('[aria-label="Send"]')).not.toBeNull();
+  });
+
+  it("renders leftAdornment inside the left footer group", () => {
+    renderCore({
+      leftAdornment: <span data-testid="core-adorn">adorn</span>,
+    });
+    const left = surfaceElement().querySelector(".flex.min-w-0.flex-1.flex-wrap")!;
+    expect(left.querySelector('[data-testid="core-adorn"]')).not.toBeNull();
+  });
+
+  it("gives the send button an accessible name", () => {
+    renderCore();
+    expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+  });
+
+  it("gives the stop button an accessible name while running", () => {
+    const onStop = vi.fn();
+    renderCore({ isRunning: true, onStop });
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+  });
+
+  it("allowSubmitWhileRunning=true: running with content offers send and handleSend proceeds", async () => {
+    const onSend = vi.fn(async () => true);
+    renderCore({
+      isRunning: true,
+      allowSubmitWhileRunning: true,
+      onSend,
+    });
+    fireEvent.change(screen.getByTestId("editor"), {
+      target: { value: "queue this" },
+    });
+    const sendButton = await screen.findByRole("button", { name: "Send" });
+    fireEvent.click(sendButton);
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+  });
+
+  it("allowSubmitWhileRunning=true: running with empty input falls back to stop", () => {
+    renderCore({ isRunning: true, allowSubmitWhileRunning: true });
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+  });
+
+  it("without allowSubmitWhileRunning: running keeps only stop (Private Ask behavior)", async () => {
+    const onSend = vi.fn(async () => true);
+    const onStop = vi.fn();
+    renderCore({ isRunning: true, onSend, onStop });
+    fireEvent.change(screen.getByTestId("editor"), {
+      target: { value: "blocked" },
+    });
+    // running && !allowSubmitWhileRunning keeps the stop affordance; no send.
+    const stopButton = screen.getByRole("button", { name: "Stop" });
+    fireEvent.click(stopButton);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onSend).not.toHaveBeenCalled());
+  });
+});
+
 // MUL-6380: the composer's placeholder is the only text on screen once the input
 // is disabled, so it has to name the right reason. `agentAccessRevoked` wins over
 // `noAgent` because both are true in the reported case — the workspace's only
