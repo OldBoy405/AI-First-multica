@@ -24,11 +24,13 @@ import { agentListOptions } from "@multica/core/workspace/queries";
 import { runtimeListOptions, runtimeModelsOptions } from "@multica/core/runtimes";
 import type { Attachment } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
+import { cn } from "@multica/ui/lib/utils";
 import { ChatMessageList } from "../../chat/components/chat-message-list";
 import {
   ChatInputCore,
   type ChatInputDraftAdapter,
 } from "../../chat/components/chat-input";
+import { CHAT_COLUMN, CHAT_GUTTER } from "../../chat/components/chat-column";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
 import { useT } from "../../i18n";
@@ -388,25 +390,17 @@ function PrivateAskComposer({
     }
   };
 
-  return (
-    <div className="shrink-0 border-t px-4 py-3">
-      {pendingMessage && (
-        <div data-testid="private-ask-pending-message" className="mb-2 flex justify-end">
-          <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
-            <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-            <span className="break-words">{pendingMessage}</span>
-          </div>
-        </div>
-      )}
-      {/* CR-2026-056 FR-3/FR-12: writable session-config pickers replace the
-          read-only badge — the pane's session owns its own model/thinking
-          (creator-only), never the Team Agent session or the agent row. */}
-      <div
-        data-testid="private-ask-model-row"
-        className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
-      >
-        <span className="shrink-0">{t(($) => $.chat.stream.model_label)}</span>
-        {agent ? (
+  // CR-2026-062 §3.2: Model/Thinking controls move into the composer's
+  // bottom toolbar via leftAdornment. The independent model row (and its
+  // `private-ask-model-row` anchor testid) is removed WITH the row; the
+  // replacement anchor for the model control is `private-ask-model-picker`
+  // (new), `private-ask-thinking-picker` stays, and the category semantics
+  // are preserved through sr-only labels (B-002).
+  const toolbar = (
+    <>
+      {agent ? (
+        <span data-testid="private-ask-model-picker">
+          <span className="sr-only">{t(($) => $.chat.stream.model_label)}</span>
           <ModelPicker
             runtimeId={agent.runtime_id}
             runtimeOnline={!!runtimeOnline}
@@ -414,24 +408,46 @@ function PrivateAskComposer({
             canEdit
             onChange={persistModel}
           />
-        ) : null}
-        {thinkingLevels.length > 0 && (
-          <span
-            data-testid="private-ask-thinking-picker"
-            className="flex items-center gap-1"
-          >
-            <span className="shrink-0">{t(($) => $.chat.stream.thinking_label)}</span>
-            <ThinkingPicker
-              value={thinkingLevel}
-              levels={thinkingLevels}
-              canEdit
-              onChange={persistThinking}
-            />
-          </span>
-        )}
+        </span>
+      ) : null}
+      {thinkingLevels.length > 0 && (
+        <span
+          data-testid="private-ask-thinking-picker"
+          className="flex items-center gap-1"
+        >
+          <span className="sr-only">{t(($) => $.chat.stream.thinking_label)}</span>
+          <ThinkingPicker
+            value={thinkingLevel}
+            levels={thinkingLevels}
+            canEdit
+            onChange={persistThinking}
+          />
+        </span>
+      )}
+    </>
+  );
+
+  return (
+    // CR-2026-062 §4.1 rule 6: the composer wrapper drops its own gutters;
+    // the pending-message zone is a two-layer gutter>column block above the
+    // surface (rendered even when empty, keeping the top spacing).
+    <div className="shrink-0 border-t">
+      <div className={cn(CHAT_GUTTER, "pt-3")}>
+        <div className={cn(CHAT_COLUMN)}>
+          {pendingMessage && (
+            <div data-testid="private-ask-pending-message" className="mb-2 flex justify-end">
+              <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                <span className="break-words">{pendingMessage}</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
       {/* CR-2026-012 FR-8: rich composer (attachments + member-only @
-          mentions). Stop button / model picker stay untouched above. */}
+          mentions). Stop path (pendingTaskId → api.cancelTaskById) and the
+          stop-only running affordance stay exactly as before; the toolbar
+          is passed through leftAdornment (CR-2026-062). */}
       <div data-testid="private-ask-composer">
         <ChatInputCore
           draftAdapter={draftAdapter}
@@ -440,6 +456,7 @@ function PrivateAskComposer({
           onStop={handleStop}
           isRunning={running}
           disabled={running}
+          leftAdornment={toolbar}
           mentionItemTypes={["member"]}
         />
       </div>

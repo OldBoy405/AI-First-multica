@@ -40,7 +40,16 @@ vi.mock("@multica/core/runtimes", () => ({
   }),
   runtimeModelsOptions: (rid: string | null) => ({
     queryKey: ["models", rid],
-    queryFn: () => ({ models: [{ id: "claude-1", label: "Claude 1" }], supported: true }),
+    queryFn: () => ({
+      models: [
+        {
+          id: "claude-1",
+          label: "Claude 1",
+          thinking: { supported_levels: [{ value: "high" }] },
+        },
+      ],
+      supported: true,
+    }),
     enabled: !!rid,
   }),
 }));
@@ -88,6 +97,19 @@ vi.mock("../../agents/components/inspector/model-picker", () => ({
   ),
 }));
 
+vi.mock("../../agents/components/inspector/thinking-picker", () => ({
+  ThinkingPicker: (props: { value: string; canEdit: boolean; onChange?: (l: string) => void }) => (
+    <button
+      type="button"
+      data-testid="stub-thinking-picker"
+      data-value={props.value}
+      onClick={() => props.onChange?.("high")}
+    >
+      {props.value}
+    </button>
+  ),
+}));
+
 // CR-2026-012 TASK-06: the composer is ChatInputCore behind an adapter; this
 // shim keeps the historical textarea/send/stop testids and the adapter
 // contract (draft read, setDraft on change, clearDraft via commitInput,
@@ -112,6 +134,7 @@ vi.mock("../../chat/components/chat-input", async () => {
     onStop?: () => void;
     isRunning?: boolean;
     disabled?: boolean;
+    leftAdornment?: React.ReactNode;
   }) {
     const [submitting, setSubmitting] = React.useState(false);
     const commit: Commit = (options) => {
@@ -156,6 +179,7 @@ vi.mock("../../chat/components/chat-input", async () => {
             send
           </button>
         )}
+        <div data-testid="private-ask-left-adornment">{props.leftAdornment}</div>
       </div>
     );
   }
@@ -344,5 +368,99 @@ describe("ProjectPrivateAsk (CR-2026-008 TASK-04)", () => {
 
     fireEvent.click(screen.getByTestId("private-ask-stop"));
     await waitFor(() => expect(mocks.cancelTaskById).toHaveBeenCalledWith("task-9"));
+  });
+});
+
+// ─── CR-2026-062 TASK-03: two-layer banner zone + leftAdornment toolbar ────
+
+describe("PrivateAskComposer alignment + toolbar (CR-2026-062)", () => {
+  it("removes the model row and renders the new picker anchors inside the composer subtree with sr-only labels", async () => {
+    renderPane();
+    await waitFor(() =>
+      expect(screen.getByTestId("private-ask-composer-input")).toBeTruthy(),
+    );
+
+    const composer = screen.getByTestId("private-ask-composer");
+    // The independent row (and its anchor) is removed; the model control
+    // gets the new `private-ask-model-picker` anchor (replacement).
+    expect(screen.queryByTestId("private-ask-model-row")).toBeNull();
+    const modelPicker = await screen.findByTestId("private-ask-model-picker");
+    expect(composer.contains(modelPicker)).toBe(true);
+    expect(modelPicker.querySelector(".sr-only")?.textContent).toBe(
+      enProjects.chat.stream.model_label,
+    );
+    const thinking = await screen.findByTestId("private-ask-thinking-picker");
+    expect(composer.contains(thinking)).toBe(true);
+    expect(thinking.querySelector(".sr-only")?.textContent).toBe(
+      enProjects.chat.stream.thinking_label,
+    );
+    // Creator-only editability is unchanged: the stub picker stays editable
+    // and still PATCHes the session config, never an agent row.
+    expect(
+      composer.querySelector('[data-testid="stub-model-picker"]')?.getAttribute("data-canedit"),
+    ).toBe("true");
+  });
+
+  it("wraps the pending-message zone in a two-layer gutter>column block above the surface", async () => {
+    renderPane();
+    await waitFor(() =>
+      expect(screen.getByTestId("private-ask-composer-input")).toBeTruthy(),
+    );
+
+    const composer = screen.getByTestId("private-ask-composer");
+    const root = composer.parentElement!;
+    // Composer wrapper drops its own gutters; border stays.
+    expect(root.className).toContain("shrink-0");
+    expect(root.className).toContain("border-t");
+    expect(root.className).not.toContain("px-4");
+    // The banner block (always rendered, even without a banner) is the
+    // gutter>column sibling right above the composer.
+    const bannerOuter = composer.previousElementSibling!;
+    expect(bannerOuter.className).toContain("px-5"); // CHAT_GUTTER base
+    expect(bannerOuter.className).toContain("pt-3");
+    expect(bannerOuter.className).not.toContain("max-w-4xl");
+    const bannerInner = bannerOuter.firstElementChild!;
+    expect(bannerInner).not.toBe(bannerOuter);
+    expect(bannerInner.className).toContain("max-w-4xl"); // CHAT_COLUMN
+  });
+
+  it("keeps the pending-message render condition unchanged (AC-6)", async () => {
+    let resolveSend!: (v: unknown) => void;
+    mocks.sendChatMessage.mockReturnValue(new Promise((resolve) => (resolveSend = resolve)));
+    renderPane();
+    await waitFor(() =>
+      expect(screen.getByTestId("private-ask-composer-input")).toBeTruthy(),
+    );
+
+    fireEvent.change(screen.getByTestId("private-ask-composer-input"), {
+      target: { value: "pending in the new block" },
+    });
+    fireEvent.click(screen.getByTestId("private-ask-send"));
+
+    // The bubble still renders inside the two-layer banner block.
+    const bubble = await screen.findByTestId("private-ask-pending-message");
+    expect(bubble.textContent).toContain("pending in the new block");
+    const bannerInner = bubble.parentElement!;
+    expect(bannerInner.className).toContain("max-w-4xl");
+    expect(bannerInner.parentElement!.className).toContain("px-5");
+
+    resolveSend({ message: { id: "m1" } });
+    await waitFor(() =>
+      expect(screen.queryByTestId("private-ask-pending-message")).toBeNull(),
+    );
+  });
+
+  it("running keeps the stop affordance without allowSubmitWhileRunning (stop-only, unchanged)", async () => {
+    mocks.getPendingChatTask.mockResolvedValue({
+      task_id: "task-9",
+      status: "running",
+      created_at: new Date().toISOString(),
+    });
+    renderPane();
+    await waitFor(() => expect(screen.getByTestId("private-ask-stop")).toBeTruthy());
+    expect(screen.queryByTestId("private-ask-send")).toBeNull();
+    // The model control stays visible in the toolbar while running (read-only
+    // path untouched) — the picker is not hidden by the stop state.
+    expect(screen.getByTestId("private-ask-model-picker")).toBeTruthy();
   });
 });
