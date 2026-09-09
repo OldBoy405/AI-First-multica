@@ -1209,6 +1209,21 @@ export const CommentSubIssueTaskResponseSchema = z.object({
   task_id: z.string().min(1),
 }).loose();
 
+// One context_refs array element (CR-2026-061 SDD §3.4). Every field is
+// optional: future entry kinds may omit fields, and a malformed element must
+// not fail the whole array.
+export const IssueContextRefSchema = z
+  .object({
+    kind: z.string().optional(),
+    session_id: z.string().uuid().optional(),
+    message_ids: z.array(z.string().uuid()).optional(),
+    attachment_ids: z.array(z.string().uuid()).optional(),
+    pipeline_run_id: z.string().uuid().optional(),
+    promoted_by: z.string().uuid().optional(),
+    promoted_at: z.string().optional(),
+  })
+  .loose();
+
 export const IssueSchema = z.object({
   id: z.string(),
   workspace_id: z.string(),
@@ -1263,6 +1278,10 @@ export const IssueSchema = z.object({
   // Detail-only and potentially large. A malformed additive field must not
   // erase an otherwise usable issue returned by a mixed-version server.
   source_context: IssueSourceContextSchema.optional().catch(undefined),
+  // Promotion source references (CR-2026-061 SDD §3.4, AC-7). Additive
+  // display data: older backends omit the field and any malformed entry
+  // degrades to [] so an issue list/detail never blanks over it.
+  context_refs: z.array(IssueContextRefSchema).catch([]),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({
@@ -1523,6 +1542,47 @@ export const EMPTY_PROJECT_CHAT_SEND_RESULT: ProjectChatSendResult = {
   issue_id: "",
   comment_id: "",
   task_id: "",
+};
+
+// Discussion promotion result (CR-2026-061 SDD §3.1): the created or
+// dedupe-hit work issue plus the pre-built requirement-authoring run id
+// (null unless upgrade_to_cr).
+export interface PromotionResult {
+  issue_id: string;
+  issue_number: number;
+  session_id: string;
+  source_refs: {
+    session_id: string;
+    message_ids: string[];
+    attachment_ids: string[];
+  };
+  created: boolean;
+  upgrade_to_cr: boolean;
+  run_id: string | null;
+}
+
+export const PromotionResultSchema = z.object({
+  issue_id: z.string().uuid(),
+  issue_number: z.number(),
+  session_id: z.string().uuid(),
+  source_refs: z.object({
+    session_id: z.string().uuid(),
+    message_ids: z.array(z.string().uuid()),
+    attachment_ids: z.array(z.string().uuid()),
+  }),
+  created: z.boolean(),
+  upgrade_to_cr: z.boolean(),
+  run_id: z.union([z.string().uuid(), z.null()]),
+}).loose();
+
+export const EMPTY_PROMOTION_RESULT: PromotionResult = {
+  issue_id: "",
+  issue_number: 0,
+  session_id: "",
+  source_refs: { session_id: "", message_ids: [], attachment_ids: [] },
+  created: false,
+  upgrade_to_cr: false,
+  run_id: null,
 };
 
 // CR governance gate data for a project's chat window (CR-2026-011 TASK-05).

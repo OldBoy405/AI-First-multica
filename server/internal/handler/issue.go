@@ -111,6 +111,24 @@ type IssueResponse struct {
 	// SourceContext is detail-only. List, board, search, and children responses
 	// deliberately omit the potentially large immutable snapshot.
 	SourceContext *sourceContextDetailResponse `json:"source_context,omitempty"`
+	// ContextRefs exposes the issue's promotion source entries (CR-2026-061
+	// SDD §3.4, AC-7). Detail responses only. Absent for rows with no refs;
+	// a parse failure degrades to an absent field + warning log (never 500),
+	// and clients fall back to [] via the schema .catch([]).
+	ContextRefs []IssueContextRefResponse `json:"context_refs,omitempty"`
+}
+
+// IssueContextRefResponse is one context_refs array element (SDD §3.4). All
+// fields are pointers/omitempty so future entry kinds that omit a field stay
+// representable.
+type IssueContextRefResponse struct {
+	Kind          *string  `json:"kind,omitempty"`
+	SessionID     *string  `json:"session_id,omitempty"`
+	MessageIDs    []string `json:"message_ids,omitempty"`
+	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	PipelineRunID *string  `json:"pipeline_run_id,omitempty"`
+	PromotedBy    *string  `json:"promoted_by,omitempty"`
+	PromotedAt    *string  `json:"promoted_at,omitempty"`
 }
 
 // validIssuePriorities mirrors the CHECK constraint on the issue table. Write
@@ -319,7 +337,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		Description:    textToPtr(i.Description),
 		Status:         i.Status,
 		StatusCategory: statusCategory,
-		OriginType:    textToPtr(i.OriginType),
+		OriginType:     textToPtr(i.OriginType),
 		Priority:       i.Priority,
 		AssigneeType:   textToPtr(i.AssigneeType),
 		AssigneeID:     uuidToPtr(i.AssigneeID),
@@ -337,7 +355,24 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		LastActivityAt: timestampToNanoPtr(i.LastActivityAt),
 		Metadata:       parseIssueMetadata(i.Metadata),
 		Properties:     parseIssueProperties(i.Properties),
+		ContextRefs:    parseIssueContextRefs(i.ContextRefs),
 	}
+}
+
+// parseIssueContextRefs decodes the context_refs JSONB for the detail
+// response (SDD §3.4). Parse failures degrade to an absent field + warning
+// log — context_refs is an additive display field and must never 500 the
+// issue detail (API compatibility rule).
+func parseIssueContextRefs(raw []byte) []IssueContextRefResponse {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []IssueContextRefResponse
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		slog.Warn("issue context_refs parse failed; degrading to empty", "error", err)
+		return nil
+	}
+	return entries
 }
 
 // issueListRowToResponse converts a list-query row (no description) to an IssueResponse.

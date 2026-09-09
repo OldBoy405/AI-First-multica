@@ -20,6 +20,7 @@ import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { useCommentDraftStore } from "@multica/core/issues/stores";
 import type { Attachment, ChatMessage, TimelineEntry } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
+import { selectStandaloneAttachments } from "@multica/core/attachments/image-sequence";
 import { cn } from "@multica/ui/lib/utils";
 import { Button } from "@multica/ui/components/ui/button";
 import { Checkbox } from "@multica/ui/components/ui/checkbox";
@@ -44,6 +45,8 @@ import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
 import { useIssueTimeline } from "../../issues/hooks/use-issue-timeline";
 import { useT, useTimeAgo } from "../../i18n";
+import { AppLink } from "../../navigation";
+import { useWorkspacePaths } from "@multica/core/paths";
 
 // ─── Container ───────────────────────────────────────────────────────────
 //
@@ -141,6 +144,7 @@ function DiscussionBody({
 }) {
   const { t } = useT("projects");
   const qc = useQueryClient();
+  const paths = useWorkspacePaths();
 
   // Shared-session message stream (page object, invalidated by the realtime
   // layer on chat:message; shared events now reach every workspace member).
@@ -161,19 +165,41 @@ function DiscussionBody({
   // it; the selection source is mutually exclusive by construction).
   const [selectMode, setSelectMode] = useState<"messages" | "comments" | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Attachment selection (CR-2026-061 FR-11/AC-9): independent of the
+  // message selection so message-only / attachment-only / mixed promotions
+  // are all legal. Only the shared "messages" arm exposes attachment
+  // checkboxes; the legacy comments arm has no attachments.
+  const [selectedAttachments, setSelectedAttachments] = useState<Set<string>>(new Set());
   const [previewOpen, setPreviewOpen] = useState(false);
+  // Promotion state (CR-2026-061 FR-11/AC-9): one Idempotency-Key per
+  // attempt — retries of the SAME selection reuse it (replay semantics), a
+  // fresh selection gets a fresh key. Success shows the target Issue link;
+  // failure keeps the selection for retry.
+  const [promoting, setPromoting] = useState<"issue" | "cr" | null>(null);
+  const [promotedIssue, setPromotedIssue] = useState<{ id: string; number: number } | null>(null);
+  const promotionKeyRef = useRef<string>("");
 
   const enterSelectMode = (source: "messages" | "comments") => {
     setSelectMode(source);
     setSelected(new Set());
+    setSelectedAttachments(new Set());
   };
   const exitSelectMode = () => {
     setSelectMode(null);
     setSelected(new Set());
+    setSelectedAttachments(new Set());
     setPreviewOpen(false);
   };
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleAttachmentSelect = useCallback((id: string) => {
+    setSelectedAttachments((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -194,6 +220,56 @@ function DiscussionBody({
     void qc.invalidateQueries({ queryKey: chatKeys.messagesPage(sessionId) });
     void qc.invalidateQueries({ queryKey: chatKeys.messages(sessionId) });
   }, [qc, sessionId]);
+
+  // FR-11/AC-9: promote the selected messages and/or attachments into a
+  // work Issue, optionally as a CR (upgrade_to_cr). Message-only,
+  // attachment-only and mixed selections are all legal (the server rejects
+  // only a fully empty selection). Discussion content is never reloaded on
+  // success; failures keep the selection and branch on the fixed error
+  // codes from the error closure table.
+  const handlePromote = async (upgradeToCr: boolean) => {
+    if (promoting || (selectedMessages.length === 0 && selectedAttachments.size === 0)) return;
+    setPromoting(upgradeToCr ? "cr" : "issue");
+    try {
+      if (!promotionKeyRef.current) {
+        promotionKeyRef.current = crypto.randomUUID();
+      }
+      const result = await api.promoteDiscussion(
+        projectId,
+        {
+          session_id: sessionId,
+          message_ids: selectedMessages.map((m) => m.id),
+          attachment_ids: [...selectedAttachments],
+          upgrade_to_cr: upgradeToCr,
+        },
+        promotionKeyRef.current,
+      );
+      promotionKeyRef.current = "";
+      setPromotedIssue({ id: result.issue_id, number: result.issue_number });
+      exitSelectMode();
+    } catch (e) {
+      // Error closure recovery (AC-11): 409 → fresh key (payload changed);
+      // 400 invalid_promotion_selection → fresh key + error toast; 502/500 →
+      // same key retry stays safe (replay); every branch KEEPS the selection.
+      if (e instanceof ApiError && e.status === 409) {
+        promotionKeyRef.current = "";
+        toast.error(t(($) => $.chat.promotion.conflict_error));
+        return;
+      }
+      if (e instanceof ApiError && e.status === 400) {
+        promotionKeyRef.current = "";
+        toast.error(t(($) => $.chat.promotion.selection_error));
+        return;
+      }
+      if (e instanceof ApiError && e.status === 403) {
+        toast.error(t(($) => $.chat.promotion.forbidden_error));
+        return;
+      }
+      toast.error(t(($) => $.chat.promotion.failed));
+    } finally {
+      setPromoting(null);
+    }
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -227,7 +303,9 @@ function DiscussionBody({
           messages={messages}
           selectMode={selectMode === "messages"}
           selected={selected}
+          selectedAttachments={selectedAttachments}
           onToggleSelect={toggleSelect}
+          onToggleAttachmentSelect={toggleAttachmentSelect}
         />
         {legacyIssueId ? (
           <LegacyDiscussionStream
@@ -245,12 +323,38 @@ function DiscussionBody({
           className="flex shrink-0 items-center gap-2 border-t bg-muted/40 px-4 py-2"
         >
           <span className="text-xs text-muted-foreground" data-testid="discussion-selected-count">
-            {t(($) => $.chat.merged_forward.selected_count, { count: selected.size })}
+            {t(($) => $.chat.merged_forward.selected_count, {
+              count: selectMode === "messages" ? selected.size + selectedAttachments.size : selected.size,
+            })}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <Button type="button" variant="outline" size="sm" onClick={exitSelectMode}>
               {t(($) => $.chat.merged_forward.cancel)}
             </Button>
+            {selectMode === "messages" && (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="discussion-promote-cta"
+                  disabled={(selected.size === 0 && selectedAttachments.size === 0) || promoting !== null}
+                  onClick={() => void handlePromote(false)}
+                >
+                  {t(($) => $.chat.promotion.issue_cta)}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  data-testid="discussion-promote-cr-cta"
+                  disabled={(selected.size === 0 && selectedAttachments.size === 0) || promoting !== null}
+                  onClick={() => void handlePromote(true)}
+                >
+                  {promoting === "cr" ? <Loader2 className="h-4 w-4 animate-spin" /> : t(($) => $.chat.promotion.cr_cta)}
+                </Button>
+              </>
+            )}
             <Button
               type="button"
               size="sm"
@@ -261,6 +365,22 @@ function DiscussionBody({
               {t(($) => $.chat.merged_forward.merge_cta)}
             </Button>
           </div>
+        </div>
+      )}
+      {promotedIssue && (
+        <div
+          data-testid="discussion-promoted-link"
+          className="flex shrink-0 items-center gap-2 border-t bg-muted/40 px-4 py-2"
+        >
+          <span className="text-xs text-muted-foreground">
+            {t(($) => $.chat.promotion.success_label)}
+          </span>
+          <AppLink
+            href={paths.issueDetail(promotedIssue.id)}
+            className="text-xs font-medium underline"
+          >
+            #{promotedIssue.number}
+          </AppLink>
         </div>
       )}
       <MergeForwardPreviewDialog
@@ -622,12 +742,16 @@ function DiscussionMessageStream({
   messages,
   selectMode,
   selected,
+  selectedAttachments,
   onToggleSelect,
+  onToggleAttachmentSelect,
 }: {
   messages: ChatMessage[];
   selectMode: boolean;
   selected: Set<string>;
+  selectedAttachments: Set<string>;
   onToggleSelect: (messageId: string) => void;
+  onToggleAttachmentSelect: (attachmentId: string) => void;
 }) {
   const { t } = useT("projects");
 
@@ -654,7 +778,9 @@ function DiscussionMessageStream({
           message={message}
           selectMode={selectMode}
           checked={selected.has(message.id)}
+          selectedAttachments={selectedAttachments}
           onToggleSelect={onToggleSelect}
+          onToggleAttachmentSelect={onToggleAttachmentSelect}
         />
       ))}
     </div>
@@ -665,16 +791,28 @@ function SharedDiscussionMessage({
   message,
   selectMode,
   checked,
+  selectedAttachments,
   onToggleSelect,
+  onToggleAttachmentSelect,
 }: {
   message: ChatMessage;
   selectMode: boolean;
   checked: boolean;
+  selectedAttachments: Set<string>;
   onToggleSelect: (messageId: string) => void;
+  onToggleAttachmentSelect: (attachmentId: string) => void;
 }) {
   const { getActorName } = useActorName();
   const { t } = useT("projects");
   const timeAgo = useTimeAgo();
+
+  // Attachment selection surface (FR-11/AC-9): the same standalone set the
+  // AttachmentList renders below (inline-referenced attachments stay part of
+  // the message content and are not listed twice).
+  const standaloneAttachments = useMemo(
+    () => selectStandaloneAttachments(message.content, message.attachments),
+    [message],
+  );
 
   // Author resolution (SDD §3.3 fallback table): member/agent via the actor
   // cache; NULL or degraded fields keep the baseline rendering (no author
@@ -718,7 +856,23 @@ function SharedDiscussionMessage({
       <div className="pl-[38px] text-sm leading-relaxed text-foreground">
         <ReadonlyContent content={message.content} attachments={message.attachments} />
       </div>
-      <AttachmentList attachments={message.attachments} content={message.content} className="mt-1.5 pl-[38px]" />
+      {selectMode ? (
+        <div className="mt-1.5 pl-[38px] flex flex-col gap-1" data-testid="discussion-attachment-selector">
+          {standaloneAttachments.map((a) => (
+            <label key={a.id} className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Checkbox
+                data-testid="discussion-select-attachment-checkbox"
+                checked={selectedAttachments.has(a.id)}
+                onCheckedChange={() => onToggleAttachmentSelect(a.id)}
+                aria-label={a.id}
+              />
+              <span className="truncate">{a.filename}</span>
+            </label>
+          ))}
+        </div>
+      ) : (
+        <AttachmentList attachments={message.attachments} content={message.content} className="mt-1.5 pl-[38px]" />
+      )}
     </div>
   );
 }

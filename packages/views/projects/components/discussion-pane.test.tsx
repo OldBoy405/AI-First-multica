@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
-import type { ChatMessage, TimelineEntry } from "@multica/core/types";
+import type { Attachment, ChatMessage, TimelineEntry } from "@multica/core/types";
+import { NavigationProvider, type NavigationAdapter } from "../../navigation";
 import enCommon from "../../locales/en/common.json";
 import enProjects from "../../locales/en/projects.json";
 
@@ -19,6 +20,7 @@ const mockSendChatMessage = vi.hoisted(() => vi.fn());
 const mockPatchChatSessionConfig = vi.hoisted(() => vi.fn());
 const mockMergeForwardDiscussion = vi.hoisted(() => vi.fn());
 const mockGetProjectGates = vi.hoisted(() => vi.fn());
+const mockPromoteDiscussion = vi.hoisted(() => vi.fn());
 const mockListAgents = vi.hoisted(() => vi.fn());
 const mockUpdateAgent = vi.hoisted(() => vi.fn());
 vi.mock("@multica/core/api", async (importActual) => {
@@ -31,12 +33,19 @@ vi.mock("@multica/core/api", async (importActual) => {
       sendChatMessage: (...args: unknown[]) => mockSendChatMessage(...args),
       patchChatSessionConfig: (...args: unknown[]) => mockPatchChatSessionConfig(...args),
       mergeForwardDiscussion: (...args: unknown[]) => mockMergeForwardDiscussion(...args),
+      promoteDiscussion: (...args: unknown[]) => mockPromoteDiscussion(...args),
       getProjectGates: (...args: unknown[]) => mockGetProjectGates(...args),
       listAgents: (...args: unknown[]) => mockListAgents(...args),
       updateAgent: (...args: unknown[]) => mockUpdateAgent(...args),
     },
   };
 });
+vi.mock("@multica/core/paths", () => ({
+  useWorkspacePaths: () => ({
+    issueDetail: (id: string) => `/ws-1/issues/${id}`,
+    projectDetail: (id: string) => `/ws-1/projects/${id}`,
+  }),
+}));
 vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
 }));
@@ -98,6 +107,25 @@ vi.mock("../../editor", () => ({
   }),
 }));
 
+vi.mock("../../issues/components/comment-card", () => ({
+  // Lightweight stub: the editor module is mocked above without the
+  // AttachmentRenderer/AttachmentDownloadProvider pieces, so the real
+  // AttachmentList cannot render. Non-select mode lists filenames; select
+  // mode renders the attachment checkbox selector instead.
+  AttachmentList: ({ attachments }: { attachments?: Attachment[] }) => {
+    if (!attachments?.length) return null;
+    return (
+      <div data-testid="discussion-attachment-list">
+        {attachments.map((a) => (
+          <div key={a.id} data-testid="discussion-attachment" data-attachment-id={a.id}>
+            {a.filename}
+          </div>
+        ))}
+      </div>
+    );
+  },
+}));
+
 import { DiscussionPane } from "./discussion-pane";
 import { ApiError } from "@multica/core/api";
 
@@ -115,7 +143,13 @@ function discussionContext() {
   };
 }
 
-function sharedMessage(id: string, content: string, at: string, author?: { type: "member" | "agent"; id: string } | null): ChatMessage {
+function sharedMessage(
+  id: string,
+  content: string,
+  at: string,
+  author?: { type: "member" | "agent"; id: string } | null,
+  attachments?: Attachment[],
+): ChatMessage {
   return {
     id,
     chat_session_id: SESSION_ID,
@@ -125,15 +159,48 @@ function sharedMessage(id: string, content: string, at: string, author?: { type:
     created_at: at,
     author_type: author?.type ?? null,
     author_id: author?.id ?? null,
+    attachments,
   };
 }
+
+function attachment(id: string, filename: string): Attachment {
+  return {
+    id,
+    workspace_id: "ws-1",
+    issue_id: null,
+    comment_id: null,
+    chat_session_id: SESSION_ID,
+    chat_message_id: null,
+    uploader_type: "member",
+    uploader_id: "u1",
+    filename,
+    url: `https://files.example.test/${filename}`,
+    download_url: `https://files.example.test/${filename}`,
+    markdown_url: `https://files.example.test/${filename}`,
+    content_type: "application/octet-stream",
+    size_bytes: 42,
+    created_at: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+const navigation: NavigationAdapter = {
+  push: vi.fn(),
+  replace: vi.fn(),
+  back: vi.fn(),
+  pathname: "/ws-1",
+  searchParams: new URLSearchParams(),
+  hash: "",
+  getShareableUrl: (path: string) => `https://app.example.test${path}`,
+};
 
 function renderPane(canConfigure = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
-        <DiscussionPane projectId="proj-1" canConfigure={canConfigure} />
+        <NavigationProvider value={navigation}>
+          <DiscussionPane projectId="proj-1" canConfigure={canConfigure} />
+        </NavigationProvider>
       </I18nProvider>
     </QueryClientProvider>,
   );
@@ -148,6 +215,7 @@ describe("DiscussionPane (CR-2026-059 TASK-04)", () => {
     mockSendChatMessage.mockReset();
     mockPatchChatSessionConfig.mockReset();
     mockMergeForwardDiscussion.mockReset();
+    mockPromoteDiscussion.mockReset();
     mockGetProjectGates.mockReset().mockResolvedValue({ crs: [] });
     mockListAgents.mockReset().mockResolvedValue([]);
     mockUpdateAgent.mockReset();
@@ -323,5 +391,211 @@ describe("DiscussionPane (CR-2026-059 TASK-04)", () => {
     expect(screen.getByTestId("merge-forward-preview")).toBeTruthy();
     expect(screen.getByTestId("discussion-batch-bar")).toBeTruthy();
     expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
+  });
+
+  it("promotes the selected messages into a work Issue and shows the target link (AC-9)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "promote me", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockPromoteDiscussion.mockResolvedValue({
+      issue_id: "aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      issue_number: 7,
+      session_id: SESSION_ID,
+      source_refs: { session_id: SESSION_ID, message_ids: ["m1"], attachment_ids: [] },
+      created: true,
+      upgrade_to_cr: false,
+      run_id: null,
+    });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+    const messagesCallsBefore = mockListChatMessagesPage.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
+    fireEvent.click(screen.getByTestId("discussion-promote-cta"));
+
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(1));
+    const [projectId, body, key] = mockPromoteDiscussion.mock.calls[0] as [string, Record<string, unknown>, string];
+    expect(projectId).toBe("proj-1");
+    expect(body.session_id).toBe(SESSION_ID);
+    expect(body.message_ids).toEqual(["m1"]);
+    expect(body.upgrade_to_cr).toBe(false);
+    expect(key).toBeTruthy();
+
+    // Success: selection exits, the target Issue link is visible, and the
+    // Discussion stream was NOT reloaded (AC-9).
+    await waitFor(() => expect(screen.getByTestId("discussion-promoted-link")).toBeTruthy());
+    expect(screen.queryByTestId("discussion-batch-bar")).toBeNull();
+    expect(screen.getByTestId("discussion-promoted-link").textContent).toContain("#7");
+    expect(mockListChatMessagesPage.mock.calls.length).toBe(messagesCallsBefore);
+  });
+
+  it("upgrades the selected messages to a CR and keeps the selection on failure (AC-9/AC-11)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "upgrade me", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockPromoteDiscussion
+      .mockRejectedValueOnce(new ApiError("bad selection", 400, "Bad Request", { code: "invalid_promotion_selection" }))
+      .mockResolvedValueOnce({
+        issue_id: "aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        issue_number: 8,
+        session_id: SESSION_ID,
+        source_refs: { session_id: SESSION_ID, message_ids: ["m1"], attachment_ids: [] },
+        created: true,
+        upgrade_to_cr: true,
+        run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
+
+    // First attempt fails: the selection is KEPT (AC-11), retry allowed.
+    fireEvent.click(screen.getByTestId("discussion-promote-cr-cta"));
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("discussion-batch-bar")).toBeTruthy();
+    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
+
+    // Retry succeeds with upgrade_to_cr=true and a fresh key.
+    fireEvent.click(screen.getByTestId("discussion-promote-cr-cta"));
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(2));
+    const [, body, key] = mockPromoteDiscussion.mock.calls[1] as [string, Record<string, unknown>, string];
+    expect(body.upgrade_to_cr).toBe(true);
+    expect(key).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("discussion-promoted-link")).toBeTruthy());
+    expect(screen.getByTestId("discussion-promoted-link").textContent).toContain("#8");
+  });
+
+  it("promotes an attachment-only selection into a work Issue (AC-9 attachment arm)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "with a file", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }, [
+          attachment("a1", "notes.pdf"),
+        ]),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockPromoteDiscussion.mockResolvedValue({
+      issue_id: "aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      issue_number: 7,
+      session_id: SESSION_ID,
+      source_refs: { session_id: SESSION_ID, message_ids: [], attachment_ids: ["a1"] },
+      created: true,
+      upgrade_to_cr: false,
+      run_id: null,
+    });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-attachment-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-attachment-checkbox")[0]!);
+    // Attachment-only selections count towards the batch bar.
+    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
+    fireEvent.click(screen.getByTestId("discussion-promote-cta"));
+
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(1));
+    const [projectId, body, key] = mockPromoteDiscussion.mock.calls[0] as [string, Record<string, unknown>, string];
+    expect(projectId).toBe("proj-1");
+    expect(body.session_id).toBe(SESSION_ID);
+    expect(body.message_ids).toEqual([]);
+    expect(body.attachment_ids).toEqual(["a1"]);
+    expect(body.upgrade_to_cr).toBe(false);
+    expect(key).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("discussion-promoted-link")).toBeTruthy());
+    expect(screen.getByTestId("discussion-promoted-link").textContent).toContain("#7");
+  });
+
+  it("promotes a mixed message + attachment selection (AC-9 mixed arm)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "message plus file", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }, [
+          attachment("a1", "spec.md"),
+          attachment("a2", "screenshot.png"),
+        ]),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockPromoteDiscussion.mockResolvedValue({
+      issue_id: "aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      issue_number: 9,
+      session_id: SESSION_ID,
+      source_refs: { session_id: SESSION_ID, message_ids: ["m1"], attachment_ids: ["a2"] },
+      created: true,
+      upgrade_to_cr: false,
+      run_id: null,
+    });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-attachment-checkbox")).toHaveLength(2));
+    fireEvent.click(screen.getAllByTestId("discussion-select-checkbox")[0]!);
+    fireEvent.click(screen.getAllByTestId("discussion-select-attachment-checkbox")[1]!);
+    // Mixed selection: 1 message + 1 attachment.
+    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("2");
+    fireEvent.click(screen.getByTestId("discussion-promote-cta"));
+
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(1));
+    const [, body, key] = mockPromoteDiscussion.mock.calls[0] as [string, Record<string, unknown>, string];
+    expect(body.message_ids).toEqual(["m1"]);
+    expect(body.attachment_ids).toEqual(["a2"]);
+    expect(key).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("discussion-promoted-link")).toBeTruthy());
+    expect(screen.getByTestId("discussion-promoted-link").textContent).toContain("#9");
+  });
+
+  it("keeps the attachment selection on a failed promotion and retries it (AC-11 attachment arm)", async () => {
+    mockListChatMessagesPage.mockResolvedValue({
+      messages: [
+        sharedMessage("m1", "file only", "2026-01-01T00:00:01.000Z", { type: "member", id: "u1" }, [
+          attachment("a1", "brief.pdf"),
+        ]),
+      ],
+      limit: 50, has_more: false, next_cursor: null,
+    });
+    mockPromoteDiscussion
+      .mockRejectedValueOnce(new ApiError("bad selection", 400, "Bad Request", { code: "invalid_promotion_selection" }))
+      .mockResolvedValueOnce({
+        issue_id: "aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        issue_number: 10,
+        session_id: SESSION_ID,
+        source_refs: { session_id: SESSION_ID, message_ids: [], attachment_ids: ["a1"] },
+        created: true,
+        upgrade_to_cr: true,
+        run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+    renderPane();
+    await waitFor(() => expect(screen.getAllByTestId("discussion-message")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("discussion-select-entry"));
+    await waitFor(() => expect(screen.getAllByTestId("discussion-select-attachment-checkbox")).toHaveLength(1));
+    fireEvent.click(screen.getAllByTestId("discussion-select-attachment-checkbox")[0]!);
+
+    // First attempt fails: the attachment selection is KEPT (AC-11), retry allowed.
+    fireEvent.click(screen.getByTestId("discussion-promote-cr-cta"));
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("discussion-batch-bar")).toBeTruthy();
+    expect(screen.getByTestId("discussion-selected-count").textContent).toContain("1");
+
+    // Retry succeeds with the same attachment_ids and a fresh key.
+    fireEvent.click(screen.getByTestId("discussion-promote-cr-cta"));
+    await waitFor(() => expect(mockPromoteDiscussion).toHaveBeenCalledTimes(2));
+    const [, body, key] = mockPromoteDiscussion.mock.calls[1] as [string, Record<string, unknown>, string];
+    expect(body.message_ids).toEqual([]);
+    expect(body.attachment_ids).toEqual(["a1"]);
+    expect(body.upgrade_to_cr).toBe(true);
+    expect(key).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("discussion-promoted-link")).toBeTruthy());
+    expect(screen.getByTestId("discussion-promoted-link").textContent).toContain("#10");
   });
 });

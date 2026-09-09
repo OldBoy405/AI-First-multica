@@ -2975,6 +2975,16 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             />
           )}
 
+          {issue.context_refs?.some((r) => r.kind === "discussion_promotion") && issue.project_id && (
+            <AppLink
+              href={`${paths.projectDetail(issue.project_id)}?tab=chat&mode=discussion`}
+              data-testid="issue-discussion-source-entry"
+              className="mt-2 inline-flex max-w-full items-center gap-1.5 text-caption text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <span className="font-medium shrink-0">{t(($) => $.detail.discussion_source)}</span>
+            </AppLink>
+          )}
+
           <div
             {...descDropZoneProps}
             className="relative mt-5 rounded-lg"

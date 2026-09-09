@@ -1605,6 +1605,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// workspace headers; the handler rejects every other actor source. No
 		// workspace in the path — the workspace comes from the token.
 		r.Post("/api/crs/{crID}/bind-current-task", h.HandleBindCurrentTask)
+		// AIFIRST: CR-2026-061 (SDD §3.2): promotion pre-built run binding
+		// for requirement-register (task-token family, same route tree).
+		r.Post("/api/crs/{crID}/bind-promotion-run", h.HandleBindPromotionRun)
 
 		// AIFIRST: Runner Start endpoint (CR-2026-045). Auth middleware already
 		// resolved the task-token (mat_) binding; feature-off mounts no route.
@@ -2086,6 +2089,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					}
 					r.Get("/private-chat", h.GetProjectPrivateChat)
 					r.Get("/discussion", h.GetProjectDiscussion)
+					// AIFIRST: CR-2026-061 (SDD §3.1): explicit Discussion → work
+					// Issue promotion (member-scoped project route).
+					r.Post("/discussion/promote", h.HandlePromoteProjectDiscussion)
 					// AIFIRST: CR-2026-010 presenter (single-writer control) grant endpoints.
 					r.Get("/presenter", h.GetPresenterState)
 					r.Post("/presenter/request", h.RequestPresenter)

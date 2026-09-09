@@ -23,10 +23,13 @@ var crCmd = &cobra.Command{
 
 func init() {
 	crCmd.AddCommand(crBindCurrentTaskCmd)
+	crCmd.AddCommand(crBindPromotionRunCmd)
 	// --output must be registered here (not only in tests): the unit tests
 	// used to build a synthetic command with the flag, hiding the gap — the
 	// real command rejected `--output json` with "unknown flag".
 	crBindCurrentTaskCmd.Flags().String("output", "json", "Output format: table or json")
+	crBindPromotionRunCmd.Flags().String("output", "json", "Output format: table or json")
+	crBindPromotionRunCmd.Flags().String("run-id", "", "Pre-built promotion pipeline run id to bind")
 }
 
 var crBindCurrentTaskCmd = &cobra.Command{
@@ -70,6 +73,64 @@ func runCrBindCurrentTask(cmd *cobra.Command, args []string) error {
 			strVal(out, "task_id"),
 			strVal(out, "issue_id"),
 			strVal(out, "project_id"),
+			changed,
+		}})
+		return nil
+	}
+	return cli.PrintJSON(os.Stdout, out)
+}
+
+// crBindPromotionRunCmd is the thin relay for the promotion pre-built run
+// binding (CR-2026-061 SDD §3.3): relays the mat_ task token and {run_id} to
+// POST /api/crs/{cr_id}/bind-promotion-run and passes the structured result
+// through verbatim — no business judgment, no ledger writes (same contract
+// as bind-current-task).
+var crBindPromotionRunCmd = &cobra.Command{
+	Use:   "bind-promotion-run <cr-id>",
+	Short: "Bind a Discussion-promotion pre-built run to a CR",
+	Long: `Bind a Discussion-promotion pre-built pipeline run to a CR.
+
+Requires a mat_ task token: workspace/issue identity derives server-side from
+the token and the run row; the body carries only the run id from --run-id.
+Prints the structured result {cr_id, run_id, issue_id, changed}; a failed
+bind exits non-zero with the server error code (TASK_CONTEXT_REQUIRED /
+INVALID_RUN_ID / RUN_NOT_FOUND / CR_NOT_FOUND / RUN_CR_CONFLICT /
+CR_ISSUE_CONFLICT / CR_BIND_FAILED).`,
+	Args: exactArgs(1),
+	RunE: runCrBindPromotionRun,
+}
+
+func runCrBindPromotionRun(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	crID := args[0]
+	runID, err := cmd.Flags().GetString("run-id")
+	if err != nil || runID == "" {
+		return fmt.Errorf("bind promotion run to %s: --run-id is required", crID)
+	}
+
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+
+	var out map[string]any
+	if err := client.PostJSON(ctx, "/api/crs/"+crID+"/bind-promotion-run", map[string]any{
+		"run_id": runID,
+	}, &out); err != nil {
+		return fmt.Errorf("bind promotion run to %s: %w", crID, err)
+	}
+
+	output, _ := cmd.Flags().GetString("output")
+	if output == "table" {
+		changed := "false"
+		if b, ok := out["changed"].(bool); ok && b {
+			changed = "true"
+		}
+		cli.PrintTable(os.Stdout, []string{"CR", "RUN", "ISSUE", "CHANGED"}, [][]string{{
+			strVal(out, "cr_id"),
+			strVal(out, "run_id"),
+			strVal(out, "issue_id"),
 			changed,
 		}})
 		return nil

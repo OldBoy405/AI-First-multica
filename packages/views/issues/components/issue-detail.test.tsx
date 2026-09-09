@@ -1016,6 +1016,42 @@ describe("IssueDetail (shared)", () => {
     expect(projectLink.closest("a")).toHaveAttribute("href", "/test/projects/p-1");
   });
 
+  it("shows the Discussion source entry for an issue promoted from Discussion (AC-7)", async () => {
+    mockApiObj.getIssue.mockResolvedValue({
+      ...mockIssue,
+      project_id: "p-1",
+      context_refs: [
+        {
+          kind: "discussion_promotion",
+          session_id: "11111111-1111-4111-8111-111111111111",
+          message_ids: ["22222222-2222-4222-8222-222222222222"],
+          attachment_ids: [],
+        },
+      ],
+    });
+    renderIssueDetail();
+
+    await screen.findByText("TES-1 Implement authentication");
+    const entry = screen.getByTestId("issue-discussion-source-entry");
+    // Jumps back to the project's Discussion tab; the pane resolves the
+    // project's active shared session, which is exactly the promotion source
+    // (the server enforces session_id === active shared session).
+    expect(entry).toHaveAttribute("href", "/test/projects/p-1?tab=chat&mode=discussion");
+    expect(entry.textContent).toContain("From Discussion");
+  });
+
+  it("omits the Discussion source entry when context_refs has no promotion kind", async () => {
+    mockApiObj.getIssue.mockResolvedValue({
+      ...mockIssue,
+      project_id: "p-1",
+      context_refs: [{ kind: "other_kind", session_id: "11111111-1111-4111-8111-111111111111" }],
+    });
+    renderIssueDetail();
+
+    await screen.findByText("TES-1 Implement authentication");
+    expect(screen.queryByTestId("issue-discussion-source-entry")).toBeNull();
+  });
+
   it("renders properties sidebar with all core rows plus set optional rows", async () => {
     renderIssueDetail();
 

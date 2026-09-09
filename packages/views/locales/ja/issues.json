@@ -324,6 +324,7 @@
     "current_issue": "現在のタスク",
     "sub_issues_label": "サブタスク",
     "sub_issue_of": "親タスク",
+    "discussion_source": "ディスカッションから",
     "add_sub_issues": "サブタスクを追加",
     "add_sub_issue_tooltip": "サブタスクを追加",
     "add_sub_issue_aria": "サブタスクを追加",

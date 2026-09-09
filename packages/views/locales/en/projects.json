@@ -306,6 +306,15 @@
       "queue_full_error": "The Team Agent queue is full ({{depth}}/{{limit}}). Your selection is kept — try again later.",
       "presenter_locked_error": "The presenter holds single-writer control. Your selection is kept — try again once it is released."
     },
+    "promotion": {
+      "issue_cta": "Turn into work Issue",
+      "cr_cta": "Upgrade to CR",
+      "success_label": "Created issue:",
+      "failed": "Promotion failed. Your selection is kept — try again.",
+      "selection_error": "Invalid selection. Your selection is kept — adjust and try again.",
+      "forbidden_error": "You are not allowed to promote this discussion.",
+      "conflict_error": "This request was already submitted with different content. Your selection is kept — refresh the selection and try again."
+    },
     "dc": {
       "coordinator_label": "Discussion Coordinator",
       "coordinator_pick_cta": "Choose coordinator",

@@ -324,6 +324,7 @@
     "current_issue": "当前任务",
     "sub_issues_label": "子任务",
     "sub_issue_of": "属于父任务",
+    "discussion_source": "来自 Discussion",
     "add_sub_issues": "添加子任务",
     "add_sub_issue_tooltip": "添加子任务",
     "add_sub_issue_aria": "添加子任务",

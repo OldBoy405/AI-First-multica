@@ -94,6 +94,25 @@ type IssueCreateParams struct {
 	// Its immutable snapshot and cloned attachment rows commit in the same
 	// transaction as the new issue.
 	SourceContext *SourceContextCapture
+	// ContextRefs, when non-empty, is appended to the new issue's context_refs
+	// JSONB array inside the create transaction (promotion source entry,
+	// CR-2026-061 SDD §2.1). Nil/empty is a no-op — every existing caller is
+	// byte-for-byte unchanged.
+	ContextRefs json.RawMessage
+	// PromotionRun, when set, pre-builds the requirement-authoring pipeline
+	// run and its first node in the same transaction as the issue row
+	// (CR-2026-061 SDD §2.3/§4.3, FR-10). Nil is a no-op.
+	PromotionRun *PromotionRunPlan
+}
+
+// PromotionRunPlan carries the pre-generated promotion pipeline run payloads
+// (CR-2026-061 SDD §2.3/§2.4/D-7): the run id is generated Go-side before
+// the create transaction so the context_refs entry can carry pipeline_run_id
+// before the run row exists.
+type PromotionRunPlan struct {
+	RunID            pgtype.UUID
+	Inputs           json.RawMessage
+	ExecutionContext json.RawMessage
 }
 
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
@@ -224,31 +243,106 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	defer tx.Rollback(ctx)
 	qtx := s.Queries.WithTx(tx)
 
+	res, err := s.createInTx(ctx, tx, qtx, p, opts, issueCountPolicy)
+	if err != nil {
+		if res.duplicate != nil {
+			return IssueCreateResult{DuplicateIssue: res.duplicate}, err
+		}
+		return IssueCreateResult{}, err
+	}
+	issue, assignedTask, labels := res.issue, res.assignedTask, res.labels
+
+	if err := tx.Commit(ctx); err != nil {
+		return IssueCreateResult{}, fmt.Errorf("commit: %w", err)
+	}
+
+	attachments := s.linkAttachments(ctx, issue, p.AttachmentIDs)
+
+	actorID := opts.ActorID
+	if actorID == "" {
+		actorID = util.UUIDToString(issue.CreatorID)
+	}
+
+	var assignedTaskID pgtype.UUID
+	if !opts.AssignedAgentRunFireAt.IsZero() {
+		assignedTaskID = assignedTask.ID
+		if assignedTaskID.Valid {
+			// The deferred task became durable with the issue at commit. Refresh the
+			// daemon's schedule only now so a wakeup can never race uncommitted data.
+			s.TaskService.notifyRuntimeMayHaveWork(assignedTask.RuntimeID, "")
+			if err := s.TaskService.hydrateDeferredChannelIssueTaskOverlay(ctx, assignedTask); err != nil {
+				// Runtime overlays are best-effort on every enqueue path. The task is
+				// already durable and safely deferred, so an optional integration
+				// failure must not turn a committed issue into a retry duplicate.
+				slog.Warn("hydrate deferred channel issue task overlay failed",
+					"issue_id", util.UUIDToString(issue.ID),
+					"task_id", util.UUIDToString(assignedTask.ID),
+					"error", err)
+			}
+		} else if s.shouldEnqueueSquadLeaderOnAssign(ctx, issue) {
+			// AssignedAgentRunFireAt currently belongs to channel /issue, which
+			// always resolves an agent assignee. Preserve the ordinary squad path
+			// for any future caller that supplies the option with a squad.
+			s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, p.CreatorType, actorID)
+		}
+	}
+
+	s.publishIssueCreated(issue, attachments, labels, p.CreatorType, actorID, opts)
+	s.captureCreatedAnalytics(issue, p.CreatorType, actorID, opts)
+	if opts.AssignedAgentRunFireAt.IsZero() {
+		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt)
+	}
+
+	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels, AssignedTaskID: assignedTaskID}, nil
+}
+
+// createInTxResult is the internal output of createInTx. duplicate is
+// populated only when the duplicate guard fired (ErrActiveDuplicate), so
+// Create keeps its public DuplicateIssue contract while the promotion path
+// never hits it (AllowDuplicate=true).
+type createInTxResult struct {
+	issue        db.Issue
+	assignedTask db.AgentTaskQueue
+	labels       []db.IssueLabel
+	duplicate    *db.Issue
+}
+
+// createInTx is the transactional core of issue creation, extracted from
+// Create (CR-2026-061 D-7) so PromoteDiscussion reuses the ONE issue write
+// path inside its own transaction (FR-1/FR-2). It runs the full pre-commit
+// pipeline — source-context locking, status re-resolution, parent/project
+// validation, label validation, duplicate guard, issue-number allocation,
+// position computation, row insert, promotion injection (ContextRefs append
+// + PromotionRun pre-build), label attach, deferred channel task — and never
+// begins, commits or publishes. Zero-valued new fields (ContextRefs,
+// PromotionRun) are no-ops: every existing caller's behavior is unchanged
+// (SDD §9 zero_diff).
+func (s *IssueService) createInTx(ctx context.Context, tx pgx.Tx, qtx *db.Queries, p IssueCreateParams, opts IssueCreateOpts, issueCountPolicy IssueCountPolicy) (createInTxResult, error) {
 	if p.SourceContext != nil {
 		if _, err := qtx.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
 			ID: p.SourceContext.SourceIssueID, WorkspaceID: p.WorkspaceID,
 		}); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return IssueCreateResult{}, ErrSourceIssueDeleted
+				return createInTxResult{}, ErrSourceIssueDeleted
 			}
-			return IssueCreateResult{}, fmt.Errorf("lock source issue: %w", err)
+			return createInTxResult{}, fmt.Errorf("lock source issue: %w", err)
 		}
 		locked, err := qtx.LockCommentAncestorPath(ctx, db.LockCommentAncestorPathParams{
 			CommentID: p.SourceContext.AnchorCommentID, WorkspaceID: p.WorkspaceID,
 			IssueID: p.SourceContext.SourceIssueID,
 		})
 		if err != nil {
-			return IssueCreateResult{}, fmt.Errorf("lock anchor comment thread: %w", err)
+			return createInTxResult{}, fmt.Errorf("lock anchor comment thread: %w", err)
 		}
 		if len(locked) == 0 {
-			return IssueCreateResult{}, ErrAnchorCommentDeleted
+			return createInTxResult{}, ErrAnchorCommentDeleted
 		}
 		current, err := BuildSourceContext(ctx, qtx, p.WorkspaceID, p.SourceContext.AnchorCommentID)
 		if err != nil {
-			return IssueCreateResult{}, err
+			return createInTxResult{}, err
 		}
 		if current.Digest != p.SourceContext.Digest {
-			return IssueCreateResult{}, ErrSourceContextChanged
+			return createInTxResult{}, ErrSourceContextChanged
 		}
 	}
 
@@ -261,13 +355,13 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	// never be archived, so the common path is unchanged. (MUL-6243)
 	if !issuestatus.IsBuiltIn(p.Status) {
 		if err := qtx.LockIssueStatusCatalogShared(ctx, p.WorkspaceID); err != nil {
-			return IssueCreateResult{}, err
+			return createInTxResult{}, err
 		}
 		if _, err := issuestatus.Resolve(ctx, qtx, p.WorkspaceID, p.Status); err != nil {
 			if errors.Is(err, issuestatus.ErrUnknownStatus) {
-				return IssueCreateResult{}, ErrIssueStatusUnavailable
+				return createInTxResult{}, ErrIssueStatusUnavailable
 			}
-			return IssueCreateResult{}, err
+			return createInTxResult{}, err
 		}
 	}
 
@@ -283,7 +377,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			WorkspaceID: p.WorkspaceID,
 		})
 		if err != nil || !parent.ID.Valid {
-			return IssueCreateResult{}, ErrParentIssueNotFound
+			return createInTxResult{}, ErrParentIssueNotFound
 		}
 		// Back-fill project from parent when the caller did not pin
 		// one explicitly. Matches the long-standing HTTP behavior: a
@@ -297,7 +391,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			ID:          projectID,
 			WorkspaceID: p.WorkspaceID,
 		}); err != nil {
-			return IssueCreateResult{}, ErrProjectNotFound
+			return createInTxResult{}, ErrProjectNotFound
 		}
 	}
 
@@ -307,21 +401,21 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	// echoed back as the authoritative snapshot in the result.
 	labels, err := validateIssueLabels(ctx, qtx, p.WorkspaceID, p.LabelIDs)
 	if err != nil {
-		return IssueCreateResult{}, err
+		return createInTxResult{}, err
 	}
 
 	duplicate, found, err := issueguard.LockAndFindActiveDuplicate(ctx, qtx, p.WorkspaceID, projectID, p.ParentIssueID, p.Title, p.AllowDuplicate)
 	if err != nil {
-		return IssueCreateResult{}, fmt.Errorf("duplicate guard: %w", err)
+		return createInTxResult{}, fmt.Errorf("duplicate guard: %w", err)
 	}
 	if found {
 		dup := duplicate
-		return IssueCreateResult{DuplicateIssue: &dup}, ErrActiveDuplicate
+		return createInTxResult{duplicate: &dup}, ErrActiveDuplicate
 	}
 
 	issueNumber, err := AllocateIssueNumber(ctx, qtx, p.WorkspaceID, issueCountPolicy)
 	if err != nil {
-		return IssueCreateResult{}, fmt.Errorf("allocate issue number: %w", err)
+		return createInTxResult{}, fmt.Errorf("allocate issue number: %w", err)
 	}
 
 	// New issues sort to the top of their (workspace, status) column for
@@ -335,7 +429,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	// to the secondary ORDER BY key.
 	newPosition, err := issueposition.NextTopPosition(ctx, tx, p.WorkspaceID, p.Status)
 	if err != nil {
-		return IssueCreateResult{}, fmt.Errorf("next top position: %w", err)
+		return createInTxResult{}, fmt.Errorf("next top position: %w", err)
 	}
 
 	var issue db.Issue
@@ -384,62 +478,62 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		})
 	}
 	if err != nil {
-		return IssueCreateResult{}, fmt.Errorf("create issue: %w", err)
+		return createInTxResult{}, fmt.Errorf("create issue: %w", err)
 	}
 
 	if p.SourceContext != nil {
 		if _, err := PersistSourceContext(ctx, qtx, *p.SourceContext, issue.ID, pgtype.UUID{}); err != nil {
-			return IssueCreateResult{}, fmt.Errorf("persist source context: %w", err)
+			return createInTxResult{}, fmt.Errorf("persist source context: %w", err)
 		}
 	} else if p.OriginType.Valid && p.OriginType.String == "quick_create" && p.OriginID.Valid {
 		task, taskErr := qtx.GetAgentTaskInWorkspace(ctx, db.GetAgentTaskInWorkspaceParams{
 			ID: p.OriginID, WorkspaceID: p.WorkspaceID,
 		})
 		if taskErr != nil {
-			return IssueCreateResult{}, fmt.Errorf("load quick-create origin task: %w", taskErr)
+			return createInTxResult{}, fmt.Errorf("load quick-create origin task: %w", taskErr)
 		}
 		if p.CreatorType != "agent" || !p.CreatorID.Valid || p.CreatorID != task.AgentID {
-			return IssueCreateResult{}, errors.New("quick-create origin task does not belong to the creating agent")
+			return createInTxResult{}, errors.New("quick-create origin task does not belong to the creating agent")
 		}
 		var quickCreate QuickCreateContext
 		if err := json.Unmarshal(task.Context, &quickCreate); err != nil {
-			return IssueCreateResult{}, fmt.Errorf("decode quick-create origin context: %w", err)
+			return createInTxResult{}, fmt.Errorf("decode quick-create origin context: %w", err)
 		}
 		if quickCreate.Type != QuickCreateContextType {
-			return IssueCreateResult{}, errors.New("quick-create origin task has invalid context type")
+			return createInTxResult{}, errors.New("quick-create origin task has invalid context type")
 		}
 		contextWorkspaceID, parseErr := util.ParseUUID(quickCreate.WorkspaceID)
 		if parseErr != nil || contextWorkspaceID != p.WorkspaceID {
-			return IssueCreateResult{}, errors.New("quick-create origin context has invalid workspace")
+			return createInTxResult{}, errors.New("quick-create origin context has invalid workspace")
 		}
 		if quickCreate.SourceContextID != "" {
 			contextID, parseErr := util.ParseUUID(quickCreate.SourceContextID)
 			if parseErr != nil {
-				return IssueCreateResult{}, fmt.Errorf("invalid quick-create source context id: %w", parseErr)
+				return createInTxResult{}, fmt.Errorf("invalid quick-create source context id: %w", parseErr)
 			}
 			requesterID, parseErr := util.ParseUUID(quickCreate.RequesterID)
 			if parseErr != nil || !task.OriginatorUserID.Valid || requesterID != task.OriginatorUserID {
-				return IssueCreateResult{}, errors.New("quick-create source context has invalid requester")
+				return createInTxResult{}, errors.New("quick-create source context has invalid requester")
 			}
 			pending, pendingErr := qtx.GetPendingIssueSourceContextByOriginTask(ctx, db.GetPendingIssueSourceContextByOriginTaskParams{
 				WorkspaceID: p.WorkspaceID, OriginTaskID: task.ID,
 			})
 			if pendingErr != nil {
 				if errors.Is(pendingErr, pgx.ErrNoRows) {
-					return IssueCreateResult{}, ErrSourceContextAlreadyAttached
+					return createInTxResult{}, ErrSourceContextAlreadyAttached
 				}
-				return IssueCreateResult{}, fmt.Errorf("load pending quick-create source context: %w", pendingErr)
+				return createInTxResult{}, fmt.Errorf("load pending quick-create source context: %w", pendingErr)
 			}
 			if pending.ID != contextID || pending.CapturedByUserID != requesterID {
-				return IssueCreateResult{}, errors.New("quick-create source context ownership mismatch")
+				return createInTxResult{}, errors.New("quick-create source context ownership mismatch")
 			}
 			if _, attachErr := qtx.AttachIssueSourceContext(ctx, db.AttachIssueSourceContextParams{
 				IssueID: issue.ID, WorkspaceID: p.WorkspaceID, ID: contextID, OriginTaskID: task.ID,
 			}); attachErr != nil {
 				if errors.Is(attachErr, pgx.ErrNoRows) {
-					return IssueCreateResult{}, ErrSourceContextAlreadyAttached
+					return createInTxResult{}, ErrSourceContextAlreadyAttached
 				}
-				return IssueCreateResult{}, fmt.Errorf("attach quick-create source context: %w", attachErr)
+				return createInTxResult{}, fmt.Errorf("attach quick-create source context: %w", attachErr)
 			}
 		}
 	}
@@ -456,7 +550,44 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			LabelID:     label.ID,
 			WorkspaceID: p.WorkspaceID,
 		}); err != nil {
-			return IssueCreateResult{}, fmt.Errorf("attach issue label: %w", err)
+			return createInTxResult{}, fmt.Errorf("attach issue label: %w", err)
+		}
+	}
+
+	// Promotion injection (CR-2026-061 §4.3/D-7): append the promotion
+	// context_refs entry and pre-build the requirement-authoring run + first
+	// node in the same transaction as the issue row. Any run-side write error
+	// becomes ErrPromotionRunCreateFailed so the caller maps it to 502 and
+	// the whole transaction rolls back with zero residue (AC-8).
+	if len(p.ContextRefs) > 0 {
+		if err := qtx.AppendIssueContextRefs(ctx, db.AppendIssueContextRefsParams{
+			ID:          issue.ID,
+			ContextRefs: []byte(p.ContextRefs),
+		}); err != nil {
+			return createInTxResult{}, fmt.Errorf("append promotion context refs: %w", err)
+		}
+	}
+	if p.PromotionRun != nil {
+		if _, err := qtx.InsertPipelineRun(ctx, db.InsertPipelineRunParams{
+			ID:               p.PromotionRun.RunID,
+			WorkspaceID:      p.WorkspaceID,
+			IssueID:          issue.ID,
+			Inputs:           []byte(p.PromotionRun.Inputs),
+			ExecutionContext: []byte(p.PromotionRun.ExecutionContext),
+			StartedBy:        p.CreatorID,
+		}); err != nil {
+			return createInTxResult{}, fmt.Errorf("%w: insert promotion pipeline run: %v", ErrPromotionRunCreateFailed, err)
+		}
+		if _, err := qtx.InsertPipelineNodeRun(ctx, db.InsertPipelineNodeRunParams{
+			RunID:   p.PromotionRun.RunID,
+			NodeID:  promotionFirstNodeID,
+			Ref:     pgtype.Text{String: promotionFirstNodeRef, Valid: true},
+			Kind:    "skill",
+			Seq:     1,
+			Status:  "running",
+			Attempt: 1,
+		}); err != nil {
+			return createInTxResult{}, fmt.Errorf("%w: insert promotion pipeline node run: %v", ErrPromotionRunCreateFailed, err)
 		}
 	}
 
@@ -467,52 +598,11 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		// sees the inert deferred task and must merge into it.
 		assignedTask, err = s.TaskService.createDeferredChannelIssueTaskWithQueries(ctx, qtx, issue, opts.AssignedAgentRunFireAt)
 		if err != nil {
-			return IssueCreateResult{}, fmt.Errorf("create deferred channel issue task: %w", err)
+			return createInTxResult{}, fmt.Errorf("create deferred channel issue task: %w", err)
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return IssueCreateResult{}, fmt.Errorf("commit: %w", err)
-	}
-
-	attachments := s.linkAttachments(ctx, issue, p.AttachmentIDs)
-
-	actorID := opts.ActorID
-	if actorID == "" {
-		actorID = util.UUIDToString(issue.CreatorID)
-	}
-
-	var assignedTaskID pgtype.UUID
-	if !opts.AssignedAgentRunFireAt.IsZero() {
-		assignedTaskID = assignedTask.ID
-		if assignedTaskID.Valid {
-			// The deferred task became durable with the issue at commit. Refresh the
-			// daemon's schedule only now so a wakeup can never race uncommitted data.
-			s.TaskService.notifyRuntimeMayHaveWork(assignedTask.RuntimeID, "")
-			if err := s.TaskService.hydrateDeferredChannelIssueTaskOverlay(ctx, assignedTask); err != nil {
-				// Runtime overlays are best-effort on every enqueue path. The task is
-				// already durable and safely deferred, so an optional integration
-				// failure must not turn a committed issue into a retry duplicate.
-				slog.Warn("hydrate deferred channel issue task overlay failed",
-					"issue_id", util.UUIDToString(issue.ID),
-					"task_id", util.UUIDToString(assignedTask.ID),
-					"error", err)
-			}
-		} else if s.shouldEnqueueSquadLeaderOnAssign(ctx, issue) {
-			// AssignedAgentRunFireAt currently belongs to channel /issue, which
-			// always resolves an agent assignee. Preserve the ordinary squad path
-			// for any future caller that supplies the option with a squad.
-			s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, p.CreatorType, actorID)
-		}
-	}
-
-	s.publishIssueCreated(issue, attachments, labels, p.CreatorType, actorID, opts)
-	s.captureCreatedAnalytics(issue, p.CreatorType, actorID, opts)
-	if opts.AssignedAgentRunFireAt.IsZero() {
-		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt)
-	}
-
-	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels, AssignedTaskID: assignedTaskID}, nil
+	return createInTxResult{issue: issue, assignedTask: assignedTask, labels: labels}, nil
 }
 
 // validateIssueLabels checks that every requested label exists in the

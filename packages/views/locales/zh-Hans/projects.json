@@ -303,6 +303,15 @@
       "queue_full_error": "团队 Agent 队列已满（{{depth}}/{{limit}}）。已保留所选消息，请稍后重试。",
       "presenter_locked_error": "演示人持有单写控制。已保留所选消息，请在解除后重试。"
     },
+    "promotion": {
+      "issue_cta": "转为工作 Issue",
+      "cr_cta": "升级为 CR",
+      "success_label": "已创建 Issue:",
+      "failed": "升级失败。已保留所选消息，请重试。",
+      "selection_error": "所选内容无效。已保留所选消息，请调整后重试。",
+      "forbidden_error": "你没有权限升级此讨论。",
+      "conflict_error": "该请求已以不同内容提交过。已保留所选消息，请更新选择后重试。"
+    },
     "dc": {
       "coordinator_label": "讨论协调者",
       "coordinator_pick_cta": "选择协调者",

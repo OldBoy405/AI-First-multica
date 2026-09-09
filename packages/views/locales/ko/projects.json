@@ -303,6 +303,15 @@
       "queue_full_error": "팀 Agent 대기열이 가득 찼습니다 ({{depth}}/{{limit}}). 선택 항목은 유지됩니다. 나중에 다시 시도하세요.",
       "presenter_locked_error": "프레젠터가 단일 쓰기 권한을 보유하고 있습니다. 선택 항목은 유지됩니다. 해제 후 다시 시도하세요."
     },
+    "promotion": {
+      "issue_cta": "작업 Issue로 전환",
+      "cr_cta": "CR로 업그레이드",
+      "success_label": "생성된 Issue:",
+      "failed": "전환에 실패했습니다. 선택 항목은 유지됩니다. 다시 시도하세요.",
+      "selection_error": "선택 항목이 올바르지 않습니다. 선택 항목은 유지됩니다. 수정 후 다시 시도하세요.",
+      "forbidden_error": "이 디스커션을 전환할 권한이 없습니다.",
+      "conflict_error": "이 요청은 다른 내용으로 이미 제출되었습니다. 선택 항목은 유지됩니다. 선택을 갱신한 후 다시 시도하세요."
+    },
     "dc": {
       "coordinator_label": "토론 코디네이터",
       "coordinator_pick_cta": "코디네이터 선택",
