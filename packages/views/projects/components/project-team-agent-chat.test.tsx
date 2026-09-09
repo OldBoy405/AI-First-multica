@@ -146,6 +146,9 @@ vi.mock("@multica/core/api", async (importActual) => {
       updateAgent: vi.fn().mockResolvedValue({}),
       // CR-2026-056: the chat path persists via the session-config PATCH.
       patchProjectChatConfig: vi.fn().mockResolvedValue({}),
+      // CR-2026-062: the stop path reads the container issue's task-runs
+      // (AgentTask[] — the array shape is part of the contract under test).
+      listTasksByIssue: vi.fn(async () => taskRunsState),
     },
   };
 });
@@ -210,6 +213,16 @@ const chatCfg: {
   thinking_level: "",
 };
 
+// CR-2026-062 stop-path fixtures (dual-source, §4.3.1): queue items are the
+// server-filtered queued/dispatched window; task-runs are the container
+// issue's AgentTask[] timeline. Read lazily inside the mock factories.
+const queueItemsState: {
+  queue_depth: number;
+  queue_limit: number;
+  items: { task_id: string; status: string }[];
+} = { queue_depth: 0, queue_limit: 10, items: [] };
+const taskRunsState: AgentTask[] = [];
+
 vi.mock("@multica/core/projects", () => ({
   projectChatDraftKey: (projectId: string, mode: string) => `${projectId}:${mode}`,
   projectChatOptions: (_wsId: string, id: string) => ({
@@ -232,6 +245,17 @@ vi.mock("@multica/core/projects", () => ({
     queryKey: ["queue-status", id],
     queryFn: () => new Promise(() => {}),
   }),
+  // CR-2026-062: the composer's dual-source stop reads the same items cache
+  // as ProjectQueueBar (server-filtered queued+dispatched). Fresh copies so a
+  // mid-test mutation is observable after invalidation.
+  projectQueueItemsOptions: (_wsId: string, id: string) => ({
+    queryKey: ["queue-items", id],
+    queryFn: async () => ({
+      queue_depth: queueItemsState.queue_depth,
+      queue_limit: queueItemsState.queue_limit,
+      items: [...queueItemsState.items],
+    }),
+  }),
   projectPresenterOptions: (_wsId: string, id: string) => ({
     queryKey: ["presenter", id],
     queryFn: async () => presenterStateMock,
@@ -242,13 +266,18 @@ vi.mock("@multica/core/projects", () => ({
 // shim keeps the historical textarea/send-button testids and the adapter
 // contract (draft read, setDraft on change, clearDraft via commitInput) so
 // the pane-level send/lock/latch assertions stay meaningful without pulling
-// the real Tiptap editor into jsdom.
+// the real Tiptap editor into jsdom. CR-2026-062 extends it with the
+// stop/send affordance decision (§4.2) and the leftAdornment toolbar slot.
 type ComposerCommit = (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void;
 vi.mock("../../chat/components/chat-input", () => ({
   ChatInputCore: ({
     draftAdapter,
     onSend,
     disabled,
+    isRunning,
+    onStop,
+    allowSubmitWhileRunning,
+    leftAdornment,
   }: {
     draftAdapter: {
       draftKey: string;
@@ -262,6 +291,10 @@ vi.mock("../../chat/components/chat-input", () => ({
       commitInput: ComposerCommit,
     ) => void | boolean | Promise<void | boolean>;
     disabled?: boolean;
+    isRunning?: boolean;
+    onStop?: () => void;
+    allowSubmitWhileRunning?: boolean;
+    leftAdornment?: React.ReactNode;
   }) => {
     const commit: ComposerCommit = (options) => {
       draftAdapter.clearDraft(draftAdapter.draftKey);
@@ -269,22 +302,34 @@ vi.mock("../../chat/components/chat-input", () => ({
         if (key !== draftAdapter.draftKey) draftAdapter.clearDraft(key);
       }
     };
+    // Mirrors the real ChatInputCore affordance decision (SDD §4.2): a
+    // queue-capable run swaps an empty composer to Stop, live content to
+    // Queue Send; without allowSubmitWhileRunning it stays stop-only.
+    const running =
+      !!isRunning && (!allowSubmitWhileRunning || !draftAdapter.draft.trim());
     return (
-      <div>
+      <div data-testid="project-chat-composer-inner">
         <textarea
           data-testid="project-chat-composer-input"
           value={draftAdapter.draft}
           disabled={disabled}
           onChange={(e) => draftAdapter.setDraft(draftAdapter.draftKey, e.target.value)}
         />
-        <button
-          type="button"
-          data-testid="project-chat-send"
-          disabled={disabled || !draftAdapter.draft.trim()}
-          onClick={() => void onSend(draftAdapter.draft, undefined, commit)}
-        >
-          send
-        </button>
+        {running ? (
+          <button type="button" data-testid="project-chat-stop" onClick={onStop}>
+            stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            data-testid="project-chat-send"
+            disabled={disabled || !draftAdapter.draft.trim()}
+            onClick={() => void onSend(draftAdapter.draft, undefined, commit)}
+          >
+            send
+          </button>
+        )}
+        <div data-testid="project-chat-left-adornment">{leftAdornment}</div>
       </div>
     );
   },
@@ -297,15 +342,20 @@ import {
 
 const RESOURCES = { en: { projects: enProjects, common: enCommon } };
 
-function renderWithProviders(ui: React.ReactNode) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+function wrapWithProviders(ui: React.ReactNode, qc: QueryClient) {
+  return (
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={RESOURCES}>
         {ui}
       </I18nProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function renderWithProviders(ui: React.ReactNode) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(wrapWithProviders(ui, qc));
+  return { qc, ...view };
 }
 
 function comment(id: string, at: string): TimelineEntry {
@@ -407,6 +457,10 @@ beforeEach(() => {
   sendMock.isPending = false;
   cancelMock.mutateAsync = vi.fn().mockResolvedValue({ status: "cancelled" });
   cancelMock.isPending = false;
+  queueItemsState.queue_depth = 0;
+  queueItemsState.queue_limit = 10;
+  queueItemsState.items = [];
+  taskRunsState.length = 0;
   cfg.canEdit = true;
   cfg.runtimeStatus = "online";
   cfg.agent = null;
@@ -1259,5 +1313,343 @@ describe("TeamAgentComposer presenter guard", () => {
     expect(screen.getByTestId("project-chat-presenter-required").textContent).not.toContain(
       enProjects.chat.stream.queue_full_title,
     );
+  });
+});
+
+// ─── CR-2026-062 TASK-02: two-layer column DOM ─────────────────────────────
+
+describe("TeamAgentStreamView two-layer column (CR-2026-062)", () => {
+  it("nests the reading column inside a gutter layer as separate DOM nodes", () => {
+    renderWithProviders(<TeamAgentStreamView {...streamBaseProps} comments={[]} tasks={[]} />);
+
+    const noEarlier = screen.getByTestId("project-chat-no-earlier");
+    const inner = noEarlier.parentElement!;
+    const outer = inner.parentElement!;
+    // Two separate layers: gutter outside, reading column inside (a
+    // single-element merge would put gutter padding inside the max-w cap).
+    expect(outer).not.toBe(inner);
+    expect(outer.className).toContain("px-5"); // CHAT_GUTTER base
+    expect(outer.className).not.toContain("max-w-4xl");
+    expect(inner.className).toContain("max-w-4xl"); // CHAT_COLUMN
+    expect(inner.className).toContain("mx-auto");
+  });
+});
+
+// ─── CR-2026-062 TASK-02: composer alignment + toolbar ─────────────────────
+
+describe("TeamAgentComposer alignment + toolbar (CR-2026-062)", () => {
+  const props = {
+    projectId: "proj-1",
+    wsId: "ws-1",
+    issueId: "issue-chat-1",
+    sessionId: "session-1",
+    teamAgentId: "agent-1",
+    canConfigure: false,
+  };
+
+  beforeEach(() => {
+    cfg.agent = { id: "agent-1", model: "gpt-5", runtime_id: "rt-1" };
+    chatCfg.model = "gpt-5";
+    chatCfg.thinking_level = "";
+  });
+
+  it("wraps the banner zone in a two-layer gutter>column block above the surface", async () => {
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    const composer = await screen.findByTestId("project-chat-composer");
+    const root = composer.parentElement!;
+    // Composer wrapper drops its own gutters; border stays.
+    expect(root.className).toContain("shrink-0");
+    expect(root.className).toContain("border-t");
+    expect(root.className).not.toContain("px-4");
+    // The banner block (always rendered, even without banners) is the
+    // gutter>column sibling right above the composer.
+    const bannerOuter = composer.previousElementSibling!;
+    expect(bannerOuter.className).toContain("px-5"); // CHAT_GUTTER base
+    expect(bannerOuter.className).toContain("pt-3");
+    expect(bannerOuter.className).not.toContain("max-w-4xl");
+    const bannerInner = bannerOuter.firstElementChild!;
+    expect(bannerInner).not.toBe(bannerOuter);
+    expect(bannerInner.className).toContain("max-w-4xl"); // CHAT_COLUMN
+  });
+
+  it("removes the model row and renders the control testids inside the composer subtree with sr-only labels", async () => {
+    cfg.runtimeStatus = "online";
+    chatCfg.model = "claude-opus"; // exposes the stub catalog's thinking levels
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    const composer = await screen.findByTestId("project-chat-composer");
+    // The independent row (and its anchor) is gone — no replacement anchor.
+    expect(screen.queryByTestId("project-chat-model-row")).toBeNull();
+    // The three-state control testids live in the composer subtree now.
+    const readonly = await screen.findByTestId("project-chat-model-readonly");
+    expect(composer.contains(readonly)).toBe(true);
+    const thinking = await screen.findByTestId("project-chat-thinking-picker");
+    expect(composer.contains(thinking)).toBe(true);
+    expect(screen.queryByTestId("project-chat-model-picker")).toBeNull();
+    expect(screen.queryByTestId("project-chat-model-runtime-guide")).toBeNull();
+    // Category semantics survive through sr-only labels (B-002).
+    expect(readonly.querySelector(".sr-only")?.textContent).toBe(
+      enProjects.chat.stream.model_label,
+    );
+    expect(thinking.querySelector(".sr-only")?.textContent).toBe(
+      enProjects.chat.stream.thinking_label,
+    );
+  });
+
+  it("owner/admin + runtime → interactive picker in the toolbar, PATCH target unchanged (AC-4)", async () => {
+    cfg.runtimeStatus = "online";
+    const { api } = await import("@multica/core/api");
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
+
+    const trigger = await screen.findByTestId("stub-model-interactive");
+    expect(screen.queryByTestId("project-chat-model-row")).toBeNull();
+    await act(async () => {
+      trigger.click();
+    });
+    await waitFor(() =>
+      expect(api.patchProjectChatConfig).toHaveBeenCalledWith("proj-1", "session-1", {
+        model: "claude-opus",
+      }),
+    );
+    expect(api.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("owner/admin + no runtime → runtime guide inside the composer subtree", async () => {
+    cfg.runtimeStatus = "offline";
+    renderWithProviders(<TeamAgentComposer {...props} canConfigure />);
+
+    const guide = await screen.findByTestId("project-chat-model-runtime-guide");
+    expect(guide.textContent).toBe(enProjects.chat.stream.runtime_guide);
+    const composer = screen.getByTestId("project-chat-composer");
+    expect(composer.contains(guide)).toBe(true);
+  });
+});
+
+// ─── CR-2026-062 TASK-02: dual-source running-stop (SDD §4.3.1, B-005) ─────
+
+describe("TeamAgentComposer dual-source stop path (CR-2026-062)", () => {
+  const props = {
+    projectId: "proj-1",
+    wsId: "ws-1",
+    issueId: "issue-chat-1",
+    sessionId: "session-1",
+    canConfigure: false,
+  };
+  const AT = "2026-01-01T00:00:00Z";
+
+  function makeSendResult(taskId: string, issueId: string) {
+    sendMock.mutateAsync = vi
+      .fn()
+      .mockResolvedValue({ task_id: taskId, issue_id: issueId, comment_id: "c1" });
+  }
+
+  function itemsWith(taskId: string) {
+    queueItemsState.items = [{ task_id: taskId, status: "queued" }];
+    queueItemsState.queue_depth = 1;
+  }
+
+  async function sendAndSettle() {
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    await waitFor(() => expect(sendMock.mutateAsync).toHaveBeenCalledTimes(1));
+  }
+
+  beforeEach(() => {
+    projectChatState.drafts["proj-1:team_agent"] = "hello";
+  });
+
+  it.each(["queued", "dispatched"] as const)(
+    "%s: items + timeline both hold the sent task → stop renders and cancels it",
+    async (status) => {
+      makeSendResult("t1", "issue-1");
+      itemsWith("t1");
+      taskRunsState.push(task("t1", AT, { status }));
+      renderWithProviders(<TeamAgentComposer {...props} />);
+
+      await sendAndSettle();
+      const stop = await screen.findByTestId("project-chat-stop");
+      await act(async () => {
+        stop.click();
+      });
+      expect(cancelMock.mutateAsync).toHaveBeenCalledWith("t1");
+    },
+  );
+
+  it.each(["running", "waiting_local_directory"] as const)(
+    "%s while absent from queue items → stop still renders (timeline alone supports it)",
+    async (status) => {
+      makeSendResult("t1", "issue-1");
+      // Server filters running out of the items list; only the timeline says active.
+      queueItemsState.items = [];
+      taskRunsState.push(task("t1", AT, { status }));
+      renderWithProviders(<TeamAgentComposer {...props} />);
+
+      await sendAndSettle();
+      expect(await screen.findByTestId("project-chat-stop")).toBeTruthy();
+    },
+  );
+
+  it.each(["completed", "failed", "cancelled"] as const)(
+    "terminal %s overrides stale queue items → button returns to send",
+    async (status) => {
+      makeSendResult("t1", "issue-1");
+      itemsWith("t1"); // stale residue that must lose to the terminal timeline
+      taskRunsState.push(task("t1", AT, { status }));
+      renderWithProviders(<TeamAgentComposer {...props} />);
+
+      await sendAndSettle();
+      await waitFor(() =>
+        expect(screen.queryByTestId("project-chat-stop")).toBeNull(),
+      );
+      expect(screen.getByTestId("project-chat-send")).toBeTruthy();
+    },
+  );
+
+  it("non-cancelled terminal cancel result toasts already-finished (TSUG-007 branch 2)", async () => {
+    makeSendResult("t1", "issue-1");
+    itemsWith("t1");
+    taskRunsState.push(task("t1", AT, { status: "running" }));
+    cancelMock.mutateAsync = vi.fn().mockResolvedValue({ status: "completed" });
+    const { toast } = await import("sonner");
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    const stop = await screen.findByTestId("project-chat-stop");
+    await act(async () => {
+      stop.click();
+    });
+    expect(toast.error).toHaveBeenCalledWith(
+      enProjects.chat.stream.cancel_already_finished,
+    );
+  });
+
+  it("hard degradation (i): first send returns an empty task_id → no dead stop button", async () => {
+    sendMock.mutateAsync = vi
+      .fn()
+      .mockResolvedValue({ task_id: "", issue_id: "issue-1", comment_id: "c1" });
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    expect(screen.queryByTestId("project-chat-stop")).toBeNull();
+    expect(screen.getByTestId("project-chat-send")).toBeTruthy();
+  });
+
+  it("hard degradation (ii): active A → next send succeeds with empty task_id → stop disappears and A is never cancelled", async () => {
+    sendMock.mutateAsync = vi
+      .fn()
+      .mockResolvedValueOnce({ task_id: "A", issue_id: "issue-1", comment_id: "c1" })
+      .mockResolvedValueOnce({ task_id: "", issue_id: "issue-1", comment_id: "c2" });
+    itemsWith("A");
+    taskRunsState.push(task("A", AT, { status: "running" }));
+    const view = renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    expect(await screen.findByTestId("project-chat-stop")).toBeTruthy();
+
+    // Type the next message: live content + allowSubmitWhileRunning flips the
+    // affordance back to the send button (queue send). The test store has no
+    // subscription, so re-render explicitly to observe the new draft.
+    projectChatState.drafts["proj-1:team_agent"] = "second";
+    await act(async () => {
+      view.rerender(wrapWithProviders(<TeamAgentComposer {...props} />, view.qc));
+    });
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    await waitFor(() => expect(sendMock.mutateAsync).toHaveBeenCalledTimes(2));
+    // Both ids were atomically cleared — no stop, and the old target A is
+    // never cancelled from the empty-id branch.
+    await waitFor(() =>
+      expect(screen.queryByTestId("project-chat-stop")).toBeNull(),
+    );
+    expect(cancelMock.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("hard degradation (iii): send failure keeps draft and old target → retry affordance is send; clearing the draft brings stop back to cancel A", async () => {
+    sendMock.mutateAsync = vi
+      .fn()
+      .mockResolvedValueOnce({ task_id: "A", issue_id: "issue-1", comment_id: "c1" })
+      .mockRejectedValueOnce(
+        new ApiError("boom", 502, "Bad Gateway", { code: "enqueue_failed" }),
+      );
+    itemsWith("A");
+    taskRunsState.push(task("A", AT, { status: "running" }));
+    const view = renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    expect(await screen.findByTestId("project-chat-stop")).toBeTruthy();
+
+    // The failed resend keeps the draft: live content + allowSubmitWhileRunning
+    // → the affordance is the send (retry) button, NOT stop (§4.2).
+    projectChatState.drafts["proj-1:team_agent"] = "second";
+    await act(async () => {
+      view.rerender(wrapWithProviders(<TeamAgentComposer {...props} />, view.qc));
+    });
+    await act(async () => {
+      screen.getByTestId("project-chat-send").click();
+    });
+    await waitFor(() => expect(sendMock.mutateAsync).toHaveBeenCalledTimes(2));
+    expect(projectChatState.drafts["proj-1:team_agent"]).toBe("second");
+    expect(screen.queryByTestId("project-chat-stop")).toBeNull();
+    expect(screen.getByTestId("project-chat-send")).toBeTruthy();
+
+    // Clearing the draft flips the affordance back to stop; the retained
+    // target A is cancelled on click.
+    projectChatState.drafts["proj-1:team_agent"] = "";
+    await act(async () => {
+      view.rerender(wrapWithProviders(<TeamAgentComposer {...props} />, view.qc));
+    });
+    const stop = await screen.findByTestId("project-chat-stop");
+    await act(async () => {
+      stop.click();
+    });
+    expect(cancelMock.mutateAsync).toHaveBeenCalledWith("A");
+  });
+
+  it("miss matrix (iv): empty task-runs list falls back to items-only", async () => {
+    makeSendResult("t1", "issue-1");
+    itemsWith("t1");
+    taskRunsState.length = 0; // AgentTaskListSchema fallback semantics
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    expect(await screen.findByTestId("project-chat-stop")).toBeTruthy();
+  });
+
+  it("miss matrix (iv): empty task-runs and items without the sent id → send state", async () => {
+    makeSendResult("t1", "issue-1");
+    queueItemsState.items = [{ task_id: "other", status: "queued" }];
+    taskRunsState.length = 0;
+    renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    await waitFor(() =>
+      expect(screen.queryByTestId("project-chat-stop")).toBeNull(),
+    );
+    expect(screen.getByTestId("project-chat-send")).toBeTruthy();
+  });
+
+  it("miss matrix (v): non-empty task-runs WITHOUT sentTaskId (another running task) → stop not rendered; the item appearing brings it back", async () => {
+    makeSendResult("t1", "issue-1");
+    queueItemsState.items = [];
+    // Another task of the container issue is running — its state must never
+    // leak into this composer's affordance (pick strictly by id).
+    taskRunsState.push(task("other-task", AT, { status: "running" }));
+    const { qc } = renderWithProviders(<TeamAgentComposer {...props} />);
+
+    await sendAndSettle();
+    await waitFor(() =>
+      expect(screen.queryByTestId("project-chat-stop")).toBeNull(),
+    );
+    expect(screen.getByTestId("project-chat-send")).toBeTruthy();
+
+    // The sent task reaches the queue-items window → items-only fallback.
+    queueItemsState.items = [{ task_id: "t1", status: "dispatched" }];
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: ["queue-items"] });
+    });
+    expect(await screen.findByTestId("project-chat-stop")).toBeTruthy();
   });
 });

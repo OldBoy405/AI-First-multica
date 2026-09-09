@@ -13,6 +13,7 @@ import {
   projectChatOptions,
   projectGatesOptions,
   projectPresenterOptions,
+  projectQueueItemsOptions,
   projectQueueStatusOptions,
   useCancelProjectQueueTask,
   useProjectChatStore,
@@ -38,6 +39,7 @@ import {
   ChatInputCore,
   type ChatInputDraftAdapter,
 } from "../../chat/components/chat-input";
+import { CHAT_COLUMN, CHAT_GUTTER } from "../../chat/components/chat-column";
 import { ApprovalCard, CrGateCard } from "./cr-gate-card";
 import { ModelPicker } from "../../agents/components/inspector/model-picker";
 import { ThinkingPicker } from "../../agents/components/inspector/thinking-picker";
@@ -310,14 +312,19 @@ export function TeamAgentStreamView({
   ]);
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-3">
-      <div
-        data-testid="project-chat-no-earlier"
-        className="text-center text-xs text-muted-foreground"
-      >
-        {t(($) => $.chat.stream.no_earlier)}
+    // CR-2026-062 §4.1 rule 3: two-layer gutter>column nesting — the gutter
+    // stays outside the max-w cap, so the reading column's edges line up
+    // with the composer surface (single-element merge = historical offset).
+    <div className={cn(CHAT_GUTTER)}>
+      <div className={cn(CHAT_COLUMN, "flex flex-col gap-4 py-3")}>
+        <div
+          data-testid="project-chat-no-earlier"
+          className="text-center text-xs text-muted-foreground"
+        >
+          {t(($) => $.chat.stream.no_earlier)}
+        </div>
+        {items.map((item) => item.node)}
       </div>
-      {items.map((item) => item.node)}
     </div>
   );
 }
@@ -672,7 +679,7 @@ export function TeamAgentComposer({
   const { getActorName } = useActorName();
   const qc = useQueryClient();
   const draftAdapter = useTeamAgentDraftAdapter(projectId);
-  const { mutateAsync, isPending } = useSendProjectChatMessage(wsId, projectId);
+  const { mutateAsync } = useSendProjectChatMessage(wsId, projectId);
   const { uploadWithToast } = useFileUpload(api, (err) => toast.error(err.message));
 
   // CR-2026-056 §4.11 (AC-1/AC-2): uploads are drafts until the send
@@ -801,6 +808,58 @@ export function TeamAgentComposer({
   // never merged into one branch.
   const locked = queueFull != null || presenterRequired != null;
 
+  // ─── Running-stop path (CR-2026-062 §4.3.1, dual-source) ────────────────
+  // Queue items (server-filtered queued+dispatched) cover the early window;
+  // the container issue's task-runs list (`api.listTasksByIssue` returns
+  // AgentTask[], B-005) covers running/waiting_local_directory and terminal
+  // states. The entry is picked by id — never first, never by time — so a
+  // stop can only ever target the task THIS composer sent last.
+  const cancelTask = useCancelProjectQueueTask(wsId, projectId);
+  const [sentTaskId, setSentTaskId] = useState("");
+  const [sentIssueId, setSentIssueId] = useState("");
+
+  const { data: queueItemsData } = useQuery(projectQueueItemsOptions(wsId, projectId));
+  const taskInItems =
+    !!sentTaskId &&
+    (queueItemsData?.items ?? []).some((item) => item.task_id === sentTaskId);
+
+  const { data: taskRuns } = useQuery({
+    queryKey: issueKeys.tasks(sentIssueId),
+    queryFn: () => api.listTasksByIssue(sentIssueId),
+    staleTime: 30_000,
+    enabled: !!sentIssueId,
+  });
+  const tasks = taskRuns ?? [];
+  const taskEntry = sentTaskId ? tasks.find((task) => task.id === sentTaskId) : undefined;
+  const ACTIVE_TASK_STATUSES = new Set([
+    "queued",
+    "dispatched",
+    "waiting_local_directory",
+    "running",
+  ]);
+  const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
+  const taskActive = taskEntry != null && ACTIVE_TASK_STATUSES.has(taskEntry.status);
+  const taskTerminal = taskEntry != null && TERMINAL_TASK_STATUSES.has(taskEntry.status);
+  // Dual-source activity: either source saying active counts; the task-runs
+  // timeline saying terminal always wins (covers stale queue-item residue).
+  // No hit / empty list → items-only fallback (never another task's state).
+  const trackedActive = (taskInItems || taskActive) && !taskTerminal;
+
+  const handleStop = async () => {
+    if (!sentTaskId) return;
+    try {
+      const res = await cancelTask.mutateAsync(sentTaskId);
+      // TSUG-007 branch 2: a different terminal status means the request
+      // came too late; the idempotent cancelled repeat stays silent.
+      if (res.status !== "cancelled") {
+        toast.error(t(($) => $.chat.stream.cancel_already_finished));
+      }
+    } catch (e) {
+      // TSUG-007 branch 3: ApiError (e.g. 403) — surface the server message.
+      toast.error(e instanceof ApiError ? e.message : t(($) => $.chat.stream.send_failed));
+    }
+  };
+
   // Pending-message pattern (CLAUDE.md: render immediately with a visible
   // pending state and retry on failure, not silent optimism). The real
   // comment lands in the timeline via WS `comment:created`; this local bubble
@@ -816,7 +875,20 @@ export function TeamAgentComposer({
     if (!trimmed || locked || runtimeBlocked || !sessionId) return false;
     setPendingMessage(trimmed);
     try {
-      await mutateAsync({ sessionId, content: trimmed, attachmentIds });
+      const result = await mutateAsync({ sessionId, content: trimmed, attachmentIds });
+      // Deterministic transfer (§4.3.1): a valid pair pins the latest send as
+      // the stop target; an invalid (empty) pair atomically clears BOTH ids so
+      // a stale task can never be cancelled by mistake. On rejection the
+      // setState below never runs and the previous target is kept.
+      const nextTaskId = result?.task_id ?? "";
+      const nextIssueId = result?.issue_id ?? "";
+      if (nextTaskId && nextIssueId) {
+        setSentTaskId(nextTaskId);
+        setSentIssueId(nextIssueId);
+      } else {
+        setSentTaskId("");
+        setSentIssueId("");
+      }
       // Success → clear draft + attachment slot through the adapter.
       commitInput();
       return true;
@@ -860,117 +932,130 @@ export function TeamAgentComposer({
     }
   };
 
+  // CR-2026-062 §3.2: Model/Thinking controls move into the composer's
+  // bottom toolbar via leftAdornment. The independent model row (and its
+  // `project-chat-model-row` anchor testid) is removed WITH the row — no
+  // replacement anchor; the four inner testids stay, and read-only values
+  // keep their category semantics through sr-only labels (B-002).
+  const toolbar = agent ? (
+    <>
+      {!canConfigure ? (
+        <span data-testid="project-chat-model-readonly">
+          <span className="sr-only">{t(($) => $.chat.stream.model_label)}</span>
+          <ModelPicker
+            runtimeId={agent.runtime_id}
+            runtimeOnline={!!runtimeOnline}
+            value={chatModel}
+            canEdit={false}
+            onChange={() => {}}
+          />
+        </span>
+      ) : runtimeReady ? (
+        <span data-testid="project-chat-model-picker">
+          <span className="sr-only">{t(($) => $.chat.stream.model_label)}</span>
+          <ModelPicker
+            runtimeId={agent.runtime_id}
+            runtimeOnline={!!runtimeOnline}
+            value={chatModel}
+            canEdit
+            onChange={persistModel}
+          />
+        </span>
+      ) : (
+        <span data-testid="project-chat-model-runtime-guide">
+          {t(($) => $.chat.stream.runtime_guide)}
+        </span>
+      )}
+      {thinkingLevels.length > 0 && (
+        <span
+          data-testid="project-chat-thinking-picker"
+          className="flex items-center gap-1"
+        >
+          <span className="sr-only">{t(($) => $.chat.stream.thinking_label)}</span>
+          <ThinkingPicker
+            value={chatThinking}
+            levels={thinkingLevels}
+            canEdit={canConfigure}
+            onChange={persistThinking}
+          />
+        </span>
+      )}
+    </>
+  ) : undefined;
+
   return (
-    <div className="shrink-0 border-t px-4 py-3">
-      {pendingMessage && (
-        <div data-testid="project-chat-pending-message" className="mb-2 flex justify-end">
-          <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
-            <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-            <span className="break-words">{pendingMessage}</span>
-          </div>
-        </div>
-      )}
-      {presenterRequired && (
-        <div
-          data-testid="project-chat-presenter-required"
-          className="mb-2 flex items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
-        >
-          <span className="font-medium text-foreground">
-            {presenterRequired.presenterUserId
-              ? t(($) => $.chat.presenter.locked_title, {
-                  name: getActorName("member", presenterRequired.presenterUserId),
-                })
-              : t(($) => $.chat.presenter.locked_title_default)}
-          </span>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={requestPresenter.isPending || !!presenterState?.my_request}
-            onClick={() => requestPresenter.mutate()}
-          >
-            {presenterState?.my_request
-              ? t(($) => $.chat.presenter.requested)
-              : t(($) => $.chat.presenter.request_cta)}
-          </Button>
-        </div>
-      )}
-      {queueFull && (
-        <div
-          data-testid="project-chat-queue-full"
-          className="mb-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
-        >
-          <div className="font-medium text-foreground">
-            {t(($) => $.chat.stream.queue_full_title)}
-          </div>
-          <div className="mt-0.5 tabular-nums">
-            {t(($) => $.chat.stream.queue_full_depth, {
-              depth: queueFull.depth,
-              limit: queueFull.limit,
-            })}
-          </div>
-        </div>
-      )}
-      {agent && (
-        <div
-          data-testid="project-chat-model-row"
-          className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
-        >
-          <span className="shrink-0">{t(($) => $.chat.stream.model_label)}</span>
-          {/* CR-2026-056 §4.11 (AC-6): the session-config PATCH gate is
-              owner/admin — a plain member always gets the read-only badge;
-              runtime availability then decides the editor's content. The
-              value shown is the SESSION's effective model, not agent.model. */}
-          {!canConfigure ? (
-            <span data-testid="project-chat-model-readonly">
-              <ModelPicker
-                runtimeId={agent.runtime_id}
-                runtimeOnline={!!runtimeOnline}
-                value={chatModel}
-                canEdit={false}
-                onChange={() => {}}
-              />
-            </span>
-          ) : runtimeReady ? (
-            <span data-testid="project-chat-model-picker">
-              <ModelPicker
-                runtimeId={agent.runtime_id}
-                runtimeOnline={!!runtimeOnline}
-                value={chatModel}
-                canEdit
-                onChange={persistModel}
-              />
-            </span>
-          ) : (
-            <span data-testid="project-chat-model-runtime-guide">
-              {t(($) => $.chat.stream.runtime_guide)}
-            </span>
+    // CR-2026-062 §4.1 rule 6: the composer wrapper drops its own gutters;
+    // the banner zone above the surface is a two-layer gutter>column block
+    // (rendered even when empty, keeping the top spacing). ChatInputCore's
+    // wrapper keeps providing the bottom spacing and the alignment.
+    <div className="shrink-0 border-t">
+      <div className={cn(CHAT_GUTTER, "pt-3")}>
+        <div className={cn(CHAT_COLUMN)}>
+          {pendingMessage && (
+            <div data-testid="project-chat-pending-message" className="mb-2 flex justify-end">
+              <div className="flex max-w-[80%] items-center gap-1.5 rounded-2xl bg-muted/60 px-3.5 py-2 text-sm text-muted-foreground">
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                <span className="break-words">{pendingMessage}</span>
+              </div>
+            </div>
           )}
-          {thinkingLevels.length > 0 && (
-            <span
-              data-testid="project-chat-thinking-picker"
-              className="flex items-center gap-1"
+          {presenterRequired && (
+            <div
+              data-testid="project-chat-presenter-required"
+              className="mb-2 flex items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
             >
-              <span className="shrink-0">{t(($) => $.chat.stream.thinking_label)}</span>
-              <ThinkingPicker
-                value={chatThinking}
-                levels={thinkingLevels}
-                canEdit={canConfigure}
-                onChange={persistThinking}
-              />
-            </span>
+              <span className="font-medium text-foreground">
+                {presenterRequired.presenterUserId
+                  ? t(($) => $.chat.presenter.locked_title, {
+                      name: getActorName("member", presenterRequired.presenterUserId),
+                    })
+                  : t(($) => $.chat.presenter.locked_title_default)}
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={requestPresenter.isPending || !!presenterState?.my_request}
+                onClick={() => requestPresenter.mutate()}
+              >
+                {presenterState?.my_request
+                  ? t(($) => $.chat.presenter.requested)
+                  : t(($) => $.chat.presenter.request_cta)}
+              </Button>
+            </div>
+          )}
+          {queueFull && (
+            <div
+              data-testid="project-chat-queue-full"
+              className="mb-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
+            >
+              <div className="font-medium text-foreground">
+                {t(($) => $.chat.stream.queue_full_title)}
+              </div>
+              <div className="mt-0.5 tabular-nums">
+                {t(($) => $.chat.stream.queue_full_depth, {
+                  depth: queueFull.depth,
+                  limit: queueFull.limit,
+                })}
+              </div>
+            </div>
           )}
         </div>
-      )}
+      </div>
       {/* CR-2026-012 FR-8: rich composer (attachments + member-only @
-          mentions) on top of the same send/lock/pending machinery above. */}
+          mentions) on top of the same send/lock/pending machinery above.
+          CR-2026-062: the composer now carries the stop path
+          (onStop + dual-source isRunning) and the model/thinking toolbar. */}
       <div data-testid="project-chat-composer">
         <ChatInputCore
           draftAdapter={draftAdapter}
           onSend={handleSend}
           onUploadFile={handleComposerUpload}
           disabled={locked || runtimeBlocked}
-          isRunning={isPending}
+          isRunning={trackedActive}
+          onStop={handleStop}
+          allowSubmitWhileRunning
+          leftAdornment={toolbar}
           mentionItemTypes={["member"]}
         />
       </div>

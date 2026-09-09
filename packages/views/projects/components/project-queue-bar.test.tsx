@@ -110,6 +110,26 @@ describe("ProjectQueueBar (CR-2026-007 TASK-04)", () => {
     );
   });
 
+  it("nests its content in a two-layer gutter>column block (CR-2026-062)", async () => {
+    queueData = twoItemQueue();
+    renderBar();
+
+    const bar = await screen.findByTestId("project-queue-bar");
+    // Root keeps border/shrink, drops its own gutters.
+    expect(bar.className).toContain("shrink-0");
+    expect(bar.className).toContain("border-t");
+    expect(bar.className).not.toContain("px-4");
+    const outer = bar.firstElementChild!;
+    const inner = outer.firstElementChild!;
+    // Two separate layers: gutter outside, reading column inside.
+    expect(outer).not.toBe(inner);
+    expect(outer.className).toContain("px-5"); // CHAT_GUTTER base
+    expect(outer.className).not.toContain("max-w-4xl");
+    expect(inner.className).toContain("max-w-4xl"); // CHAT_COLUMN
+    expect(inner.className).toContain("py-2");
+    expect(inner.contains(screen.getByTestId("project-queue-bar-toggle"))).toBe(true);
+  });
+
   it("shows the queue depth count, collapsed by default", async () => {
     queueData = twoItemQueue();
     renderBar();

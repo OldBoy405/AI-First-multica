@@ -11,6 +11,8 @@ import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import type { QueueItem } from "@multica/core/api/schemas";
 import { ActorAvatar as ActorAvatarBase } from "@multica/ui/components/common/actor-avatar";
 import { Button } from "@multica/ui/components/ui/button";
+import { cn } from "@multica/ui/lib/utils";
+import { CHAT_COLUMN, CHAT_GUTTER } from "../../chat/components/chat-column";
 import { useFormatRelativeDate } from "./labels";
 import { useT } from "../../i18n";
 
@@ -58,34 +60,38 @@ export function ProjectQueueBar({
   };
 
   return (
-    <div className="shrink-0 border-t px-4 py-2" data-testid="project-queue-bar">
-      <button
-        type="button"
-        data-testid="project-queue-bar-toggle"
-        className="flex w-full items-center justify-between text-xs text-muted-foreground"
-        onClick={() => setExpanded((v) => !v)}
-        aria-expanded={expanded}
-      >
-        <span>{t(($) => $.chat.queue_bar.count, { count })}</span>
-        {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-      </button>
-      {expanded && (
-        <ul className="mt-2 flex flex-col gap-2.5" data-testid="project-queue-bar-list">
-          {(data?.items ?? []).map((item) => (
-            <QueueBarItem
-              key={item.task_id}
-              item={item}
-              currentUserId={currentUserId}
-              canConfigure={canConfigure}
-              formatRelativeDate={formatRelativeDate}
-              onCancel={() => void handleCancel(item.task_id)}
-              isCancelling={
-                cancelMutation.isPending && cancelMutation.variables === item.task_id
-              }
-            />
-          ))}
-        </ul>
-      )}
+    <div className="shrink-0 border-t" data-testid="project-queue-bar">
+      <div className={cn(CHAT_GUTTER)}>
+        <div className={cn(CHAT_COLUMN, "py-2")}>
+          <button
+            type="button"
+            data-testid="project-queue-bar-toggle"
+            className="flex w-full items-center justify-between text-xs text-muted-foreground"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+          >
+            <span>{t(($) => $.chat.queue_bar.count, { count })}</span>
+            {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
+          {expanded && (
+            <ul className="mt-2 flex flex-col gap-2.5" data-testid="project-queue-bar-list">
+              {(data?.items ?? []).map((item) => (
+                <QueueBarItem
+                  key={item.task_id}
+                  item={item}
+                  currentUserId={currentUserId}
+                  canConfigure={canConfigure}
+                  formatRelativeDate={formatRelativeDate}
+                  onCancel={() => void handleCancel(item.task_id)}
+                  isCancelling={
+                    cancelMutation.isPending && cancelMutation.variables === item.task_id
+                  }
+                />
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
