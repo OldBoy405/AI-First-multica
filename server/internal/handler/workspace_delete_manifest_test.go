@@ -19,6 +19,22 @@ const (
 // teardown. Adding a table requires an explicit ownership decision here; the
 // handler deletion graph must then implement that decision before CI passes.
 var workspaceDeletionManifest = map[string]workspaceDeleteAction{
+	// AI-First fork tables (not upstream). Each owns rows inside the
+	// workspace: nine carry `workspace_id ... REFERENCES workspace(id) ON
+	// DELETE CASCADE` and pipeline_node_run cascades from pipeline_run via
+	// `run_id ... ON DELETE CASCADE`, so deleting the workspace row removes
+	// them. The enumerated queries in queries/workspace_delete.sql are the
+	// optimization; this cascade is the guarantee the classification claims.
+	"approval_record":         workspaceDelete,
+	"chat_idempotency":        workspaceDelete,
+	"cr":                      workspaceDelete,
+	"cr_sync_event":           workspaceDelete,
+	"drift_finding":           workspaceDelete,
+	"maturity_snapshot":       workspaceDelete,
+	"pipeline_node_run":       workspaceDelete,
+	"pipeline_run":            workspaceDelete,
+	"project_chat_session":    workspaceDelete,
+	"project_presenter_grant": workspaceDelete,
 	"activity_log":                       workspaceDelete,
 	"agent":                              workspaceDelete,
 	"agent_builder_draft":                workspaceDelete,
