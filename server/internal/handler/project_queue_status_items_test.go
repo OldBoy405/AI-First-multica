@@ -22,8 +22,8 @@ func seedQueueStatusTask(t *testing.T, agentID, issueID string, priority int32, 
 	t.Helper()
 	var taskID string
 	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, trigger_summary)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', $2, $3, NULLIF($4, '')::uuid, NULLIF($5, ''))
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id, trigger_summary)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'queued', $2, $3, NULLIF($4, '')::uuid, NULLIF($4, '')::uuid, NULLIF($5, ''))
 		RETURNING id
 	`, agentID, priority, issueID, originatorID, summary).Scan(&taskID); err != nil {
 		t.Fatalf("seed queued task: %v", err)

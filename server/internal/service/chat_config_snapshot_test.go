@@ -77,6 +77,13 @@ func TestCreateAgentTaskContextMergesChatConfigWithHeadSha(t *testing.T) {
 		t.Fatalf("chat_config values: %+v", cc)
 	}
 
+	// A queued task already exists for this (issue, agent), and the partial
+	// unique index allows only one pending task per pair - retire the first
+	// before queueing the second.
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status='completed', completed_at=now() WHERE id=$1`, util.UUIDToString(task.ID)); err != nil {
+		t.Fatalf("complete first task: %v", err)
+	}
+
 	// chat_config only: context is exactly the chat_config object.
 	task2, err := queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
 		ID:                dbid.NewV7(),
@@ -95,6 +102,11 @@ func TestCreateAgentTaskContextMergesChatConfigWithHeadSha(t *testing.T) {
 	parsed = readContext(util.UUIDToString(task2.ID))
 	if len(parsed) != 1 || parsed["chat_config"] == nil {
 		t.Fatalf("chat_config-only context shape: %+v", parsed)
+	}
+
+	// Same pending-task constraint as above: retire task2 before queueing task3.
+	if _, err := pool.Exec(ctx, `UPDATE agent_task_queue SET status='completed', completed_at=now() WHERE id=$1`, util.UUIDToString(task2.ID)); err != nil {
+		t.Fatalf("complete second task: %v", err)
 	}
 
 	// Neither: context stays NULL (pre-CR behavior preserved).

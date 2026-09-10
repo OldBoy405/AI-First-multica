@@ -96,7 +96,9 @@ func TestClaimTaskByRuntime_ChatConfigSnapshotIgnoresMalformedContext(t *testing
 	dbfx.Exec(t, `UPDATE agent SET model = 'fallback-model' WHERE id = $1`, agentID)
 
 	for name, contextValue := range map[string]string{
-		"unparsable json": `'not json'::jsonb`,
+		// context is jsonb, so "not valid JSON" is not a representable value;
+		// a non-object document is the closest real malformed shape.
+		"non-object json": `'[]'::jsonb`,
 		"wrong shape":     `'{"chat_config":"oops"}'::jsonb`,
 	} {
 		t.Run(name, func(t *testing.T) {
