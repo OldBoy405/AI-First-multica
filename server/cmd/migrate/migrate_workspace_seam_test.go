@@ -285,8 +285,8 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-999','shaX','status','{}',now())`); err != nil {
 			t.Fatalf("seed orphan: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "461_cr_sync_event_workspace_id.up.sql")); err == nil {
-			t.Fatalf("461 must hard-fail on orphan rows")
+		if err := runSQLFile(t, conn, workspaceMigration(t, "475_cr_sync_event_workspace_id.up.sql")); err == nil {
+			t.Fatalf("475 must hard-fail on orphan rows")
 		}
 	})
 
@@ -309,8 +309,8 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-001','shaA','status','{}',now())`); err != nil {
 			t.Fatalf("seed event: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "461_cr_sync_event_workspace_id.up.sql")); err == nil {
-			t.Fatalf("461 must hard-fail on ambiguous cr_id")
+		if err := runSQLFile(t, conn, workspaceMigration(t, "475_cr_sync_event_workspace_id.up.sql")); err == nil {
+			t.Fatalf("475 must hard-fail on ambiguous cr_id")
 		}
 	})
 }
