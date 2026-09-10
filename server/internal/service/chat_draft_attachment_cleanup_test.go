@@ -163,6 +163,11 @@ func TestSweepChatDraftAttachmentsAgeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin boundary tx: %v", err)
 	}
+	// Release the connection even when an assertion below calls t.Fatalf. The
+	// pool.Close cleanup registered by the pool helper runs last, and a
+	// transaction still holding a connection blocks it forever - which turned
+	// one assertion failure into a 10-minute package-wide timeout in CI.
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
 	exactID := dbid.NewV7()
 	overID := dbid.NewV7()
 	for _, seed := range []struct {
@@ -174,7 +179,7 @@ func TestSweepChatDraftAttachmentsAgeBoundary(t *testing.T) {
 	} {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO attachment (id, workspace_id, uploader_type, uploader_id, filename, url, content_type, size_bytes, created_at)
-			VALUES ($1, $2, 'member', $3, 'draft.txt', 'http://store/' || $1::text, 'text/plain', 4, `+seed.s+`)
+			VALUES ($1, $2, 'member', $3, 'draft.txt', 'http://store/' || $1::uuid::text, 'text/plain', 4, `+seed.s+`)
 		`, util.UUIDToString(seed.id), workspaceID, userID); err != nil {
 			t.Fatalf("seed boundary row: %v", err)
 		}
@@ -370,6 +375,9 @@ func TestSweepChatDraftAttachmentsBindRaceDoesNotDeleteObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin bind tx: %v", err)
 	}
+	// Same guard as the boundary tx above: without it an early t.Fatalf here
+	// leaves the connection checked out and pool.Close blocks forever.
+	t.Cleanup(func() { _ = sendTx.Rollback(context.Background()) })
 	qtx := db.New(pool).WithTx(sendTx)
 	if _, err := qtx.LockUnboundDraftAttachments(ctx, db.LockUnboundDraftAttachmentsParams{
 		WorkspaceID:   u(workspaceID),
