@@ -106,7 +106,7 @@ func TestControlFrameDisconnectsAndNeverFansOut(t *testing.T) {
 	// deliverEnvelope routes the reserved type to the control branch: the
 	// matching socket closes and no frame is delivered to it beforehand.
 	frame := NewDisconnectWorkspaceControlFrame("ws-1")
-	deliverEnvelope(hub, nil, envelope{
+	deliverEnvelope(hub, nil, nil, envelope{
 		EventType:   ControlFrameType,
 		Scope:       ScopeUser,
 		ScopeID:     "user-u",
@@ -138,7 +138,7 @@ func TestControlFrameDisconnectsAndNeverFansOut(t *testing.T) {
 
 	// Malformed control frames are dropped, never fanned out.
 	other := newRegisteredTestClient(hub, "user-v", "ws-1")
-	deliverEnvelope(hub, nil, envelope{
+	deliverEnvelope(hub, nil, nil, envelope{
 		EventType:   ControlFrameType,
 		Scope:       ScopeUser,
 		ScopeID:     "user-v",
