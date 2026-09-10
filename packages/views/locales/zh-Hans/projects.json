@@ -321,6 +321,7 @@
     }
   },
   "governance": {
+    "digest_label": "摘要：{{digest}}",
     "status": {
       "drafting": "草拟中",
       "requirement-reviewing": "需求评审中",

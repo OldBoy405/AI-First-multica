@@ -3,6 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { renderWithI18n } from "../../test/i18n";
 import { api } from "@multica/core/api";
 import { MaturityPage } from "./maturity-page";
 import { MaturitySuggestionsPanel } from "./maturity-suggestions";
@@ -224,7 +225,10 @@ function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  // renderWithI18n: the page resolves its copy through useT("usage"), so the
+  // suite must mount the same provider the app shell does 一 without it every
+  // t() call renders empty and the a11y-name assertions below see nothing.
+  return renderWithI18n(
     <QueryClientProvider client={qc}>
       <MaturityPage />
     </QueryClientProvider>,

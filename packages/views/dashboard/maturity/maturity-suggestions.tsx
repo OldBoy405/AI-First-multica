@@ -14,6 +14,7 @@ import {
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { AppLink } from "../../navigation";
+import { useT } from "../../i18n";
 
 // AIFIRST: weekly report suggestions (CR-2026-047 TASK-09). Renders the
 // latest report envelope (markdown) and the ISO-week history; the "follow up"
@@ -21,6 +22,7 @@ import { AppLink } from "../../navigation";
 // (packages/views/chat/chat-page.tsx contract) — no new chat UI.
 
 export function MaturitySuggestionsPanel({ wsId }: { wsId: string }) {
+  const { t } = useT("usage");
   const wsPaths = useWorkspacePaths();
   const currentUser = useAuthStore((state) => state.user);
   const latest = useQuery(maturitySuggestionsOptions(wsId));
@@ -47,17 +49,17 @@ export function MaturitySuggestionsPanel({ wsId }: { wsId: string }) {
 
   return (
     <section className="space-y-3" data-testid="maturity-suggestions">
-      <h2 className="text-title font-medium">AI-native org suggestions</h2>
+      <h2 className="text-title font-medium">{t(($) => $.maturity.suggestions_title)}</h2>
       {report ? (
         <div className="rounded-md border p-4">
           <div className="mb-2 flex items-center justify-between">
-            <span className="font-medium">Week {report.week}</span>
+            <span className="font-medium">{t(($) => $.maturity.suggestions_week, { week: report.week })}</span>
             <AppLink
               className="text-body underline"
               data-testid="suggestions-follow-up"
               href={`${wsPaths.chat()}?session=${report.chatSessionId}`}
             >
-              Follow up in chat
+              {t(($) => $.maturity.suggestions_follow_up_chat)}
             </AppLink>
           </div>
           <pre className="whitespace-pre-wrap text-body">{report.markdown}</pre>
@@ -72,7 +74,7 @@ export function MaturitySuggestionsPanel({ wsId }: { wsId: string }) {
           {canInitialize ? (
             <div className="flex flex-wrap items-end gap-2">
               <label className="space-y-1 text-body" htmlFor="maturity-runtime">
-                <span className="block text-label text-foreground">Runtime</span>
+                <span className="block text-label text-foreground">{t(($) => $.maturity.runtime_label)}</span>
                 <select
                   id="maturity-runtime"
                   value={selectedRuntimeId}
@@ -96,26 +98,26 @@ export function MaturitySuggestionsPanel({ wsId }: { wsId: string }) {
             </div>
           ) : null}
           {canInitialize && onlineRuntimes.length === 0 ? (
-            <p className="text-caption">Connect an online runtime before initialising Org Admin.</p>
+            <p className="text-caption">{t(($) => $.maturity.suggestions_no_runtime)}</p>
           ) : null}
           {initialize.isError ? (
-            <p className="text-caption text-destructive">Org Admin initialisation failed. Please retry.</p>
+            <p className="text-caption text-destructive">{t(($) => $.maturity.suggestions_init_failed)}</p>
           ) : null}
         </div>
       )}
 
       {history.data && history.data.items.length > 0 && (
         <div className="space-y-2" data-testid="suggestions-history">
-          <h3 className="text-body font-medium text-muted-foreground">History</h3>
+          <h3 className="text-body font-medium text-muted-foreground">{t(($) => $.maturity.suggestions_history)}</h3>
           {history.data.items.map((item) => (
             <div key={item.reportKey} className="rounded-md border p-3 text-body">
               <div className="flex items-center justify-between">
-                <span>Week {item.week}</span>
+                <span>{t(($) => $.maturity.suggestions_week, { week: item.week })}</span>
                 <AppLink
                   className="underline"
                   href={`${wsPaths.chat()}?session=${item.chatSessionId}`}
                 >
-                  Follow up
+                  {t(($) => $.maturity.suggestions_follow_up)}
                 </AppLink>
               </div>
             </div>

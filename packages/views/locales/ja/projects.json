@@ -321,6 +321,7 @@
     }
   },
   "governance": {
+    "digest_label": "ダイジェスト：{{digest}}",
     "status": {
       "drafting": "ドラフト作成中",
       "requirement-reviewing": "要件レビュー中",

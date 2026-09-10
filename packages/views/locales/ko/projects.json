@@ -321,6 +321,7 @@
     }
   },
   "governance": {
+    "digest_label": "다이제스트: {{digest}}",
     "status": {
       "drafting": "초안 작성 중",
       "requirement-reviewing": "요구사항 검토 중",
