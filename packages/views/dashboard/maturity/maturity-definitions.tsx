@@ -1,6 +1,7 @@
 "use client";
 
 import type { MaturityConfigResponse } from "@multica/core/types";
+import { useT } from "../../i18n";
 
 // AIFIRST: metric definitions + known gameability notes (CR-2026-047
 // TASK-09). Rendered inside the Method section of the maturity page.
@@ -10,6 +11,7 @@ export function MaturityDefinitions({
 }: {
   cfg: MaturityConfigResponse | undefined;
 }) {
+  const { t } = useT("usage");
   if (!cfg) return null;
   return (
     <ul className="space-y-1" data-testid="maturity-definitions">
@@ -18,12 +20,12 @@ export function MaturityDefinitions({
           <span className="font-medium">{m.key}</span>
           {" — "}
           <span>
-            score = clamp(100 × (x − {m.floor}) / ({m.target} − {m.floor}))
+            {t(($) => $.maturity.definition_score, { floor: m.floor, target: m.target })}
           </span>
           {" · "}
-          <span>weight {m.weight}</span>
+          <span>{t(($) => $.maturity.definition_weight, { weight: m.weight })}</span>
           {" · "}
-          <span>Known gameability: {m.knownGameability}</span>
+          <span>{t(($) => $.maturity.definition_gameability, { note: m.knownGameability })}</span>
         </li>
       ))}
     </ul>

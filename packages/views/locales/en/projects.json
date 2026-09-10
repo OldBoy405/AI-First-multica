@@ -324,6 +324,7 @@
     }
   },
   "governance": {
+    "digest_label": "digest: {{digest}}",
     "status": {
       "drafting": "Drafting",
       "requirement-reviewing": "Requirement Review",

@@ -158,7 +158,7 @@ export function ApprovalCard({
           </ul>
           {cr.evidence_digest && (
             <div className="mt-0.5 font-mono">
-              digest: {cr.evidence_digest.slice(0, 12)}
+              {t(($) => $.governance.digest_label, { digest: cr.evidence_digest.slice(0, 12) })}
             </div>
           )}
         </div>

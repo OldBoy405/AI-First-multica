@@ -12,6 +12,7 @@ import {
 import type { MaturityOverallResponse } from "@multica/core/types";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { AppLink } from "../../navigation";
+import { useT } from "../../i18n";
 import { Leaderboard } from "../components/leaderboard";
 import { UsageTrendCard } from "../components/usage-trend-card";
 import { MaturitySuggestionsPanel } from "./maturity-suggestions";
@@ -48,6 +49,7 @@ function costLabel(status: string): string {
 }
 
 export function MaturityPage() {
+  const { t } = useT("usage");
   const wsId = useWorkspaceId();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -79,7 +81,7 @@ export function MaturityPage() {
   if (overall.isError) {
     return (
       <div className="p-6 text-muted-foreground" data-testid="maturity-error">
-        Failed to load maturity data. Please retry.
+        {t(($) => $.maturity.error)}
       </div>
     );
   }
@@ -92,35 +94,40 @@ export function MaturityPage() {
       <header className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-title-lg font-semibold tracking-tight">AI Maturity</h1>
+            <h1 className="text-title-lg font-semibold tracking-tight">{t(($) => $.maturity.title)}</h1>
             <p className="text-body text-muted-foreground" data-testid="maturity-owner-mode">
-              Owner mode · workspace aggregates only · updated daily at 00:30 Asia/Shanghai
+              {t(($) => $.maturity.owner_mode)}
             </p>
           </div>
-          <div className="flex items-center gap-2 text-body" role="group" aria-label="maturity date range">
-            <label htmlFor="maturity-from">From</label>
+          <div className="flex items-center gap-2 text-body" role="group" aria-label={t(($) => $.maturity.date_range_label)}>
+            <label htmlFor="maturity-from">{t(($) => $.maturity.from)}</label>
             <input id="maturity-from" type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="rounded-md border bg-background px-2 py-1" />
-            <label htmlFor="maturity-to">To</label>
+            <label htmlFor="maturity-to">{t(($) => $.maturity.to)}</label>
             <input id="maturity-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} className="rounded-md border bg-background px-2 py-1" />
           </div>
         </div>
         <p className="text-body text-muted-foreground">
-          Bucket {data?.bucketDate ?? "—"} · config {data?.configRev?.slice(0, 8) ?? "—"} · previous local day
+          {t(($) => $.maturity.bucket_line, {
+            bucket: data?.bucketDate ?? "—",
+            config: data?.configRev?.slice(0, 8) ?? "—",
+          })}
         </p>
         {observation?.active && (
           <p
             className="rounded-md bg-muted px-3 py-2 text-body"
             data-testid="maturity-observing"
           >
-            Observation period (week {Math.floor((observation.elapsedDays ?? 0) / 7) + 1} of{" "}
-            {observation.observationWeeks}): scores are hidden until calibration.
+            {t(($) => $.maturity.observing, {
+              week: Math.floor((observation.elapsedDays ?? 0) / 7) + 1,
+              total: observation.observationWeeks,
+            })}
           </p>
         )}
       </header>
 
       {empty ? (
         <div className="rounded-md border p-6 text-muted-foreground" data-testid="maturity-empty">
-          No snapshot yet — the first bucket appears after the next 00:30 rollup.
+          {t(($) => $.maturity.empty)}
         </div>
       ) : (
         <>
@@ -142,7 +149,7 @@ export function MaturityPage() {
           </section>
 
           <section data-testid="maturity-dimensions" className="space-y-3">
-            <h2 className="text-title font-medium">Dimensions</h2>
+            <h2 className="text-title font-medium">{t(($) => $.maturity.dimensions)}</h2>
             {data.dimensions.map((d) => (
               <div key={d.key} className="rounded-md border p-4">
                 <div className="flex items-baseline justify-between">
@@ -179,7 +186,7 @@ export function MaturityPage() {
           </section>
 
           <section data-testid="maturity-governance" className="space-y-3">
-            <h2 className="text-title font-medium">Governance</h2>
+            <h2 className="text-title font-medium">{t(($) => $.maturity.governance)}</h2>
             <div className="grid grid-cols-2 gap-3 text-body md:grid-cols-3">
               {data.governance.map((g) => (
                 <div key={g.key} className="rounded-md border p-3">
@@ -198,20 +205,20 @@ export function MaturityPage() {
 
           <section data-testid="maturity-trend" className="space-y-3">
             <div className="flex items-center justify-between gap-3">
-              <h2 className="text-title font-medium">Daily token trend</h2>
-              <select aria-label="trend dimension" value={dimension} onChange={(e) => setDimension(e.target.value as "project" | "user" | "model")} className="rounded-md border bg-background px-2 py-1 text-body">
-                <option value="project">project</option>
-                <option value="user">self</option>
-                <option value="model">model</option>
+              <h2 className="text-title font-medium">{t(($) => $.maturity.daily_trend)}</h2>
+              <select aria-label={t(($) => $.maturity.trend_dimension_label)} value={dimension} onChange={(e) => setDimension(e.target.value as "project" | "user" | "model")} className="rounded-md border bg-background px-2 py-1 text-body">
+                <option value="project">{t(($) => $.maturity.dim_project)}</option>
+                <option value="user">{t(($) => $.maturity.dim_user)}</option>
+                <option value="model">{t(($) => $.maturity.dim_model)}</option>
               </select>
             </div>
             {trend.isLoading ? (
               <Skeleton className="h-24 w-full" />
             ) : trend.isError ? (
-              <div className="rounded-md border p-4 text-muted-foreground">Failed to load trend.</div>
+              <div className="rounded-md border p-4 text-muted-foreground">{t(($) => $.maturity.trend_error)}</div>
             ) : (
               <UsageTrendCard
-                title="Token usage over time"
+                title={t(($) => $.maturity.token_usage_over_time)}
                 emptyLabel="No trend data for this range."
                 series={trend.data?.series ?? []}
               />
@@ -220,14 +227,14 @@ export function MaturityPage() {
 
           <section data-testid="maturity-rankings" className="space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="text-title font-medium">Project rankings</h2>
+              <h2 className="text-title font-medium">{t(($) => $.maturity.rankings)}</h2>
               <select
-                aria-label="ranking metric"
+                aria-label={t(($) => $.maturity.ranking_metric_label)}
                 value={metric}
                 onChange={(e) => setMetric(e.target.value)}
                 className="rounded-md border bg-background px-2 py-1 text-body"
               >
-                <option value="total">total</option>
+                <option value="total">{t(($) => $.maturity.metric_total)}</option>
                 {METRIC_OPTIONS.map((m) => (
                   <option key={m} value={m}>
                     {m}
@@ -238,10 +245,10 @@ export function MaturityPage() {
             {rankings.isLoading ? (
               <Skeleton className="h-24 w-full" />
             ) : rankings.isError ? (
-              <div className="rounded-md border p-4 text-muted-foreground">Failed to load rankings.</div>
+              <div className="rounded-md border p-4 text-muted-foreground">{t(($) => $.maturity.rankings_error)}</div>
             ) : (
               <Leaderboard
-                title="Project rankings"
+                title={t(($) => $.maturity.rankings)}
                 valueLabel={metric}
                 emptyLabel="No projects ranked yet."
                 rows={(rankings.data?.items ?? []).map((item) => ({
@@ -261,25 +268,21 @@ export function MaturityPage() {
 
       {/* AIFIRST: CR-2026-049 TASK-12 — drift governance card (E5 finding summary). */}
       <section className="space-y-2">
-        <h2 className="text-title-sm font-medium text-foreground">Drift</h2>
+        <h2 className="text-title-sm font-medium text-foreground">{t(($) => $.maturity.drift)}</h2>
         <DriftCard />
       </section>
 
       <section className="space-y-2 text-body text-muted-foreground">
-        <h2 className="text-title-sm font-medium text-foreground">Method</h2>
+        <h2 className="text-title-sm font-medium text-foreground">{t(($) => $.maturity.method)}</h2>
         <MaturityDefinitions cfg={cfg.data} />
-        <p>
-          v1 “active members” = workspace members present at rollup time (no
-          join/leave history is kept). Tokens are behavioural data, not
-          performance review inputs.
-        </p>
+        <p>{t(($) => $.maturity.method_note)}</p>
         <p className="text-caption" data-testid="maturity-anti-goodhart">
-          Tokens are behaviour data, not individual performance metrics.
+          {t(($) => $.maturity.anti_goodhart)}
         </p>
       </section>
 
       <footer className="text-caption text-muted-foreground">
-        <AppLink href="/">Back to workspace</AppLink>
+        <AppLink href="/">{t(($) => $.maturity.back_to_workspace)}</AppLink>
       </footer>
     </div>
   );

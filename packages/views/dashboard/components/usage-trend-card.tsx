@@ -71,6 +71,7 @@ export function UsageTrendCard(props: DashboardUsageTrendProps | SimpleUsageTren
 }
 
 function SimpleUsageTrendCard({ title, emptyLabel, series }: SimpleUsageTrendProps) {
+  const { t } = useT("usage");
   const [dim, setDim] = useState<Dim>("daily");
   const pointCount = series.reduce((count, item) => count + item.points.length, 0);
   const allowedDims: readonly Dim[] = pointCount >= 14 ? ["daily", "weekly"] : ["daily"];
@@ -125,13 +126,13 @@ function SimpleUsageTrendCard({ title, emptyLabel, series }: SimpleUsageTrendPro
                     <span>
                       {point.date}
                       {point.configRev && index > 0 && point.configRev !== item.points[index - 1]?.configRev ? (
-                        <span className="ml-1 text-muted-foreground" data-testid="config-revision-break">revision</span>
+                        <span className="ml-1 text-muted-foreground" data-testid="config-revision-break">{t(($) => $.trend.revision)}</span>
                       ) : null}
                     </span>
                     <span className="h-2 overflow-hidden rounded-full bg-muted">
                       <span className="block h-full rounded-full bg-chart-1" style={{ width: `${max > 0 ? (point.tokens / max) * 100 : 0}%` }} />
                     </span>
-                    <span className="tabular-nums">{point.tokens.toLocaleString()} tokens</span>
+                    <span className="tabular-nums">{t(($) => $.trend.tokens, { tokens: point.tokens.toLocaleString() })}</span>
                   </div>
                 ))}
               </div>

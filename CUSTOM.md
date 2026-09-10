@@ -141,7 +141,7 @@ fork 的 36 个迁移原占 362–397，上游 `upstream/main` 因自身 PR 撞�
 | `views/chat/components/chat-message-list.tsx` | 006 | 群聊复用消息流 |
 | `core/realtime/use-realtime-sync.ts` | 004/011 | 新 WS 事件订阅 |
 | `core/types/{issue,project,agent,inbox,events}.ts` | 004/006/009/010/011/012 | 新字段/新枚举值，取并集 |
-| `views/locales/{en,ja,ko,zh-Hans}/{projects,inbox,modals}.json` | 004/006~012 | **四语言必须同步**，新增键取并集；漏一种语言 typecheck 不报、运行时掉 key |
+| `views/locales/{en,ja,ko,zh-Hans}/{projects,inbox,modals,usage}.json` | 004/006~012/047 | **四语言必须同步**，新增键取并集；漏一种语言 typecheck 不报、运行时掉 key。`usage.json` 的 `maturity` 组（AI 成熟度看板）与 `trend` 组（成熟度/用量共用趋势卡）为 fork 新增面，上游合并整个组贴回 |
 | `core/api/client.ts`、`core/api/schemas.ts`、`core/types/index.ts`、`core/paths/paths.ts`、`core/diagnostics/diagnostic-context.ts`、`core/package.json` | 049 | trace/spec-search/drift 四组 zod + 五方法 + `governanceSpecDetail` 路径与 route pattern，取并集 |
 | `views/search/search-command.tsx`{,`.test.tsx`}、`views/locales/*/search.json`、`views/dashboard/maturity/maturity-page.tsx`、`apps/web/app/[workspaceSlug]/(dashboard)/{drift,governance/specs/[specId]}/page.tsx`、`apps/desktop/src/renderer/src/routes.tsx` | 049 | Specs 搜索分组 + 漂移卡 + drift/spec-trace 页面与桌面路由，取并集 |
 
