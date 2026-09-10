@@ -167,6 +167,20 @@ describe("ProjectChatPanel (CR-2026-006 TASK-03)", () => {
     expect(screen.getByTestId("project-team-agent-chat").getAttribute("data-session")).toBe("s1");
   });
 
+  // CR-2026-062 §4.1 rule 4: the container-aware gutter variants (@2xl/@4xl)
+  // resolve against the pane width, so the ModePane root carries @container.
+  it("marks the ModePane root @container (CR-2026-062)", async () => {
+    mockGetProjectChat.mockResolvedValue({ session_id: "s1", issue_id: "i1", team_agent_id: "a1" });
+    const { container } = renderPanel(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("project-team-agent-chat")).toBeTruthy(),
+    );
+    const modePane = container.querySelector('[class~="@container"]');
+    expect(modePane).not.toBeNull();
+    expect(modePane!.className).toContain("p-4");
+    expect(modePane!.className).toContain("flex h-full flex-col");
+  });
+
   // CR-2026-056 AC-11: a session with no container yet is fully configured —
   // the stream mounts with an empty issue id, not the unconfigured guide.
   it("renders the stream without a container (issue_id null, AC-11)", async () => {

@@ -196,7 +196,7 @@ function ModePane({
   const dismissTutorial = useProjectChatStore((s) => s.dismissTutorial);
 
   return (
-    <div className="flex h-full flex-col p-4">
+    <div className="flex h-full flex-col p-4 @container">
       {!tutorialSeen && (
         <div
           data-testid="project-chat-tutorial"
