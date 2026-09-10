@@ -6,6 +6,7 @@ package governance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -276,5 +277,118 @@ func TestProjectGatesNodeStageIsIndependentOfPendingStage(t *testing.T) {
 	}
 	if requirementNode.Stage != "requirement" {
 		t.Fatalf("expected the passed node's own stage to stay 'requirement' (not the CR's current pending_stage 'tech-design'), got %q", requirementNode.Stage)
+	}
+}
+
+// TestProjectGatesReturnsOnlyLatestRunPerPipeline is the regression for the
+// duplicate-gate-card defect: a CR that re-enters the same pipeline gets a
+// second pipeline_run, and attempt numbering restarts inside it. Flattening
+// both runs into one list repeats (node_id, attempt) — the exact pair the
+// chat stream uses as a React key — so the same gate renders two or three
+// times with contradictory statuses. The endpoint must expose the current
+// cycle only: the newest run per pipeline.
+func TestProjectGatesReturnsOnlyLatestRunPerPipeline(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+	ctx := context.Background()
+	ownerID := testUserID(t)
+	crID := "CR-9005-006"
+	// "developing" keeps the CR off an approval gate, so the assertions below
+	// are about gate_nodes only (pending_stage == "").
+	projectID := gateProjectFixture(t, testWorkspaceID, crID, "developing")
+
+	seedRun := func(pipelineID, status, createdAt string) string {
+		var runID string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO pipeline_run (workspace_id, pipeline_id, cr_id, status, started_by, created_at)
+			VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6::timestamptz)
+			RETURNING id::text`,
+			testWorkspaceID, pipelineID, crID, status, ownerID, createdAt).Scan(&runID); err != nil {
+			t.Fatalf("seed pipeline_run(%s): %v", pipelineID, err)
+		}
+		// pipeline_node_run rows cascade with the run (451 migration).
+		t.Cleanup(func() {
+			_, _ = testPool.Exec(context.Background(), `DELETE FROM pipeline_run WHERE id = $1::uuid`, runID)
+		})
+		return runID
+	}
+	seedNode := func(runID string, node GateNode, attempt int, status string) {
+		if _, err := testPool.Exec(ctx, `
+			INSERT INTO pipeline_node_run (run_id, node_id, kind, seq, status, attempt, started_at, completed_at)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, now(), now())`,
+			runID, node.NodeID, node.Kind, node.Seq, status, attempt); err != nil {
+			t.Fatalf("seed pipeline_node_run(%s/%d): %v", node.NodeID, attempt, err)
+		}
+	}
+
+	reqReview := ReviewGateNodes["requirement"]
+	tdReview := ReviewGateNodes["tech-design"]
+	tdApproval := ApprovalGateNodes["tech-design"]
+
+	// A different pipeline, single run — must survive (cross-pipeline history
+	// is kept: one run per pipeline, not one run per CR).
+	reqRun := seedRun(PipelineIDs.RequirementAuthoring, "completed", "2026-01-01T00:00:00Z")
+	seedNode(reqRun, reqReview, 1, "passed")
+
+	// Superseded architecture cycle: blocked round 1, passed round 2.
+	oldArch := seedRun(PipelineIDs.ArchitectureDesign, "completed", "2026-01-02T00:00:00Z")
+	seedNode(oldArch, tdReview, 1, "blocked")
+	seedNode(oldArch, tdReview, 2, "passed")
+	seedNode(oldArch, tdApproval, 1, "passed")
+
+	// Current architecture cycle: passed on the first round.
+	curArch := seedRun(PipelineIDs.ArchitectureDesign, "completed", "2026-01-03T00:00:00Z")
+	seedNode(curArch, tdReview, 1, "passed")
+	seedNode(curArch, tdApproval, 1, "passed")
+
+	svc, _ := newTestApprovalService(t)
+	rec := gatesHTTP(t, svc, testWorkspaceID, projectID, ownerID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gates request failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		CRs []projectGateCR `json:"crs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.CRs) != 1 {
+		t.Fatalf("expected 1 CR, got %d", len(body.CRs))
+	}
+	nodes := body.CRs[0].GateNodes
+
+	// AC-1: (node_id, attempt) — the frontend's React key — must be unique.
+	seen := map[string]int{}
+	for _, n := range nodes {
+		seen[fmt.Sprintf("%s:%d", n.NodeID, n.Attempt)]++
+	}
+	for key, count := range seen {
+		if count > 1 {
+			t.Fatalf("duplicate gate node key %s x%d (superseded run leaked): %+v", key, count, nodes)
+		}
+	}
+
+	// AC-2: the superseded architecture cycle is gone — no blocked row, no
+	// attempt 2 row.
+	for _, n := range nodes {
+		if n.NodeID == tdReview.NodeID && (n.Attempt != 1 || n.Status != "passed") {
+			t.Fatalf("stale architecture cycle leaked into the response: %+v", n)
+		}
+	}
+
+	// AC-3: every pipeline keeps its own latest run — the requirement node
+	// must still be there even though the CR has moved on.
+	var haveRequirement bool
+	for _, n := range nodes {
+		if n.NodeID == reqReview.NodeID {
+			haveRequirement = true
+		}
+	}
+	if !haveRequirement {
+		t.Fatalf("requirement pipeline's latest run must still be returned: %+v", nodes)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("expected 3 gate nodes (1 requirement + 2 current architecture), got %d: %+v", len(nodes), nodes)
 	}
 }

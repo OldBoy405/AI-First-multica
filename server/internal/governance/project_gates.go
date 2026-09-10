@@ -196,12 +196,31 @@ func (a *ApprovalService) HandleProjectGates(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
+		// One pipeline runs several times for the same CR: every re-entry
+		// (repair loop back into architecture-design, a new code cycle, a
+		// projection replay) opens a fresh pipeline_run via findOrCreateRun,
+		// and attempt numbering restarts inside each run. Flattening every
+		// run into one list therefore repeats (node_id, attempt) pairs — the
+		// chat stream keys its gate cards `g:{cr_id}:{node_id}:{attempt}`
+		// (project-team-agent-chat.tsx), so duplicates collide as React keys
+		// and render the same gate two or three times with contradictory
+		// statuses (a stale "blocked" round next to the later "passed" one).
+		//
+		// Contract: this read model is the CURRENT cycle — the newest run per
+		// pipeline. Superseded cycles stay in pipeline_node_run and in git
+		// (review-loop.yml) for audit; they are not part of this endpoint.
 		nodeRows, err := a.pool.Query(r.Context(), `
 			SELECT pnr.node_id::text, pnr.kind, pnr.seq, pnr.status, pnr.attempt, pnr.detail,
 			       pnr.started_at::text, pnr.completed_at::text
 			FROM pipeline_node_run pnr
 			JOIN pipeline_run pr ON pr.id = pnr.run_id
 			WHERE pr.cr_id = $1
+			  AND pr.id IN (
+			      SELECT DISTINCT ON (latest.pipeline_id) latest.id
+			      FROM pipeline_run latest
+			      WHERE latest.cr_id = $1
+			      ORDER BY latest.pipeline_id, latest.created_at DESC, latest.id DESC
+			  )
 			ORDER BY pnr.seq, pnr.attempt`, b.CRID)
 		if err == nil {
 			for nodeRows.Next() {
