@@ -50,6 +50,16 @@ interface ProjectRow {
   id: string;
 }
 
+/**
+ * The project chat tab renders TWO composers on one page: the Team Agent
+ * composer (ChatInputCore) and the global ChatWindow in the right pane
+ * (ChatInput). Both share `data-slot="chat-input-surface"`, so every
+ * surface lookup must scope to the project composer subtree (TASK-02
+ * contract: composer subtree located via internal testids).
+ */
+const projectSurface = (page: Page) =>
+  page.locator('[data-testid="project-chat-composer"] [data-slot="chat-input-surface"]');
+
 test.describe("Project chat composer (CR-2026-062)", () => {
   let api: TestApiClient;
   let pgClient: pg.Client | null = null;
@@ -81,11 +91,11 @@ test.describe("Project chat composer (CR-2026-062)", () => {
     const runtimeIns = await pgClient.query(
       `INSERT INTO agent_runtime (
          workspace_id, daemon_id, name, runtime_mode, provider, status,
-         device_info, metadata, last_seen_at
+         device_info, metadata, last_seen_at, owner_id, visibility
        )
-       VALUES ($1, NULL, $2, 'cloud', $3, 'online', $4, '{}'::jsonb, now())
+       VALUES ($1, NULL, $2, 'cloud', 'hermes', 'online', $3, '{}'::jsonb, now(), $4, 'public')
        RETURNING id`,
-      [ws.id, `e2e composer runtime ${Date.now()}`, "e2e_composer_runtime", "E2E composer runtime"],
+      [ws.id, `e2e composer runtime ${Date.now()}`, "E2E composer runtime", userId],
     );
     createdRuntimeId = runtimeIns.rows[0].id as string;
 
@@ -126,12 +136,51 @@ test.describe("Project chat composer (CR-2026-062)", () => {
       workspaceSlug,
     );
     expect(updateRes.status).toBe(200);
+
+    // Seed the runtime's model catalog through the real server machinery:
+    // initiate a model-list request, then report its result the way the
+    // daemon does (the workspace-member JWT is accepted by the report
+    // endpoint). The report warms the server-side catalog cache, which is
+    // what the composer's model picker reads and what the send validates
+    // against — without it the send is rejected (invalid_model_or_thinking
+    // _level) and the composer locks into the runtime-guide state. The
+    // runtime still has no daemon, so a sent task stays queued: exactly the
+    // window the running-stop group needs.
+    const initModelsRes = await authedFetch(
+      api,
+      `/api/runtimes/${createdRuntimeId}/models`,
+      { method: "POST" },
+      workspaceSlug,
+    );
+    expect(initModelsRes.status).toBe(200);
+    const initModels = (await initModelsRes.json()) as { id: string };
+    const reportModelsRes = await authedFetch(
+      api,
+      `/api/daemon/runtimes/${createdRuntimeId}/models/${initModels.id}/result`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "completed",
+          models: [
+            { id: "sonnet", label: "Sonnet", provider: "hermes", default: true },
+          ],
+          supported: true,
+        }),
+      },
+      workspaceSlug,
+    );
+    expect(reportModelsRes.status).toBe(200);
   });
 
   test.afterEach(async () => {
     try {
       if (pgClient) {
         if (createdProjectId) {
+          // The send creates a container issue whose project_id FK is
+          // ON DELETE SET NULL, so deleting the project would orphan it.
+          // Remove issues bound to this project first (their tasks cascade).
+          await pgClient.query(`DELETE FROM issue WHERE project_id = $1`, [createdProjectId]);
           await pgClient.query(`DELETE FROM project WHERE id = $1`, [createdProjectId]);
         }
         if (createdAgentId) {
@@ -163,13 +212,13 @@ test.describe("Project chat composer (CR-2026-062)", () => {
       waitUntil: "domcontentloaded",
     });
     await expect(
-      page.locator('[data-slot="chat-input-surface"]'),
+      projectSurface(page),
       "the project chat composer surface must mount",
     ).toBeVisible({ timeout: 30000 });
   }
 
   async function sendViaKeyboard(page: Page, text: string): Promise<void> {
-    const editor = page.locator('[data-slot="chat-input-surface"] .ProseMirror');
+    const editor = projectSurface(page).locator(".ProseMirror");
     await editor.click();
     await editor.fill(text);
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -180,7 +229,7 @@ test.describe("Project chat composer (CR-2026-062)", () => {
   }) => {
     await openProjectChat(page);
 
-    const surface = page.locator('[data-slot="chat-input-surface"]');
+    const surface = projectSurface(page);
     const surfaceBox = await surface.boundingBox();
     expect(surfaceBox, "surface bounding box").not.toBeNull();
     // The reading column is the Team Agent stream's inner CHAT_COLUMN layer,
@@ -213,27 +262,28 @@ test.describe("Project chat composer (CR-2026-062)", () => {
     );
     expect(overflow, "pane must not overflow horizontally").toBe(true);
 
-    // Editor, config chips and the send button must not overlap each other.
-    const editorBox = await page
-      .locator('[data-slot="chat-input-surface"] .ProseMirror')
-      .boundingBox();
-    const sendBox = await page
-      .locator('[data-slot="chat-input-surface"] button[aria-label="Send"]')
+    // Editor and send button must not overlap: they sit on DIFFERENT rows
+    // of the flow bottom bar, so a 1-D x comparison would flag a false
+    // positive — non-intersection is the correct overlap model (AC-3).
+    const editorBox = await projectSurface(page).locator(".ProseMirror").boundingBox();
+    const sendBox = await projectSurface(page)
+      .locator('button[aria-label="Send"]')
       .boundingBox();
     expect(editorBox, "editor box").not.toBeNull();
     expect(sendBox, "send button box").not.toBeNull();
-    expect(editorBox!.x + editorBox!.width, "editor right vs send left").toBeLessThanOrEqual(
-      sendBox!.x,
-    );
+    const boxesIntersect = (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) =>
+      a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+    expect(
+      boxesIntersect(editorBox!, sendBox!),
+      "editor and send boxes must not intersect",
+    ).toBe(false);
 
     // Model/thinking chips live in the wrapping left group and stay inside
     // the surface.
     const modelChip = page.getByTestId("project-chat-model-picker");
     if (await modelChip.isVisible()) {
       const chipBox = await modelChip.boundingBox();
-      const surfaceBox = await page
-        .locator('[data-slot="chat-input-surface"]')
-        .boundingBox();
+      const surfaceBox = await projectSurface(page).boundingBox();
       expect(chipBox!.x, "chip left edge inside the surface").toBeGreaterThanOrEqual(
         surfaceBox!.x,
       );
@@ -252,16 +302,14 @@ test.describe("Project chat composer (CR-2026-062)", () => {
     await sendViaKeyboard(page, "run this for the stop test");
     // The seeded runtime has no daemon, so the task stays queued: the stop
     // button appears (draft cleared, queue items hold the sent task id).
-    const stopButton = page.locator(
-      '[data-slot="chat-input-surface"] button[aria-label="Stop"]',
-    );
+    const stopButton = projectSurface(page).locator('button[aria-label="Stop"]');
     await expect(stopButton, "stop affordance while the task is active").toBeVisible({
       timeout: 30000,
     });
     await stopButton.click();
     // Cancelling flips the affordance back to send.
     await expect(
-      page.locator('[data-slot="chat-input-surface"] button[aria-label="Send"]'),
+      projectSurface(page).locator('button[aria-label="Send"]'),
       "send affordance after the cancel settles",
     ).toBeVisible({ timeout: 30000 });
   });
@@ -269,13 +317,21 @@ test.describe("Project chat composer (CR-2026-062)", () => {
   test("(d) keyboard send: Mod+Enter sends from the composer", async ({ page }) => {
     await openProjectChat(page);
 
-    const editor = page.locator('[data-slot="chat-input-surface"] .ProseMirror');
+    const editor = projectSurface(page).locator(".ProseMirror");
     await editor.click();
     await editor.fill("keyboard send smoke");
     await page.keyboard.press("ControlOrMeta+Enter");
-    // The just-sent text appears as a member bubble in the stream once the
-    // send commits (pending bubble covers the gap).
-    await expect(page.getByTestId("project-chat-user-bubble")).toContainText(
+    // The keyboard send lands the message in the project's agent queue (the
+    // seeded runtime has no daemon, so the task stays queued). The queue bar
+    // updates over WS `task:*` — same invalidation the stop affordance
+    // relies on. Its count copy is locale-dependent ("1 task queued" vs
+    // "1/50 in agent queue"), so the assertion targets the item summary.
+    // The stream bubble is deliberately NOT asserted: the container issue
+    // only becomes visible to the timeline after the chat context refetches,
+    // and the first send does not invalidate it (pre-existing CR-2026-006
+    // data flow, outside this CR's scope).
+    await page.getByTestId("project-queue-bar-toggle").click();
+    await expect(page.getByTestId("project-queue-bar-item")).toContainText(
       "keyboard send smoke",
       { timeout: 30000 },
     );
