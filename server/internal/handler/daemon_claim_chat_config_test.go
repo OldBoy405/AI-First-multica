@@ -53,6 +53,15 @@ func TestClaimTaskByRuntime_ChatConfigSnapshot(t *testing.T) {
 		// Change the agent columns: a re-claim of the SAME task row must keep
 		// the immutable snapshot (FR-14: retries never re-read the agent).
 		dbfx.Exec(t, `UPDATE agent SET model = 'changed-after-enqueue' WHERE id = $1`, agentID)
+		// A freshly dispatched task is deliberately not reclaimable (see
+		// TestClaimTaskByRuntime_DoesNotReclaimFreshDispatchedTask); re-claim is
+		// the stale-dispatch recovery path, so age the dispatch past the
+		// recovery window and expire the prepare lease first - the same state
+		// createDispatchedClaimFixtureTask builds for that path.
+		dbfx.Exec(t, `UPDATE agent_task_queue
+			   SET dispatched_at = now() - interval '120 seconds',
+			       prepare_lease_expires_at = now() - interval '1 second'
+			 WHERE id = $1`, taskID)
 		agent = claimChatConfigSnapshot(t, runtimeID, taskID)
 		if agent.Model != "claude-opus-5" {
 			t.Fatalf("re-claim drifted off the snapshot: model=%q", agent.Model)
