@@ -558,7 +558,7 @@ func (h *Handler) SetChatSessionArchived(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	session, ok := h.loadChatSessionForPublicGate(w, r, userID, workspaceID, sessionID, true)
+	session, ok := h.loadChatSessionForCleanupGate(w, r, userID, workspaceID, sessionID, true)
 	if !ok {
 		return
 	}
