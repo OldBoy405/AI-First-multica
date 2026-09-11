@@ -326,6 +326,30 @@ func (h *Handler) loadChatSessionForPublicGate(w http.ResponseWriter, r *http.Re
 	return h.gatePublicChatSessionForUser(w, r, userID, workspaceID, sessionID)
 }
 
+// loadChatSessionForCleanupGate is loadChatSessionForPublicGate for the
+// endpoints that must stay reachable for a session the public projection hides
+// (a channel-command-only session): the same shared-session dispatch, but the
+// private fallback is gateChatSessionForUser - the lower-level ownership gate
+// upstream uses on the archive/delete paths - instead of the public one.
+// Archive is how a stale client severs a channel binding and cleans up a
+// session whose Chat projection is empty; routing it through the public gate
+// made that unreachable with 404.
+func (h *Handler) loadChatSessionForCleanupGate(w http.ResponseWriter, r *http.Request, userID, workspaceID, sessionID string, sharedRequiresRole bool) (db.ChatSession, bool) {
+	if wsUUID, werr := util.ParseUUID(workspaceID); werr == nil {
+		if sidUUID, serr := util.ParseUUID(sessionID); serr == nil {
+			if session, lerr := h.Queries.GetChatSessionInWorkspace(r.Context(), db.GetChatSessionInWorkspaceParams{
+				ID: sidUUID, WorkspaceID: wsUUID,
+			}); lerr == nil && session.Kind == chatSessionKindProjectShared {
+				if _, ok := h.sharedSessionMemberGate(w, r, userID, workspaceID, sharedRequiresRole); !ok {
+					return db.ChatSession{}, false
+				}
+				return session, true
+			}
+		}
+	}
+	return h.gateChatSessionForUser(w, r, userID, workspaceID, sessionID)
+}
+
 // loadChatSessionForOwnerGate is the loadChatSessionForUser counterpart of
 // loadChatSessionForPublicGate (same §3.6 closure, different private gate).
 func (h *Handler) loadChatSessionForOwnerGate(w http.ResponseWriter, r *http.Request, userID, workspaceID, sessionID string, sharedRequiresRole bool) (db.ChatSession, bool) {

@@ -5443,7 +5443,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		return
 	}
 	if task.ChatSessionID != "" {
-		taskLog.Info("picked chat task", "chat_session", shortID(task.ChatSessionID), "agent", agentName, "provider", provider, "ask_only", task.AskOnly)
+		taskLog.Info("picked chat task", "chat_session", task.ChatSessionID, "agent", agentName, "provider", provider, "ask_only", task.AskOnly)
 	} else {
 		taskLog.Info("picked task", "issue", task.IssueID, "agent", agentName, "provider", provider)
 	}
