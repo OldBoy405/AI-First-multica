@@ -109,6 +109,9 @@ func skillRow(id pgtype.UUID, name, description, content string) []any {
 	return []any{
 		id, testUUID(0xF0), name, description, content,
 		[]byte(nil), pgtype.UUID{}, pgtype.Timestamptz{}, pgtype.Timestamptz{}, pgtype.UUID{},
+		// ListAgentSkills also selects the fork's skill-market columns
+		// (465_skill_visibility): visibility, version, owner_actor.
+		"private", "0.1.0", pgtype.Text{},
 	}
 }
 
