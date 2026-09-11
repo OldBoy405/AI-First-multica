@@ -101,14 +101,20 @@ CR_ISSUE_CONFLICT / CR_BIND_FAILED).`,
 }
 
 func runCrBindPromotionRun(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
-	if err != nil {
-		return err
-	}
+	// Validate the arguments before anything else. newAPIClient resolves the
+	// server URL through a resolver that terminates the process when no server
+	// is configured, so checking --run-id afterwards turned a pure usage error
+	// into a hard exit on a machine without a configured profile (CI), instead
+	// of the usage message the caller and the tests expect.
 	crID := args[0]
 	runID, err := cmd.Flags().GetString("run-id")
 	if err != nil || runID == "" {
 		return fmt.Errorf("bind promotion run to %s: --run-id is required", crID)
+	}
+
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := cli.APIContext(context.Background())
