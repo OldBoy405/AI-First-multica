@@ -97,18 +97,15 @@ func TestCreateChatSession_ProjectContext(t *testing.T) {
 		if err := json.NewDecoder(listW.Body).Decode(&sessions); err != nil {
 			t.Fatalf("decode session list: %v", err)
 		}
-		found := false
+		// CR-2026-008: a project-bound Private Ask session belongs to the project
+		// chat pane and is deliberately absent from the global 1:1 chat list
+		// (ListChatSessionsByCreator filters `project_id IS NULL`). Upstream's
+		// version of this test asserted the opposite; the fork's behaviour is the
+		// intended one, so pin the fork's contract here.
 		for _, session := range sessions {
-			if session.ID != response.ID {
-				continue
+			if session.ID == response.ID {
+				t.Fatalf("project-bound session %s must not appear in the global chat list", response.ID)
 			}
-			found = true
-			if session.ProjectID == nil || *session.ProjectID != projectID {
-				t.Fatalf("listed project_id = %v, want %s", session.ProjectID, projectID)
-			}
-		}
-		if !found {
-			t.Fatalf("created session %s missing from list", response.ID)
 		}
 	})
 
