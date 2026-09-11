@@ -150,6 +150,11 @@ func EnsureOrgAdminWorkspace(
 			Label:           pgtype.Text{String: "Weekly maturity report", Valid: true},
 			PublishedByType: pgtype.Text{},
 			PublishedByID:   pgtype.UUID{},
+			// The schedule must record the human it acts as: admission resolves
+			// automation as the trigger creator (MUL-6951), and a trigger with no
+			// member creator is refused, so the weekly report could never fire.
+			CreatedByType: pgtype.Text{String: "member", Valid: true},
+			CreatedByID:   ownerID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create org admin schedule trigger: %w", err)
