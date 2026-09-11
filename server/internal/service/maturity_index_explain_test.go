@@ -11,11 +11,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestMaturityIndexesServeTheirQueries pins migrations 378/379 to the read
+// TestMaturityIndexesServeTheirQueries pins the maturity read indexes to the
 // queries they were built for (SDD §2.1, TASK-02 acceptance 3): the report
-// history keyset must hit idx_atq_maturity_report_history — never the active-
-// task index from migration 369 — and the scope/date trend read must hit
-// maturity_snapshot_scope_date_idx.
+// history keyset must hit idx_atq_maturity_report_history (migration 464) —
+// never the active-task index from migration 454 — and the scope/date trend
+// read must hit maturity_snapshot_scope_date_idx (migration 463).
 func TestMaturityIndexesServeTheirQueries(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -33,12 +33,14 @@ func TestMaturityIndexesServeTheirQueries(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Seed one completed report task so the partial index has at least one
-	// candidate row for the planner.
+	// Seed a realistic number of completed report tasks so the partial index has
+	// both candidates and enough weight to win the plan: on a one-row table a
+	// sequential scan genuinely is cheaper, so the assertion below would depend
+	// on how much data the shared test database happened to hold rather than on
+	// the query — which is exactly how this test flaked.
 	wsID := uuid.New()
 	projectID := uuid.New()
 	agentID := uuid.New()
-	taskID := uuid.New()
 	exec := func(sql string, args ...any) {
 		if _, err := pool.Exec(ctx, sql, args...); err != nil {
 			t.Fatalf("seed %q: %v", sql, err)
@@ -48,8 +50,22 @@ func TestMaturityIndexesServeTheirQueries(t *testing.T) {
 	exec(`INSERT INTO project (id, workspace_id, title, status, priority) VALUES ($1,$2,'idx-p','in_progress','none')`, projectID, wsID)
 	exec(`INSERT INTO agent (id, workspace_id, name, runtime_mode) VALUES ($1,$2,'idx-a','local')`, agentID, wsID)
 	exec(`INSERT INTO agent_task_queue (id, agent_id, project_id, status, completed_at, result)
-	      VALUES ($1,$2,$3,'completed',$4,$5)`,
-		taskID, agentID, projectID, time.Now(), []byte(`{"schema":"ai-first.maturity-report/v1","report_key":"k","content_sha256":"","markdown":"x"}`))
+	      SELECT gen_random_uuid(), $1, $2, 'completed', now() - (g || ' seconds')::interval, $3
+	      FROM generate_series(1, 3000) AS g`,
+		agentID, projectID, []byte(`{"schema":"ai-first.maturity-report/v1","report_key":"k","content_sha256":"","markdown":"x"}`))
+	// The scope/date read is asserted against maturity_snapshot next. Seed the
+	// workspace's own org buckets plus filler rows in other scopes: with a few
+	// hundred rows a sequential scan is still cheaper than the index scan, so
+	// the assertion would measure the table's size instead of the query.
+	exec(`INSERT INTO maturity_snapshot (workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev)
+	      SELECT $1, DATE '2026-01-01' + g, 'org', '·', '{}'::jsonb, '{}'::jsonb, repeat('0', 40)
+	      FROM generate_series(0, 364) AS g`, wsID)
+	exec(`INSERT INTO maturity_snapshot (workspace_id, bucket_date, scope, scope_id, metrics, scores, config_rev)
+	      SELECT $1, DATE '2026-01-01' + (g % 365), 'project', 'p' || (g / 365), '{}'::jsonb, '{}'::jsonb, repeat('0', 40)
+	      FROM generate_series(0, 10949) AS g`, wsID)
+	// Refresh the statistics the planner reads.
+	exec(`ANALYZE agent_task_queue`)
+	exec(`ANALYZE maturity_snapshot`)
 
 	planHistory := explain(t, ctx, pool, `
 		EXPLAIN SELECT id FROM agent_task_queue
@@ -60,7 +76,7 @@ func TestMaturityIndexesServeTheirQueries(t *testing.T) {
 		t.Fatalf("report history plan must use idx_atq_maturity_report_history:\n%s", planHistory)
 	}
 	if strings.Contains(planHistory, "idx_atq_project_active") {
-		t.Fatalf("report history plan must not fall back to the active-task index (369):\n%s", planHistory)
+		t.Fatalf("report history plan must not fall back to the active-task index (454):\n%s", planHistory)
 	}
 
 	planScope := explain(t, ctx, pool, `

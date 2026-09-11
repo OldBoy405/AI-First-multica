@@ -6206,18 +6206,36 @@ func providerNeedsInlineSystemPrompt(provider string) bool {
 // the conversation's session store got mounted (execenv.Environment
 // HermesSessionStore) — and false drops the resume with the same disclosure as
 // a workdir mismatch.
+// dirIdentity returns the identity of the directory a path names, read from an
+// open handle instead of from the path itself.
+//
+// The open is what makes the comparison sound on Windows: os.SameFile compares
+// file-identity fields that a path-based os.Stat does not populate there, so two
+// different directories answering to the same path compare equal and a guard
+// built on it passes when it should refuse. execenv.LockEnvRootForReuse already
+// reads its side from an open root handle for this reason; this puts the
+// path-based side on the same footing.
+func dirIdentity(dir string) (os.FileInfo, error) {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	return handle.Stat()
+}
+
 // sameExistingDir reports whether two paths name the same existing directory.
-// False when either cannot be stat'd, which is the safe answer for cwd-keyed
+// False when either cannot be stated, which is the safe answer for cwd-keyed
 // providers: an absent prior workdir means there is nothing to resume from.
 func sameExistingDir(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	ai, err := os.Stat(a)
+	ai, err := dirIdentity(a)
 	if err != nil {
 		return false
 	}
-	bi, err := os.Stat(b)
+	bi, err := dirIdentity(b)
 	if err != nil {
 		return false
 	}
@@ -6927,7 +6945,7 @@ func (d *Daemon) lockReusablePriorEnvRoot(ctx context.Context, task Task, localA
 	// later step is checked against THIS, not against whatever the name
 	// resolves to next: a path string cannot tell "the directory I validated"
 	// apart from "a different directory now answering to that name".
-	validatedInfo, err := os.Stat(priorRoot)
+	validatedInfo, err := dirIdentity(priorRoot)
 	if err != nil {
 		return nil, "", nil, false, nil
 	}
@@ -6978,7 +6996,7 @@ func (d *Daemon) lockReusablePriorEnvRoot(ctx context.Context, task Task, localA
 	}
 	// ...and the directory we are about to hand to Reuse has to be that same
 	// one, so the object locked and the object used cannot diverge.
-	currentInfo, err := os.Stat(filepath.Dir(recheckedWorkDir))
+	currentInfo, err := dirIdentity(filepath.Dir(recheckedWorkDir))
 	if err != nil || !os.SameFile(lockedInfo, currentInfo) {
 		d.logger.Info("prior workdir changed identity while being claimed; starting a fresh environment",
 			"task", task.ID)
@@ -7757,7 +7775,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// into "declined and started clean". See lockReusablePriorEnvRoot for
 		// what remains uncovered.
 		if env != nil && lockedPriorInfo != nil {
-			usedInfo, statErr := os.Stat(filepath.Dir(env.WorkDir))
+			usedInfo, statErr := dirIdentity(filepath.Dir(env.WorkDir))
 			if statErr != nil || !os.SameFile(lockedPriorInfo, usedInfo) {
 				// No "task" field here: taskLog already carries the full id.
 				taskLog.Info("reused workdir is not the directory that was claimed; starting a fresh environment")
