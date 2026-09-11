@@ -77,7 +77,8 @@ func TestMaturityServiceReadPath(t *testing.T) {
 	}
 
 	// rankings: project scope, one project with valid token metrics.
-	rankings, err := svc.Rankings(ctx, wsID, nil, "total", 20, nil)
+	bucket := previousLocalDate(planTime)
+	rankings, err := svc.Rankings(ctx, wsID, &bucket, "total", 20, nil)
 	if err != nil {
 		t.Fatalf("rankings: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestMaturityServiceReadPath(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE maturity_snapshot SET scores='{"metric_scores":"invalid"}'::jsonb WHERE workspace_id=$1 AND scope='project'`, wsID); err != nil {
 		t.Fatalf("corrupt project scores: %v", err)
 	}
-	if _, err := svc.Rankings(ctx, wsID, nil, "total", 20, nil); err == nil {
+	if _, err := svc.Rankings(ctx, wsID, &bucket, "total", 20, nil); err == nil {
 		t.Fatal("corrupt project ranking scores must return an error")
 	}
 	if _, err := pool.Exec(ctx, `UPDATE maturity_snapshot SET scores='{}'::jsonb WHERE workspace_id=$1 AND scope='project'`, wsID); err != nil {

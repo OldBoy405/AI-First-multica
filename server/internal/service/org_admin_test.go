@@ -313,7 +313,22 @@ func TestEnsureOrgAdminWorkspaceIdempotent(t *testing.T) {
 	if err := RecordAutopilotRuleVersion(ctx, queries, other, "member", ownp); err != nil {
 		t.Fatalf("publish non-report Autopilot: %v", err)
 	}
-	otherRun, err := autopilotSvc.DispatchAutopilot(ctx, other, pgtype.UUID{}, "api", nil)
+	// A run-only Autopilot still needs an authorizing human: automation is
+	// admitted as the human its trigger acts for (MUL-6951).
+	otherTrigger, err := queries.CreateAutopilotTrigger(ctx, db.CreateAutopilotTriggerParams{
+		AutopilotID:    other.ID,
+		Kind:           "schedule",
+		Enabled:        true,
+		CronExpression: pgtype.Text{String: "0 9 * * 1", Valid: true},
+		Timezone:       pgtype.Text{String: "Asia/Shanghai", Valid: true},
+		Label:          pgtype.Text{String: "housekeeping", Valid: true},
+		CreatedByType:  pgtype.Text{String: "member", Valid: true},
+		CreatedByID:    ownp,
+	})
+	if err != nil {
+		t.Fatalf("create non-report trigger: %v", err)
+	}
+	otherRun, err := autopilotSvc.DispatchAutopilot(ctx, other, otherTrigger.ID, "api", nil)
 	if err != nil {
 		t.Fatalf("dispatch non-report Autopilot: %v", err)
 	}
