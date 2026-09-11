@@ -120,6 +120,7 @@ func copyImmutable(report terminalTaskReport) terminalTaskReport {
 type terminalReportRetry struct {
 	mu      sync.Mutex
 	pending map[string]terminalTaskReport // task ID -> first accepted immutable report
+	order   []string                      // pending task IDs, oldest first: the replay drain order
 	once    sync.Once                     // starts the single replay loop
 }
 
@@ -142,16 +143,26 @@ func (r *terminalReportRetry) enqueue(report terminalTaskReport) bool {
 		return false
 	}
 	r.pending[report.taskID] = report
+	r.order = append(r.order, report.taskID)
 	return true
 }
 
-// snapshot returns a value copy of the current pending set.
+// snapshot returns a value copy of the current pending set in enqueue order.
+//
+// The order is part of the contract, not an incidental detail: a round stops at
+// the first transient failure, so draining a map would decide by randomized
+// iteration order which reports are delivered before that stop — the same
+// daemon state would replay a different prefix every round. Oldest first keeps
+// a round reproducible and is what "pending reports" means to the callers, who
+// enqueue as tasks reach a terminal state.
 func (r *terminalReportRetry) snapshot() []terminalTaskReport {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]terminalTaskReport, 0, len(r.pending))
-	for _, report := range r.pending {
-		out = append(out, report)
+	out := make([]terminalTaskReport, 0, len(r.order))
+	for _, taskID := range r.order {
+		if report, ok := r.pending[taskID]; ok {
+			out = append(out, report)
+		}
 	}
 	return out
 }
@@ -166,6 +177,12 @@ func (r *terminalReportRetry) removeIfUnchanged(report terminalTaskReport) bool 
 		return false
 	}
 	delete(r.pending, report.taskID)
+	for i, taskID := range r.order {
+		if taskID == report.taskID {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
 	return true
 }
 
