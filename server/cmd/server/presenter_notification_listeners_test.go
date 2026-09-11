@@ -211,8 +211,27 @@ func createPresenterNotificationFixture(t *testing.T, ctx context.Context, pool 
 		t.Fatalf("create chat issue: %v", err)
 	}
 
+	// The presenter activity row hangs on the ACTIVE project chat session's bound
+	// container (CR-2026-056 §9 #35): recordPresenterActivity skips the write with
+	// "no active bound chat session" when the project has none, which is what left
+	// activity_log empty here.
+	var agentID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent (workspace_id, name, runtime_mode) VALUES ($1, $2, 'local') RETURNING id
+	`, workspaceID, "presenter notif agent").Scan(&agentID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO project_chat_session (id, workspace_id, project_id, agent_id, issue_id, status, created_by)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, 'active', $5)
+	`, workspaceID, projectID, agentID, issueID, owner1ID); err != nil {
+		t.Fatalf("bind active project chat session: %v", err)
+	}
+
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
+		pool.Exec(cleanupCtx, `DELETE FROM project_chat_session WHERE workspace_id = $1`, workspaceID)
+		pool.Exec(cleanupCtx, `DELETE FROM agent WHERE workspace_id = $1`, workspaceID)
 		pool.Exec(cleanupCtx, `DELETE FROM inbox_item WHERE workspace_id = $1`, workspaceID)
 		pool.Exec(cleanupCtx, `DELETE FROM activity_log WHERE workspace_id = $1`, workspaceID)
 		pool.Exec(cleanupCtx, `DELETE FROM project_presenter_grant WHERE project_id = $1`, projectID)

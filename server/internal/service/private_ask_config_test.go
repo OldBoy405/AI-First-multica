@@ -729,15 +729,16 @@ func TestProjectClearRacingSendSendFirst(t *testing.T) {
 
 	// Snapshot == the locked-row resolution, backfill written exactly once,
 	// and the late clear left every persisted value immutable.
-	var baseModel, baseThinking, projectID string
+	var baseModel, baseThinking string
+	var projectID *string
 	if err := pool.QueryRow(ctx, `SELECT base_model, base_thinking_level, project_id::text FROM chat_session WHERE id = $1`, sessionID).Scan(&baseModel, &baseThinking, &projectID); err != nil {
 		t.Fatalf("read session after clear: %v", err)
 	}
 	if baseModel != "claude-opus-5" || baseThinking != "high" {
 		t.Fatalf("backfill = (%q, %q), want the locked-row agent defaults", baseModel, baseThinking)
 	}
-	if projectID != "" {
-		t.Fatalf("project_id = %q after clear, want NULL", projectID)
+	if projectID != nil {
+		t.Fatalf("project_id = %q after clear, want NULL", *projectID)
 	}
 	var taskID string
 	if err := pool.QueryRow(ctx, `SELECT id FROM agent_task_queue WHERE chat_session_id = $1`, sessionID).Scan(&taskID); err != nil {

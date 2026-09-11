@@ -245,8 +245,9 @@ func TestUpdateProjectChatSessionConfigThreeState(t *testing.T) {
 	if cleared.ModelSource != ChatConfigSourceSessionDefault || cleared.Model != "claude-opus-5" {
 		t.Fatalf("cleared model = %q (%s)", cleared.Model, cleared.ModelSource)
 	}
-	if err := pool.QueryRow(ctx, `SELECT model_override IS NULL FROM project_chat_session WHERE id = $1`, view.SessionID).Scan(&override); err != nil || override != "true" {
-		t.Fatalf("override not cleared: %v %q", err, override)
+	var overrideCleared bool
+	if err := pool.QueryRow(ctx, `SELECT model_override IS NULL FROM project_chat_session WHERE id = $1`, view.SessionID).Scan(&overrideCleared); err != nil || !overrideCleared {
+		t.Fatalf("override not cleared: %v %v", err, overrideCleared)
 	}
 }
 
