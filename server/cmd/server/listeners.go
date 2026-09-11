@@ -271,6 +271,14 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 				b.BroadcastToWorkspace(e.WorkspaceID, data)
 				return
 			}
+			if e.ChatSessionKind == "project_shared" {
+				// §3.7 fail-closed: a shared event with no workspace hint has no room
+				// to fan out to, and quietly demoting it to the creator-only path
+				// would report a shared delivery the session never had. Drop it.
+				slog.Error("shared chat event without workspace dropped",
+					"event_type", e.Type, "chat_session_id", e.ChatSessionID)
+				return
+			}
 			if e.ChatRecipientID == "" {
 				slog.Error("chat event without recipient dropped",
 					"event_type", e.Type, "chat_session_id", e.ChatSessionID)

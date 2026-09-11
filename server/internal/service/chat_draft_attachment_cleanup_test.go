@@ -261,8 +261,6 @@ func TestSweepChatDraftAttachmentsStorageFailureRetriesNextTick(t *testing.T) {
 	t.Cleanup(func() {
 		pool.Exec(context.Background(), `DELETE FROM attachment WHERE id = $1`, emptyURLIDStr)
 	})
-	nilID, _ := seedDraftAttachment(t, pool, workspaceID, userID, -169*time.Hour, "nil-storage")
-
 	// Round 1: storage deletes fail. Nothing may be deleted.
 	failing := &draftSweepStorage{failAll: true}
 	deleted, err := SweepChatDraftAttachments(ctx, db.New(pool), pool, failing, 100)
@@ -306,7 +304,10 @@ func TestSweepChatDraftAttachmentsStorageFailureRetriesNextTick(t *testing.T) {
 		t.Fatal("empty-URL row must be left for a later round")
 	}
 
-	// Nil storage: no deletes, no error.
+	// Nil storage: no deletes, no error. Seeded only here: the healthy round
+	// above sweeps every eligible draft, so a row created earlier would already
+	// be gone when this step asserts it survived.
+	nilID, _ := seedDraftAttachment(t, pool, workspaceID, userID, -169*time.Hour, "nil-storage")
 	deleted, err = SweepChatDraftAttachments(ctx, db.New(pool), pool, nil, 100)
 	if err != nil {
 		t.Fatalf("sweep with nil storage: %v", err)
