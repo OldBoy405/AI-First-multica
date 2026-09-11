@@ -328,6 +328,7 @@ func TestRepoCheckoutUsesTaskScopedProjectRefByDefault(t *testing.T) {
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
 
 	rec := httptest.NewRecorder()
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "task-1-token"})
 	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"` + workDir + `","agent_name":"Other Agent","task_id":"task-1","auth_token":"task-1-token"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, authorizedRepoCheckoutRequest(body))
 
@@ -515,6 +516,7 @@ func TestRepoCheckoutExplicitRefOverridesProjectDefault(t *testing.T) {
 	d.registerTaskRepos(workspaceID, "task-1", []RepoData{{URL: repoURL, Ref: "release/v2"}})
 
 	rec := httptest.NewRecorder()
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "task-1-token"})
 	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"` + workDir + `","task_id":"task-1","ref":"hotfix","auth_token":"task-1-token"}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, authorizedRepoCheckoutRequest(body))
 
@@ -676,6 +678,7 @@ func TestRepoCheckoutReturnsRetryableBusyToCapableClient(t *testing.T) {
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, workDir, cache)
 
 	rec := httptest.NewRecorder()
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "mat_repo_checkout_test"})
 	body := strings.NewReader(`{"url":"` + repoURL + `","workspace_id":"` + workspaceID + `","workdir":"` + workDir + `","task_id":"task-1","retry_busy":true}`)
 	d.repoCheckoutHandler().ServeHTTP(rec, authorizedRepoCheckoutRequest(body))
 

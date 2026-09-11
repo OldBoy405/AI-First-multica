@@ -285,9 +285,15 @@ func seedRunnerStartPrerequisites(t *testing.T, runner *Runner) *service.TaskSer
 	ctx := context.Background()
 	userID := testUserID(t)
 	if _, err := testPool.Exec(ctx, `
-		INSERT INTO agent_task_queue(id,agent_id,runtime_id,status,priority,originator_source,originator_user_id,accountable_user_id,trigger_evidence_kind,trigger_evidence_ref_id)
-		VALUES($1::uuid,$2::uuid,$3::uuid,'completed',0,'task_token',$4::uuid,$4::uuid,'task',$1::uuid)`,
-		runnerTestSource, runnerTestAgent, runnerTestRuntime, userID); err != nil {
+		WITH src_issue AS (
+			INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, number, position)
+			VALUES ($5::uuid, 'runner source issue', 'todo', 'none', 'member', $4::uuid,
+			        (SELECT COALESCE(MAX(number), 0) + 1 FROM issue WHERE workspace_id = $5::uuid), 0)
+			RETURNING id
+		)
+		INSERT INTO agent_task_queue(id,agent_id,runtime_id,status,priority,issue_id,originator_source,originator_user_id,accountable_user_id,trigger_evidence_kind,trigger_evidence_ref_id)
+		SELECT $1::uuid,$2::uuid,$3::uuid,'completed',0,(SELECT id FROM src_issue),'task_token',$4::uuid,$4::uuid,'task',$1::uuid`,
+		runnerTestSource, runnerTestAgent, runnerTestRuntime, userID, testWorkspaceID); err != nil {
 		t.Fatalf("seed source task: %v", err)
 	}
 	for _, node := range runner.registry.Pipeline.Nodes {
@@ -399,9 +405,15 @@ func TestEnqueuePipelineTaskCopiesAttributionAndDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	userID := testUserID(t)
 	if _, err := testPool.Exec(ctx, `
-		INSERT INTO agent_task_queue(id,agent_id,runtime_id,status,priority,originator_source,originator_user_id,accountable_user_id,trigger_evidence_kind,trigger_evidence_ref_id)
-		VALUES($1::uuid,$2::uuid,$3::uuid,'completed',0,'task_token',$4::uuid,$4::uuid,'task',$1::uuid)`,
-		runnerTestSource, runnerTestAgent, runnerTestRuntime, userID); err != nil {
+		WITH src_issue AS (
+			INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, number, position)
+			VALUES ($5::uuid, 'runner source issue', 'todo', 'none', 'member', $4::uuid,
+			        (SELECT COALESCE(MAX(number), 0) + 1 FROM issue WHERE workspace_id = $5::uuid), 0)
+			RETURNING id
+		)
+		INSERT INTO agent_task_queue(id,agent_id,runtime_id,status,priority,issue_id,originator_source,originator_user_id,accountable_user_id,trigger_evidence_kind,trigger_evidence_ref_id)
+		SELECT $1::uuid,$2::uuid,$3::uuid,'completed',0,(SELECT id FROM src_issue),'task_token',$4::uuid,$4::uuid,'task',$1::uuid`,
+		runnerTestSource, runnerTestAgent, runnerTestRuntime, userID, testWorkspaceID); err != nil {
 		t.Fatalf("seed source task: %v", err)
 	}
 	node := runner.registry.Pipeline.Nodes[0]
