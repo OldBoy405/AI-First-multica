@@ -374,6 +374,7 @@ WHERE i.workspace_id = $1
   -- CR-2026-006/CR-2026-009: hide the per-project Team Agent chat and
   -- Discussion container issues.
   AND i.origin_type IS DISTINCT FROM 'project_chat'
+  AND i.origin_type IS DISTINCT FROM 'project_discussion'
   -- Negate only known terminal keys so an unknown legacy key remains visible.
   AND NOT (i.status = ANY(sqlc.arg('terminal_status_keys')::text[]))
   AND (sqlc.narg('priority')::text IS NULL OR i.priority = sqlc.narg('priority'))
