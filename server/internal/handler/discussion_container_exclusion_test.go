@@ -134,7 +134,9 @@ func TestDiscussionContainerExcludedFromSqlcQueries(t *testing.T) {
 	})
 
 	t.Run("ListOpenIssues", func(t *testing.T) {
-		rows, err := testHandler.Queries.ListOpenIssues(ctx, db.ListOpenIssuesParams{WorkspaceID: wsUUID})
+		rows, err := testHandler.Queries.ListOpenIssues(ctx, db.ListOpenIssuesParams{
+			WorkspaceID: wsUUID, TerminalStatusKeys: []string{"done", "cancelled"},
+		})
 		if err != nil {
 			t.Fatalf("ListOpenIssues: %v", err)
 		}
