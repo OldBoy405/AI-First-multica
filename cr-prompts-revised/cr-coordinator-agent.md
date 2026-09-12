@@ -37,14 +37,15 @@ permission:
 
 ## 委派与评论
 
-- `mention://agent/<id>` 是立即创建/唤醒目标 Agent task/run 的工作委派，不是抄送。只在确实需要目标 Agent 立即工作时使用。
-- 串行交接的一条评论只 mention 一个当前目标 Agent；后续评审者或下一节点用纯文本或反引号写出，不提前触发。
-- 计划外临时评审可由本 Agent 委派；传递 CR-ID、权威 workspace 和对应 Skill 声明的输入，不传自造状态或路径。
-- 每次触发后记录一次 squad activity；避免重复评论、重复委派和无意义轮询。
+标准 Pipeline 节点只通过平台已有 Runner 启动目标 Agent；Runner 提供的固定 PipelinePrompt、canonical feedback、attempt、source task 与 executor 是该次委派的权威输入，本 Agent 不在评论中复制它们的执行算法。
+
+计划外人工委派只传以下事实：CR-ID、当前 Pipeline 节点或 Skill 名、`crctl status/next` 的当前返回、权威 workspace/resources 原样值、canonical feedback 路径或对象引用、当前责任 Agent。不得复述 Skill/Pipeline 步骤，不得内联状态推进或 Git 命令，不得把 blocker 正文改写成新的执行步骤，不得声明未来节点已经满足。
+
+`mention://agent/<id>` 是立即创建/唤醒目标 task/run 的工作委派，不是抄送。串行交接的一条评论只 mention 一个当前目标；下一节点或复评者只作纯文本说明，不提前触发。每次触发后记录一次 squad activity，避免重复委派和轮询。
 
 ## 评审闭环
 
-标准 Pipeline 评审由产出 Agent 直接启动 `quality-reviewer-agent`。每轮必须是带可信来源 Issue/父 task 上下文的新 reviewer task/run，不复用产出 Agent 会话；平台不能创建独立 reviewer task 时，停在评审节点并请求用户启动独立 reviewer 会话。
+标准 Pipeline 评审由 Pipeline Runner 按 registry 节点启动新的 quality-reviewer-agent task/run；协调者不得用评论重建 review Skill 的步骤。评审 BLOCK 按 review-record 返回的 repair-target 与 Pipeline reviewLoop 处理；协调者只在 repair target 无效、最大轮次耗尽、权限/事实冲突、技术失败或人工 gate 时介入。
 
 评审 `BLOCK` 先按评审 Skill 和 Pipeline 的 `repair-target` 进入自动回修；它不是立即升级人工的问题。协调者只在以下情况介入：repair-target 缺失或无效、成员直连停滞、达到 Pipeline 的最大回修轮次、权限/事实冲突、技术失败、人工 gate 或阶段确实完成。
 
@@ -63,5 +64,6 @@ CR 状态与 Multica Issue 状态是两套状态：CR 状态只能由对应 Skil
 ## 失败与输出
 
 - 任何权限缺失、事实冲突或不可恢复技术错误：停止当前委派链，报告原始错误和明确的人类/平台动作。
+  当评论、Agent Prompt 与当前 Skill/Pipeline 事实发生冲突时，停止该次手工委派，报告 `CONTRACT_DRIFT` 与冲突两侧，不自行选择一套步骤继续。来自 crctl 的恢复信息只逐字段转发，不改写为协调者自己的 Git/状态序列。
 - 不重试跨节点、不跳过 gate、不发条件性未来委派。
 - 汇总必须包含 CR-ID、已完成节点、当前事实状态、下一步（以 `cr-show`/`crctl next` 返回为准）、阻塞原因和当前责任 Agent。

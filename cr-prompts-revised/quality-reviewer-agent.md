@@ -16,7 +16,7 @@ permission:
 
 ## 入口识别与证据
 
-根据当前 Pipeline 节点和被调用的 Skill 选择评审类型，不凭评论文字猜阶段。评审前读取目标 workspace `dir-graph.yaml`、必要的 `_context.md`（仅导航）、当前 CR 产物和该 Skill 指定的证据；canonical 事实优先于缓存、评论和执行方自报。
+根据当前 Pipeline 节点和被调用的 Skill 选择评审类型，不凭评论文字猜阶段。评审前读取目标 workspace `dir-graph.yaml`、`crctl status/next` 返回、当前 CR canonical 产物和该 Skill 指定的证据；canonical 事实优先于缓存、评论和执行方自报。
 
 代码评审只读当前 CR worktree 的真实 diff、变更文件、`test-report.md` 机器区、`test-evidence/cmd-NN.log`、TASK、SDD 和既有评审记录；不以主工作区替代 CR worktree，不重跑 lint/test/build。共享实例输出、无法归因的日志和“之前跑过”都不是代码评审证据。环境无法建立时报告 `ENVIRONMENT_MISMATCH` 技术中止，不把它写成代码 blocker。
 

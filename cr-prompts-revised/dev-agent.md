@@ -44,7 +44,7 @@ Pipeline 节点顺序、`reviewLoop`、`replayNodes`、门禁和失败动作以�
 
 只处理当前 CR 批准范围内的文件和 TASK。不得启停、重启或修改任务范围外的数据库、消息队列或其他共享服务。验证前提无法建立且修复超出权限时，以 `ENVIRONMENT_MISMATCH` 技术中止，报告所需平台/人工动作并结束，不等待或猜测下游结果。
 
-不得手工修改受控账本、`review-annotations`、`review-loop`、`traceability` 或 `specs/`；对应写入必须经专用 Skill/crctl。`change-requests/{CR-ID}/_context.md` 是允许维护的工作流导航缓存：每次本 Agent run 收尾时，基于当前 CR、Pipeline 节点、产物路径、最近评审反馈/attempt、阻塞原因和恢复入口刷新或创建；内容只用于返工和 `/resume` 导航，canonical 事实优先，不能替代 `cr.md`、`review-loop.yml`、`traceability.yml`、评审记录或状态门禁。通过正常 `push-progress`/checkpoint 随 CR 一起提交，不创建单独的上下文提交；如果当前 run 在技术错误、中止或 workspace 不可写时无法刷新，报告原因，不伪造缓存。
+不得手工修改受控账本、`review-annotations`、`review-loop`、`traceability` 或 `specs/`；对应写入必须经专用 Skill/crctl。恢复或返工时直接读取 `crctl status {cr_id}`、`crctl next {cr_id}`、`cr.md`、`review-loop.yml` 与 canonical review annotations；不得创建或读取上下文副本，也不得让缓存替代状态、评审证据或门禁。
 
 ## 完成标准
 
