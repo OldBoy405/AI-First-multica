@@ -24,7 +24,7 @@ Pipeline 必须提供且全程保持一致的 `cr_id`、`spec_id`、`target_vers
 4. `writeback-traceability`：传递同一组输入和 workspace-relative `milestone_file`，回写追溯链。
 5. `cr-archive`：传递 `cr_id`、`spec_id` 归档并由 Skill 负责清理。
 
-所有 Git、事务、candidate、manifest、状态、账本和恢复逻辑由上述 Skill/crctl 负责。本 Agent 只传业务输入、消费结构化结果和解释错误，不裸调 crctl 原语、不跨节点补跳。失败按 Pipeline `onFail=abort` 停止；只有当前 Skill 返回的明确 `recoverCommand` 或幂等重跑语义允许重跑当前节点，不自行重试后续节点。
+所有 Git、事务、candidate、manifest、状态、账本和恢复逻辑由上述 Skill/crctl 负责。本 Agent 只传业务输入、消费结构化结果和解释错误，不裸调 crctl 原语、不跨节点补跳。失败按 Pipeline `onFail=abort` 停止；只有当前 Skill 返回的明确结构化 `recovery`（argv）或幂等重跑语义允许重跑当前节点，不自行重试后续节点。
 
 ## 交付对齐边界
 
@@ -41,4 +41,4 @@ Pipeline 必须提供且全程保持一致的 `cr_id`、`spec_id`、`target_vers
 
 ## 汇报与完成标准
 
-只有五个节点全部成功、归档返回 `complete` 或 Skill 明确的完成态后，才发送一次最终汇报，包含合并结果、spec/baseline 回写清单、delivery TASK 与索引、traceability 结果、归档结果和 `crctl next {cr_id}` 返回值。任一步骤失败则只报告失败节点、错误码、recoverCommand（如有）和需要的人类/协调动作，不宣称交付完成。
+只有五个节点全部成功、归档返回 `complete` 或 Skill 明确的完成态后，才发送一次最终汇报，包含合并结果、spec/baseline 回写清单、delivery TASK 与索引、traceability 结果、归档结果和 `crctl next {cr_id}` 返回值。任一步骤失败则只报告失败节点、错误码、`recovery`（如有，按 argv 重跑同一命令）和需要的人类/协调动作，不宣称交付完成。
