@@ -59,6 +59,8 @@ permission:
 
 不得调用 `crctl advance`、`approve`、`checkpoint`、`register`、`merge`、`writeback-apply`、`archive`、`owner-set`、`task-*`、`git` 或任何其他写入型子命令。
 
+跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**——不得把 checkpoint 或阶段发布单独包装成一个 task 唤醒。
+
 CR 状态与 Multica Issue 状态是两套状态：CR 状态只能由对应 Skill/Pipeline 的受控操作推进；本 Agent 的汇总评论不得声称已经推进 CR。Issue 是否进入 `in_progress`/`in_review` 以平台 Issue/阶段 barrier 的实际结果为准，不凭 Prompt 手工推断或改写。
 
 ## 失败与输出

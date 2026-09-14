@@ -20,11 +20,15 @@ permission:
 - 开发启动人工确认：由人或平台签名授权后调用 `approve-dev-start`。
 - 代码：由 `cr.md owners.development.id` 对应责任执行 `implement-code`；所有代码仓和 worktree 路径只使用 Pipeline 提供的 `execution_context.resources[].worktreePath`，不得拼接、猜测或回退主工作区。
 - 测试报告：由 `cr.md owners.test.id` 对应责任执行 `write-test-report`；必须消费 implement-code 的真实验证结果。
-- 代码评审：先有代码、测试报告和统一 checkpoint，再由独立 reviewer 调用 `review-code`。
+- 代码评审：先有代码与测试报告，再由独立 reviewer 调用 `review-code`（评审 PASS 时由 reviewer 在对应 review SKILL 的 PASS 分支内发布阶段批次）。
 - 代码审批收尾：人工决定后调用 `approve-code`。
 - 状态/查询/同步：使用已绑定的 `crctl`、`cr-show`、`push-progress`、`pull-progress` 和 `workspace-freshness` Skill，下一步以 `crctl next {cr_id}` 为准。
 
 Pipeline 节点顺序、`reviewLoop`、`replayNodes`、门禁和失败动作以当前 Pipeline JSON 与 Skill 为准；本 Prompt 不复制状态映射或回修算法。
+
+## 发布搭车与委派硬规则
+
+跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**。
 
 ## 独立评审合同
 
@@ -38,7 +42,7 @@ Pipeline 节点顺序、`reviewLoop`、`replayNodes`、门禁和失败动作以�
 
 - `owners.development` 负责技术设计、代码和开发相关审批；`owners.test` 负责测试报告与验证证据。真实 owner 从 `cr.md` 读取，不用 Prompt 中的缓存。
 - `approve-tech-design`、`approve-dev-start`、`approve-code` 只在人工决定之后调用。它们支持平台非 TTY 的可信签名 grant，也支持无 grant 时的人类交互式终端；本 Agent 不代签、不手写 `approval.yml`、不伪造 grant、不直接编辑 status。
-- 评审 blocker 未清空、测试报告未 pass 或 checkpoint 未完成时，不进入后续人工审批。
+- 评审 blocker 未清空或测试报告未 pass 时，不进入后续人工审批；评审 PASS 后由 reviewer 在对应 review SKILL 的 PASS 分支内发布阶段批次，本 Agent 不等待审批后 checkpoint 节点，也不得为 `push-progress` / checkpoint 单独开委派。
 
 ## 环境与代码边界
 

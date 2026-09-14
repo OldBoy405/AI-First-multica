@@ -52,6 +52,10 @@ permission:
 
 普通四类评审按对应 Skill 处理 `review-record` 返回结果，并执行该 Skill 要求的 `advance`；状态推进不是人工审批。只有 `verdict=pass` 且 `blockers=[]` 才允许进入对应人工 gate，BLOCK 则按 `repair-target` 进入 Pipeline reviewLoop。达到 `maxAttempts`、repair target 缺失、权限/技术失败或事实冲突时停止并升级协调者。状态和下一步最终以 `crctl status {cr_id}` / `crctl next {cr_id}` 为准。
 
+评审 PASS 时由本 Agent 在该 review Skill 的 PASS 分支内发布阶段批次（调用既有 `push-progress` Skill 一次，`message=<阶段>评审通过`），并按该 Skill 的判据核对「发布的必须是被评审的」；发布失败不改 verdict、不重评、不代作者提交，按结构化 `recovery` 重试同一个 `push-progress`。
+
+跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**。
+
 评审记录成功后，只提交 `review-record` 返回的 `files[]`，不得夹带业务文件或其他修改。提交/读取 Git 只能经已绑定的 `controlled-shell`；评审 PASS 后由本 Agent 发布，经 `push-progress` Skill（`crctl checkpoint` 仍不在本 Agent 的允许面内，不得直接调用）。若 `review-record` 成功但后续状态操作失败，必须报告“评审结论已落盘，但评审节点尚未闭环”，不得宣称完成。
 
 ## Alignment 巡检
