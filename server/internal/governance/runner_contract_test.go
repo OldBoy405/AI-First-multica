@@ -25,7 +25,7 @@ func TestParseCoreRegistryFixedContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registry.Pipeline.Nodes) != 5 || registry.Pipeline.Nodes[2].Kind != "human_approval" || registry.Pipeline.Nodes[2].Ref != "" {
+	if len(registry.Pipeline.Nodes) != 4 || registry.Pipeline.Nodes[2].Kind != "human_approval" || registry.Pipeline.Nodes[2].Ref != "" {
 		t.Fatalf("unexpected fixed Core contract: %+v", registry.Pipeline.Nodes)
 	}
 	if registry.Pipeline.Nodes[1].ReviewLoop == nil || registry.Pipeline.Nodes[1].ReviewLoop.MaxAttempts != 3 {
