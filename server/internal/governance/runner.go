@@ -110,10 +110,9 @@ func parseCoreRegistry() (*coreRegistry, error) {
 		{"skill", "review-tech-design"},
 		{"human_approval", ""},
 		{"skill", "approve-tech-design"},
-		{"skill", "push-progress"},
 	}
 	if len(r.Pipeline.Nodes) != len(expected) {
-		return nil, errCode(RunnerErrContractInvalid, "architecture Core must have five nodes")
+		return nil, errCode(RunnerErrContractInvalid, "architecture Core must have four nodes")
 	}
 	seenIDs := map[string]bool{}
 	for i, node := range r.Pipeline.Nodes {
@@ -269,7 +268,7 @@ func (r *Runner) Reconcile(ctx context.Context, workspaceID pgtype.UUID, crID st
 }
 
 func (r *Runner) reconcileLocked(ctx context.Context, run activeRun) error {
-	writeNode, reviewNode, humanNode, approveNode, pushNode := r.registry.Pipeline.Nodes[0], r.registry.Pipeline.Nodes[1], r.registry.Pipeline.Nodes[2], r.registry.Pipeline.Nodes[3], r.registry.Pipeline.Nodes[4]
+	writeNode, reviewNode, humanNode, approveNode := r.registry.Pipeline.Nodes[0], r.registry.Pipeline.Nodes[1], r.registry.Pipeline.Nodes[2], r.registry.Pipeline.Nodes[3]
 	maxAttempts := reviewNode.ReviewLoop.MaxAttempts
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -358,7 +357,7 @@ func (r *Runner) reconcileLocked(ctx context.Context, run activeRun) error {
 			if err := r.markNode(ctx, run.ID, reviewNode, attempt, "passed"); err != nil {
 				return err
 			}
-			return r.reconcileApprovalAndCheckpoint(ctx, run, humanNode, approveNode, pushNode)
+			return r.reconcileApproval(ctx, run, humanNode, approveNode)
 		default:
 			return r.waitEvidence(ctx, run.ID, reviewNode, attempt, RunnerErrReviewEvidenceIncomp)
 		}
@@ -366,7 +365,7 @@ func (r *Runner) reconcileLocked(ctx context.Context, run activeRun) error {
 	return r.failRun(ctx, run.ID, RunnerErrLoopExhausted)
 }
 
-func (r *Runner) reconcileApprovalAndCheckpoint(ctx context.Context, run activeRun, human, approve, push coreNode) error {
+func (r *Runner) reconcileApproval(ctx context.Context, run activeRun, human, approve coreNode) error {
 	humanID, err := r.ensureNodeRow(ctx, run.ID, human, 3, 1)
 	if err != nil {
 		return err
@@ -413,24 +412,9 @@ func (r *Runner) reconcileApprovalAndCheckpoint(ctx context.Context, run activeR
 	if err := r.markNode(ctx, run.ID, approve, 1, "passed"); err != nil {
 		return err
 	}
-
-	complete, stop, err = r.reconcileCheckpointTask(ctx, run, push)
-	if err != nil || stop {
-		return err
-	}
-	if !complete {
-		return nil
-	}
-	ok, err := r.checkpointProjected(ctx, run.ID, push.ID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return r.waitAuthority(ctx, run.ID, push, 1)
-	}
-	if err := r.markNode(ctx, run.ID, push, 1, "passed"); err != nil {
-		return err
-	}
+	// CR-2026-066 retires the post-approval checkpoint node: the stage-terminal
+	// publish now happens inside the review PASS branch of the reviewer's
+	// review-tech-design task, so approve-tech-design is the last Core node.
 	_, err = r.pool.Exec(ctx, `UPDATE pipeline_run SET status='completed', completed_at=now() WHERE id=$1 AND status IN ('running','waiting_approval')`, run.ID)
 	return err
 }
@@ -456,36 +440,6 @@ func (r *Runner) reconcileSkillTask(ctx context.Context, run activeRun, node cor
 		return true, false, nil
 	case "failed", "cancelled":
 		return false, true, r.failRun(ctx, run.ID, RunnerErrTaskFailed)
-	default:
-		return false, true, r.failRun(ctx, run.ID, RunnerErrAuthorityMismatch)
-	}
-}
-
-// Checkpoint is the one recoverable skill failure in Core. The CR is already
-// approved, so a terminal task creates one successor for the same node run;
-// the active-task partial unique index makes duplicate wakes idempotent.
-func (r *Runner) reconcileCheckpointTask(ctx context.Context, run activeRun, node coreNode) (complete, stop bool, err error) {
-	nodeRunID, err := r.ensureNodeRow(ctx, run.ID, node, 5, 1)
-	if err != nil {
-		return false, false, err
-	}
-	state, exists, err := r.latestTaskState(ctx, nodeRunID)
-	if err != nil {
-		return false, false, err
-	}
-	if !exists {
-		return false, true, r.enqueueNode(ctx, run, node, nodeRunID, 1)
-	}
-	switch state {
-	case "queued", "deferred", "dispatched", "waiting_local_directory", "running":
-		return false, true, nil
-	case "completed":
-		return true, false, nil
-	case "failed", "cancelled":
-		if err := r.setRunnerDetail(ctx, run.ID, node.ID, 1, map[string]any{"wait_reason": "checkpoint_retry", "previous_task_status": state}); err != nil {
-			return false, false, err
-		}
-		return false, true, r.enqueueNode(ctx, run, node, nodeRunID, 1)
 	default:
 		return false, true, r.failRun(ctx, run.ID, RunnerErrAuthorityMismatch)
 	}
@@ -686,17 +640,6 @@ func (r *Runner) deliveredTechApproval(ctx context.Context, workspaceID pgtype.U
 		return "", pgtype.UUID{}, false, nil
 	}
 	return decision, id, err == nil, err
-}
-
-func (r *Runner) checkpointProjected(ctx context.Context, runID pgtype.UUID, pushNodeID string) (bool, error) {
-	var ok bool
-	err := r.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-		  SELECT 1 FROM pipeline_node_run n JOIN pipeline_run r ON r.id=n.run_id
-		  JOIN cr_sync_event e ON e.cr_id=r.cr_id AND e.workspace_id=r.workspace_id AND e.event_kind='checkpoint' AND e.commit_sha<>'' AND e.occurred_at>=n.started_at
-		  WHERE n.run_id=$1 AND n.node_id=$2 AND n.attempt=1
-		)`, runID, pushNodeID).Scan(&ok)
-	return ok, err
 }
 
 func (r *Runner) crStatus(ctx context.Context, workspaceID pgtype.UUID, crID string) (string, error) {
