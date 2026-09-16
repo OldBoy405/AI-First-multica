@@ -21,7 +21,7 @@ import (
 // throwaway schema with the minimal shapes the migrations alter, so the
 // sequence can be applied and rolled back without touching the public
 // schema. The constraint name chat_idempotency_scope_type_check is
-// confirmed via pg_constraint before the DROP in 505 relies on it.
+// confirmed via pg_constraint before the DROP in 545 relies on it.
 
 // promotionMigrations returns the sorted 545–547 up (or down) file paths.
 func promotionMigrations(t *testing.T, dir, direction string) []string {
@@ -34,7 +34,7 @@ func promotionMigrations(t *testing.T, dir, direction string) []string {
 	for _, p := range paths {
 		base := filepath.Base(p)
 		version := strings.SplitN(base, "_", 2)[0]
-		if version >= "505" && version <= "507" {
+		if version >= "545" && version <= "547" {
 			picked = append(picked, p)
 		}
 	}
@@ -120,7 +120,7 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 		}
 	}
 
-	// Confirm the default constraint name before 505's DROP relies on it
+	// Confirm the default constraint name before 545's DROP relies on it
 	// (SDD §2.6 explicit verification requirement).
 	var conName string
 	if err := conn.QueryRow(ctx, `
@@ -144,11 +144,11 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 		execFileOnConn(t, conn.Conn(), p)
 	}
 
-	// 505: the new scope_type enum is accepted and the old set still is.
+	// 545: the new scope_type enum is accepted and the old set still is.
 	if _, err := conn.Exec(ctx, `
 		INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint, response_status)
 		VALUES (gen_random_uuid(), gen_random_uuid(), 'discussion_promotion', gen_random_uuid(), 'k1', 'f1', 0)`); err != nil {
-		t.Fatalf("insert discussion_promotion row after 505: %v", err)
+		t.Fatalf("insert discussion_promotion row after 545: %v", err)
 	}
 	var checkDef string
 	if err := conn.QueryRow(ctx, `
@@ -163,7 +163,7 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Errorf("constraint def = %q, want discussion_promotion in enum", checkDef)
 	}
 
-	// 506: second non-terminal requirement-authoring run for the same
+	// 546: second non-terminal requirement-authoring run for the same
 	// (workspace, issue) must raise a unique violation (23505); a run for a
 	// different issue or a NULL issue_id must not conflict.
 	wsID := "00000000-0000-0000-0000-000000000061"
@@ -188,7 +188,7 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Errorf("run for different issue must not conflict: %v", err)
 	}
 
-	// 507: the GIN index exists and is valid.
+	// 547: the GIN index exists and is valid.
 	assertPromotionIndexExists(t, conn.Conn(), schema, "issue", "idx_issue_context_refs_gin", true)
 
 	// Down direction: 545.down is data-dependent — it must fail while a
@@ -209,7 +209,7 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Error("discussion_promotion insert after 545.down succeeded, want CHECK failure")
 	}
 
-	// 506/507 downs: plain index drops.
+	// 546/547 downs: plain index drops.
 	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "546_pipeline_run_promotion_active_unique.down.sql"))); err != nil {
 		t.Fatalf("546.down: %v", err)
 	}

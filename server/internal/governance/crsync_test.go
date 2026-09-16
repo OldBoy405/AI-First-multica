@@ -59,6 +59,7 @@ func TestMain(m *testing.M) {
 
 func cleanup(ctx context.Context, pool *pgxpool.Pool) {
 	_, _ = pool.Exec(ctx, `DELETE FROM cr_sync_event WHERE cr_id LIKE 'CR-9%'`)
+	_, _ = pool.Exec(ctx, `DELETE FROM agent_task_queue WHERE cr_id LIKE 'CR-9%'`)
 	_, _ = pool.Exec(ctx, `DELETE FROM cr WHERE workspace_id = $1::uuid`, testWorkspaceID)
 	_, _ = pool.Exec(ctx, `DELETE FROM workspace WHERE slug = 'governance-tests'`)
 }
@@ -74,6 +75,11 @@ func resetCR(t *testing.T, crID string) {
 	// persistent (non-ephemeral) DB hits the first run's stale grant, signed
 	// by a key this run's public key can no longer verify against.
 	_, _ = testPool.Exec(context.Background(), `DELETE FROM approval_record WHERE cr_id = $1`, crID)
+	// 6th-sync re-verification (2026-09-16): continuation tasks are counted
+	// per cr_id and countContinuationTasks asserts an exact total. On a
+	// persistent dev DB a previous run's rows would otherwise inflate it
+	// into a false failure (four stale runs had accumulated).
+	_, _ = testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE cr_id = $1`, crID)
 }
 
 func postEvents(t *testing.T, svc *SyncService, workspaceID string, evs []OutboxEvent) crEventsResponse {
