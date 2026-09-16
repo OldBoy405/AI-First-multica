@@ -421,10 +421,18 @@ func (s *TaskService) EnqueuePipelineTask(ctx context.Context, spec PipelineTask
 		ID_2:              spec.SourceTaskID,
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The partial unique index also returns no row for an idempotent
-			// concurrent enqueue loser. Re-read that active task before treating
-			// the no-row result as an attribution guard failure.
+		// An idempotent concurrent enqueue loser has to be indistinguishable from
+		// a successful enqueue. Two shapes reach us, in this order of likelihood:
+		//
+		//   - pgx.ErrNoRows: the pipeline guard (WHERE ... NOT EXISTS) matched an
+		//     existing active task, so the INSERT selected nothing.
+		//   - 23505 on upstream's idx_one_pending_task_per_issue_agent_thread
+		//     (migration 452): the guard passed but the row-level unique index
+		//     rejected the second insert, because both racers sampled the same
+		//     issue/agent/thread before either committed.
+		//
+		// Both must re-read the winner before being reported as failures.
+		if errors.Is(err, pgx.ErrNoRows) || isUniqueViolation(err) {
 			existing, readErr := s.Queries.GetActivePipelineTask(ctx, spec.NodeRunID)
 			if readErr == nil {
 				return existing, nil
@@ -432,7 +440,9 @@ func (s *TaskService) EnqueuePipelineTask(ctx context.Context, spec PipelineTask
 			if !errors.Is(readErr, pgx.ErrNoRows) {
 				return db.AgentTaskQueue{}, fmt.Errorf("read active pipeline task: %w", readErr)
 			}
-			return db.AgentTaskQueue{}, ErrRunnerAttributionInvalid
+			if errors.Is(err, pgx.ErrNoRows) {
+				return db.AgentTaskQueue{}, ErrRunnerAttributionInvalid
+			}
 		}
 		return db.AgentTaskQueue{}, fmt.Errorf("create pipeline task: %w", err)
 	}
