@@ -3,6 +3,7 @@ dist
 *.log
 .DS_Store
 .envrc
+.workbuddy
 
 # build outputs
 .turbo
