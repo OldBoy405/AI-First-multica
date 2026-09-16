@@ -11,7 +11,8 @@
     "usage": "Statistiques",
     "runtimes": "Runtimes",
     "skills": "Skills",
-    "settings": "Paramètres"
+    "settings": "Paramètres",
+    "maturity": "AI Maturity"
   },
   "tab": {
     "issue": "Tâche",

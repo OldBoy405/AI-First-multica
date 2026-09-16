@@ -76,7 +76,12 @@
     "quick_create_failed": "Échec de la création avec un agent",
     "quick_create_unconfirmed": "Création avec un agent non confirmée",
     "autopilot_paused": "Automatisation en pause",
-    "autopilot_quota_exceeded": "Limite d'exécutions d'automatisation atteinte"
+    "autopilot_quota_exceeded": "Limite d'exécutions d'automatisation atteinte",
+    "presenter_requested": "Presenter requested",
+    "presenter_approved": "Presenter approved",
+    "presenter_rejected": "Presenter rejected",
+    "presenter_transferred": "Presenter transferred",
+    "presenter_revoked": "Presenter revoked"
   },
   "labels": {
     "set_status_to": "Statut défini sur",
@@ -110,5 +115,10 @@
     "archive_completed_failed": "Échec de l'archivage des éléments terminés",
     "unarchive_failed": "Échec du désarchivage",
     "archived_load_failed": "Échec du chargement des notifications archivées"
+  },
+  "container_jump": {
+    "team_agent": "This message is part of the project's Team Agent chat.",
+    "discussion": "This message is part of the project's Discussion.",
+    "cta": "Go to project chat"
   }
 }

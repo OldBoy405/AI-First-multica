@@ -80,7 +80,9 @@
     "no_issues_yet": "Aucune tâche pour l'instant",
     "toast_link_copied": "Lien copié",
     "toast_project_deleted": "Projet supprimé",
-    "toast_move_issue_failed": "Échec du déplacement de la tâche"
+    "toast_move_issue_failed": "Échec du déplacement de la tâche",
+    "queue_depth": "{{depth}}/{{limit}} in agent queue",
+    "queue_full_hint": "Queue full — agent is busy, try again later"
   },
   "resources": {
     "section_header": "Ressources",
@@ -168,5 +170,200 @@
     "direction_desc": "Décroissant",
     "section_columns": "Colonnes",
     "view": "Vue"
+  },
+  "chat": {
+    "surface_issues": "Issues",
+    "surface_chat": "Chat",
+    "tabs": {
+      "team_agent": "Team Agent",
+      "private_ask": "Private Ask",
+      "discussion": "Discussion"
+    },
+    "tooltips": {
+      "team_agent": "Chat with the project's shared Team Agent",
+      "private_ask": "Ask an agent privately, just for you",
+      "discussion": "Discuss with your teammates"
+    },
+    "greetings": {
+      "team_agent": "Chat with your Team Agent about this project.",
+      "private_ask": "Ask a private question about this project.",
+      "discussion": "Start a discussion with your team."
+    },
+    "tutorials": {
+      "team_agent": "The Team Agent works across this project and is visible to everyone on the team.",
+      "private_ask": "Private Ask is a one-on-one chat only you can see.",
+      "discussion": "Discussion is a shared thread for the whole team."
+    },
+    "tutorial_dismiss": "Dismiss",
+    "coming_soon": "Coming in a later version.",
+    "loading": "Loading…",
+    "unconfigured_admin_title": "No Team Agent configured yet.",
+    "unconfigured_admin_cta": "Configure Team Agent",
+    "unconfigured_member": "Ask the project Owner to configure a Team Agent.",
+    "team_agent_setup_failed": "Failed to set the Team Agent, please try again",
+    "discussion": {
+      "sub": "Send a message to start discussing.",
+      "composer_placeholder": "Message the team…",
+      "unavailable_sub": "The shared session could not be resolved. You can retry, or keep reading older messages.",
+      "config_unavailable": "This session's config can no longer be changed.",
+      "retry": "Retry",
+      "unavailable_title": "Discussion is unavailable on this workspace",
+      "send_conflict": "The draft attachment is already bound elsewhere. Please re-upload and retry.",
+      "send_failed": "Failed to send the message. Your draft is kept.",
+      "legacy_section_title": "Earlier messages (read-only)",
+      "assistant_label": "A",
+      "unknown_member": "?"
+    },
+    "stream": {
+      "no_earlier": "No earlier messages",
+      "composer_placeholder": "Message Team Agent…",
+      "send": "Send",
+      "send_failed": "Failed to send, please try again",
+      "queue_full_title": "Agent is busy, try again later",
+      "queue_full_depth": "{{depth}}/{{limit}} in queue",
+      "status_running": "Running",
+      "status_done": "Done",
+      "status_error": "Failed",
+      "status_interrupted": "Interrupted",
+      "model_label": "Model",
+      "thinking_label": "Thinking",
+      "runtime_guide": "Start a local Agent in Settings first",
+      "model_update_failed": "Failed to update the model, please try again",
+      "stop": "Stop",
+      "cancel_already_finished": "This task has already finished and can't be cancelled",
+      "agent_requests_only": "Agent requests only",
+      "no_text_reply": "(No text reply)",
+      "withdrawn": "Withdrawn",
+      "copy": "Copy",
+      "copied": "Copied"
+    },
+    "queue_bar": {
+      "count_one": "{{count}} task queued",
+      "count_other": "{{count}} tasks queued",
+      "cancel": "Clear conversation",
+      "status_queued": "Queued",
+      "status_dispatched": "Dispatched",
+      "system_task": "System task",
+      "no_summary": "(No message summary)",
+      "cancel_already_finished": "This task has already finished and can't be cancelled"
+    },
+    "private": {
+      "needs_team_agent": "Private Ask uses the project's Team Agent. Configure one in the Team Agent tab first.",
+      "load_failed": "Failed to load your private session. Please retry.",
+      "empty_hint": "Ask anything about this project — only you can see this conversation, and the agent cannot modify project files.",
+      "composer_placeholder": "Ask privately…",
+      "stop": "Stop",
+      "stop_failed": "Failed to stop. Please retry.",
+      "model_follows_team_agent": "Model follows the Team Agent configuration"
+    },
+    "config_unavailable": "Chat configuration is unavailable. Retry to reload it.",
+    "config_retry": "Retry",
+    "presenter": {
+      "label": "Presenter",
+      "current": "Presenter: {{name}}",
+      "default": "Owner/Admin",
+      "open_panel": "Presenter controls",
+      "locked_title": "{{name}} is presenting — request access to send",
+      "locked_title_default": "Request access to send",
+      "request_cta": "Request access",
+      "requested": "Requested"
+    },
+    "control": {
+      "title": "Presenter controls",
+      "presenter_badge": "Presenter",
+      "pending_badge": "Requested",
+      "request_cta": "Request Agent access",
+      "requested": "Requested",
+      "approve": "Approve",
+      "reject": "Reject",
+      "revoke": "Revoke",
+      "transfer": "Transfer",
+      "transfer_to": "Transfer to…",
+      "release": "Release control",
+      "action_failed": "Action failed, please try again"
+    },
+    "notices": {
+      "presenter_requested": "{{user}} requested presenter access",
+      "presenter_approved": "{{approver}} approved {{user}}'s request",
+      "presenter_rejected": "{{approver}} rejected {{user}}'s request",
+      "presenter_transferred": "{{from}} transferred presenter control to {{to}}",
+      "presenter_revoked": "{{approver}} revoked {{user}}'s presenter access",
+      "presenter_released": "{{user}} released presenter control"
+    },
+    "merged_forward": {
+      "select_entry": "Select",
+      "selected_count": "{{count}} selected",
+      "merge_cta": "Forward to Team Agent",
+      "preview_title": "Forward to Team Agent",
+      "trigger_message": "Trigger message",
+      "chat_history": "Conversation history",
+      "messages_in_conversation": "{{count}} messages",
+      "register_cr_label": "Register as a change request (CR)",
+      "confirm": "Forward",
+      "cancel": "Cancel",
+      "success": "Forwarded to the Team Agent",
+      "send_failed": "Forward failed. Your selection is kept — try again.",
+      "queue_full_error": "The Team Agent queue is full ({{depth}}/{{limit}}). Your selection is kept — try again later.",
+      "presenter_locked_error": "The presenter holds single-writer control. Your selection is kept — try again once it is released."
+    },
+    "promotion": {
+      "issue_cta": "Turn into work Issue",
+      "cr_cta": "Upgrade to CR",
+      "success_label": "Created issue:",
+      "failed": "Promotion failed. Your selection is kept — try again.",
+      "selection_error": "Invalid selection. Your selection is kept — adjust and try again.",
+      "forbidden_error": "You are not allowed to promote this discussion.",
+      "conflict_error": "This request was already submitted with different content. Your selection is kept — refresh the selection and try again."
+    },
+    "dc": {
+      "coordinator_label": "Discussion Coordinator",
+      "coordinator_pick_cta": "Choose coordinator",
+      "coordinator_bound": "Coordinator: {{name}}",
+      "coordinator_setup_failed": "Failed to set the Discussion Coordinator",
+      "queue_full_notice": "The Team Agent queue is full ({{depth}}/{{limit}}). The task was not enqueued."
+    }
+  },
+  "governance": {
+    "digest_label": "digest: {{digest}}",
+    "status": {
+      "drafting": "Drafting",
+      "requirement-reviewing": "Requirement Review",
+      "requirement-approved": "Requirement Approved",
+      "tech-designing": "Tech Design",
+      "tech-design-review-pending": "Design Review Pending",
+      "tech-design-reviewed": "Design Reviewed",
+      "task-breakdown": "Task Breakdown",
+      "developing": "Developing",
+      "code-reviewing": "Code Review",
+      "code-approved": "Code Approved",
+      "merging": "Merging",
+      "writing-back": "Writing Back",
+      "archived": "Archived",
+      "rejected": "Rejected",
+      "withdrawn": "Withdrawn"
+    },
+    "multiple_active": "{{count}} active CRs",
+    "needs_reconcile": "Reconciling…",
+    "stage": {
+      "requirement": "Requirement",
+      "tech-design": "Tech Design",
+      "dev-start": "Dev Start",
+      "code": "Code"
+    },
+    "approve": "Approve",
+    "reject": "Reject",
+    "reject_reason_placeholder": "Reason for rejection…",
+    "reject_confirm": "Confirm reject",
+    "cancel": "Cancel",
+    "waiting_for_approval": "Waiting for {{stage}} approval",
+    "pending_advance": "Approved — waiting to advance",
+    "evidence_label": "Evidence",
+    "evidence_drift": "Evidence changed since this card loaded — reload and re-review",
+    "forbidden_approver": "You don't have permission to approve this",
+    "submit_failed": "Failed to submit, please try again",
+    "attempt_label": "Attempt {{attempt}}/3",
+    "review_blocked": "Review blocked",
+    "review_passed": "Review passed",
+    "node_cancelled": "Cancelled"
   }
 }
