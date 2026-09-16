@@ -1,0 +1,103 @@
+interface ChatInputProps {
+  onSend: (
+    content: string,
+    attachmentIds: string[] | undefined,
+    commitInput: (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
+    draftAttachments: Attachment[],
+  ) => void | boolean | Promise<void | boolean>;
+  restoreDraftRequest?: {
+    id: string;
+    content: string;
+    attachments?: Attachment[];
+    /**
+     * Draft slot this restore targets. When set, the restore only fires while
+     * the user is viewing that session — a fire-and-forget send that later
+     * fails restores into the session it was sent from, not whatever the user
+     * navigated to. Omit to restore into the current draft (legacy behavior).
+     */
+    sessionId?: string;
+  } | null;
+  /** Explicit replacement requested by a conversation-starter button. Unlike a
+   * synchronized draft write, this may intentionally replace dirty editor
+   * content, so ChatInput adopts it after cancelling any pending debounce. */
+  conversationStarterRequest?: {
+    id: number;
+    content: string;
+  } | null;
+  /** Fired after the request has replaced both the stored and live draft. */
+  onConversationStarterApplied?: () => void;
+  /**
+   * Fired when — and only when — the restore's content/attachments were written
+   * into the draft. A restore the composer cannot apply yet (the user has work
+   * in progress) is NOT reported: it stays pending and lands as soon as the
+   * draft is clear. Owners holding a durable server-side restore (#5219) can
+   * therefore treat this as the single terminal transition and consume the row.
+   */
+  onRestoreDraftApplied?: () => void;
+  /** True when uploads are available for this composer (an agent is selected).
+   *  The transport itself is the coordinated-upload engine (MUL-5181 L2) —
+   *  the owner only says whether the affordance exists. When false,
+   *  paste/drag/button still type into the editor but no upload fires. */
+  uploadEnabled?: boolean;
+  onStop?: () => void;
+  isRunning?: boolean;
+  /** Enabled only after the server explicitly advertises follow-up queues. */
+  allowSubmitWhileRunning?: boolean;
+  disabled?: boolean;
+  /** True when the user has no agent available — disables the editor and
+   *  surfaces a distinct placeholder. Kept separate from `disabled` so
+   *  archived-session copy stays untouched. */
+  noAgent?: boolean;
+  /** True when `disabled` is because the bound agent was archived (retired),
+   *  as opposed to the session itself being archived — swaps the placeholder
+   *  copy so the read-only reason reads accurately. */
+  agentArchived?: boolean;
+  /** True when `disabled` is because the caller may no longer INVOKE the bound
+   *  agent (flipped to personal, ownership moved, dropped from the allow-list).
+   *  Distinct from `noAgent`: an agent IS bound and its transcript is readable,
+   *  the caller just cannot run it (MUL-6380). Takes precedence over `noAgent`
+   *  in the placeholder — when the only agent in the workspace is the revoked
+   *  one, both are true and "create an agent" would be the wrong instruction. */
+  agentAccessRevoked?: boolean;
+  agentRuntimeRequired?: boolean;
+  /** Name of the currently selected agent, used in the placeholder. */
+  agentName?: string;
+  /** Rendered at the bottom-left of the input bar — typically the agent picker. */
+  leftAdornment?: ReactNode;
+  /** Chat @ suggestions: current/recent issue/project entries. */
+  contextItems?: MentionItem[];
+  /** Restrict @ suggestions to these item types (CR-2026-012 DD-11) — e.g.
+   *  ["member"] on the project chat panes. Undefined keeps the full mixed
+   *  list (global chat default). */
+  mentionItemTypes?: MentionItem["type"][];
+  /** Optional project context for the draft or current chat session. */
+  projects?: Project[];
+  projectId?: string | null;
+  onProjectChange?: (projectId: string | null) => void;
+  isProjectUpdating?: boolean;
+  /** True when the active agent's daemon is too old to inject the project
+   *  description into the run brief. Soft signal: selection stays enabled,
+   *  the composer only surfaces a warning next to the chip and in the
+   *  project submenu. */
+  projectContextUnsupported?: boolean;
+  /** Monotonic nonce bumped by the owner whenever the compose box should grab
+   *  keyboard focus — currently on "new chat" so the user can type right away.
+   *  0 (the initial value) is inert, so a plain deep-link open never steals
+   *  focus; only an explicit bump does. */
+  focusRequest?: number;
+  /**
+   * Optional storage/identity isolation for embedded chat surfaces that use
+   * the shared composer without participating in the global chat selection
+   * store (for example Agent Builder).
+   */
+  draftKeyOverride?: string;
+  editorKeyOverride?: string;
+  /** Fired alongside `onRestoreDraftApplied` once a restore's content was
+   *  written into the draft. Fork-era name kept so pre-split call sites and
+   *  tests (CR-2026-012) keep working unchanged. */
+  onRestoreDraftConsumed?: () => void;
+  /** Legacy owner-provided upload transport (CR-2026-012). When set it
+   *  replaces the coordinated-upload engine's transport for the editor; the
+   *  affordance gate still comes from `uploadEnabled`. */
+  onUploadFile?: (file: File) => Promise<UploadResult | null>;
+}
