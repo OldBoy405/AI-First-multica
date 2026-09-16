@@ -141,7 +141,7 @@ export function CrStatusBadge({
           {sorted.map((cr) => (
             <div
               key={cr.cr_id}
-              className="flex items-center justify-between gap-2 rounded px-1 py-1 text-sm"
+              className="flex items-center justify-between gap-2 rounded-sm px-1 py-1 text-sm"
             >
               <span className="truncate text-muted-foreground">{cr.cr_id}</span>
               <StatusBadge status={cr.status} />
