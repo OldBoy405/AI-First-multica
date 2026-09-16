@@ -561,6 +561,11 @@ func TestRepoCheckoutForwardsFresh(t *testing.T) {
 	cache := &recordingRepoCache{lookupPath: "/cache/org/repo.git"}
 	workDir := t.TempDir()
 	d := newRepoCheckoutTestDaemon(t, workspaceID, repoURL, workDir, cache)
+	// AIFIRST merge note: fork checkout additionally requires the daemon-issued
+	// task auth token (CR-2026-008), and this upstream test sends no body
+	// auth_token, so the guard reads the Authorization header instead. Seed the
+	// active task with the value authorizedRepoCheckoutRequest sends.
+	d.activeTaskAuth.Store("task-1", activeTaskAuth{authToken: "mat_repo_checkout_test"})
 
 	for _, tc := range []struct {
 		body string
