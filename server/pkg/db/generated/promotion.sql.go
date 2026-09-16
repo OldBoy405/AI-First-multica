@@ -85,7 +85,7 @@ func (q *Queries) FindActiveRequirementRunForIssue(ctx context.Context, arg Find
 
 const findPromotionDuplicateIssue = `-- name: FindPromotionDuplicateIssue :one
 
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state FROM issue
 WHERE workspace_id = $1
   AND context_refs @> jsonb_build_array(jsonb_build_object('dedupe_key', $2::text))
 LIMIT 1
@@ -137,6 +137,7 @@ func (q *Queries) FindPromotionDuplicateIssue(ctx context.Context, arg FindPromo
 		&i.Properties,
 		&i.Revision,
 		&i.LastActivityAt,
+		&i.TriageState,
 	)
 	return i, err
 }

@@ -35,6 +35,7 @@ func (r *sliceRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 func (r *sliceRows) Values() ([]any, error)                       { return nil, nil }
 func (r *sliceRows) RawValues() [][]byte                          { return nil }
 func (r *sliceRows) Conn() *pgx.Conn                              { return nil }
+func (r *sliceRows) TypeMap() *pgtype.Map                         { return nil }
 
 func (r *sliceRows) Next() bool {
 	if r.i >= len(r.rows) {
@@ -110,7 +111,7 @@ func skillRow(id pgtype.UUID, name, description, content string) []any {
 		id, testUUID(0xF0), name, description, content,
 		[]byte(nil), pgtype.UUID{}, pgtype.Timestamptz{}, pgtype.Timestamptz{}, pgtype.UUID{},
 		// ListAgentSkills also selects the fork's skill-market columns
-		// (465_skill_visibility): visibility, version, owner_actor.
+		// (505_skill_visibility): visibility, version, owner_actor.
 		"private", "0.1.0", pgtype.Text{},
 	}
 }

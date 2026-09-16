@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -114,10 +113,6 @@ func (fx dcE2EFixture) chatIssueID(t *testing.T) string {
 	return id
 }
 
-// noEscalationDelay matches the enqueue dispatch signature for tests that
-// never exercise the deferred-fallback branch.
-func noEscalationDelay() time.Duration { return 0 }
-
 // TestDiscussionCoordinator_SilentBoundaryAndActivationChain is the AC-1 +
 // AC-2 + AC-3 evidence chain:
 //
@@ -163,7 +158,7 @@ func TestDiscussionCoordinator_SilentBoundaryAndActivationChain(t *testing.T) {
 	triggerCommentUUID := util.MustParseUUID(activationID)
 	// Enqueue through the real service path (the same call the comment handler
 	// makes for the activation class) so the task carries its trigger comment.
-	if _, err := testHandler.TaskService.EnqueueTaskForMention(ctx, issue, triggers[0].Agent.ID, triggerCommentUUID); err != nil {
+	if _, err := testHandler.TaskService.EnqueueTaskForMention(ctx, issue, triggers[0].Agent.ID, triggerCommentUUID, service.OriginNamed); err != nil {
 		t.Fatalf("AC-2 activation enqueue: %v", err)
 	}
 
@@ -244,7 +239,9 @@ func TestDiscussionCoordinator_SilentBoundaryAndActivationChain(t *testing.T) {
 	if len(routeTriggers) != 1 {
 		t.Fatalf("AC-3: expected one routing trigger, got %+v", routeTriggers)
 	}
-	testHandler.enqueueSingleCommentTrigger(ctx, issue, util.MustParseUUID(routeCommentID), routeTriggers[0], noEscalationDelay)
+	// The deferred-fallback delay parameter was retired upstream (#8174), so
+	// the dispatch signature no longer carries it.
+	testHandler.enqueueSingleCommentTrigger(ctx, issue, util.MustParseUUID(routeCommentID), routeTriggers[0])
 
 	chatID := fx.chatIssueID(t)
 	var routeOnChat string

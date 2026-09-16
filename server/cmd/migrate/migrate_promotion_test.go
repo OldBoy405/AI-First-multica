@@ -17,13 +17,13 @@ import (
 )
 
 // AIFIRST: CR-2026-061 TASK-01 (SDD §2.2/§2.5/§2.6/§13, AC-10): up/down
-// round-trip for the promotion migrations (505–507). Runs against a
+// round-trip for the promotion migrations (545–547). Runs against a
 // throwaway schema with the minimal shapes the migrations alter, so the
 // sequence can be applied and rolled back without touching the public
 // schema. The constraint name chat_idempotency_scope_type_check is
 // confirmed via pg_constraint before the DROP in 505 relies on it.
 
-// promotionMigrations returns the sorted 505–507 up (or down) file paths.
+// promotionMigrations returns the sorted 545–547 up (or down) file paths.
 func promotionMigrations(t *testing.T, dir, direction string) []string {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(dir, "*_*."+direction+".sql"))
@@ -191,30 +191,30 @@ func TestPromotionMigrationsUpDownRoundtrip(t *testing.T) {
 	// 507: the GIN index exists and is valid.
 	assertPromotionIndexExists(t, conn.Conn(), schema, "issue", "idx_issue_context_refs_gin", true)
 
-	// Down direction: 505.down is data-dependent — it must fail while a
+	// Down direction: 545.down is data-dependent — it must fail while a
 	// discussion_promotion row remains and succeed after the row is gone.
-	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "505_chat_idempotency_promotion_scope.down.sql"))); err == nil {
-		t.Error("505.down succeeded with discussion_promotion rows present, want failure")
+	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "545_chat_idempotency_promotion_scope.down.sql"))); err == nil {
+		t.Error("545.down succeeded with discussion_promotion rows present, want failure")
 	}
 	if _, err := conn.Exec(ctx, "DELETE FROM chat_idempotency WHERE scope_type = 'discussion_promotion'"); err != nil {
 		t.Fatalf("delete promotion rows: %v", err)
 	}
-	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "505_chat_idempotency_promotion_scope.down.sql"))); err != nil {
-		t.Fatalf("505.down after cleanup: %v", err)
+	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "545_chat_idempotency_promotion_scope.down.sql"))); err != nil {
+		t.Fatalf("545.down after cleanup: %v", err)
 	}
 	// Old enum restored: discussion_promotion is rejected again.
 	if _, err := conn.Exec(ctx, `
 		INSERT INTO chat_idempotency (workspace_id, user_id, scope_type, scope_id, key, fingerprint, response_status)
 		VALUES (gen_random_uuid(), gen_random_uuid(), 'discussion_promotion', gen_random_uuid(), 'k2', 'f2', 0)`); err == nil {
-		t.Error("discussion_promotion insert after 505.down succeeded, want CHECK failure")
+		t.Error("discussion_promotion insert after 545.down succeeded, want CHECK failure")
 	}
 
 	// 506/507 downs: plain index drops.
-	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "506_pipeline_run_promotion_active_unique.down.sql"))); err != nil {
-		t.Fatalf("506.down: %v", err)
+	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "546_pipeline_run_promotion_active_unique.down.sql"))); err != nil {
+		t.Fatalf("546.down: %v", err)
 	}
-	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "507_issue_context_refs_gin.down.sql"))); err != nil {
-		t.Fatalf("507.down: %v", err)
+	if _, err := conn.Exec(ctx, execFileBody(t, filepath.Join(migrationsDir, "547_issue_context_refs_gin.down.sql"))); err != nil {
+		t.Fatalf("547.down: %v", err)
 	}
 	assertPromotionIndexExists(t, conn.Conn(), schema, "pipeline_run", "idx_pipeline_run_promotion_active_issue", false)
 	assertPromotionIndexExists(t, conn.Conn(), schema, "issue", "idx_issue_context_refs_gin", false)

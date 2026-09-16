@@ -13,9 +13,9 @@ import (
 
 // TestMaturityIndexesServeTheirQueries pins the maturity read indexes to the
 // queries they were built for (SDD §2.1, TASK-02 acceptance 3): the report
-// history keyset must hit idx_atq_maturity_report_history (migration 464) —
-// never the active-task index from migration 454 — and the scope/date trend
-// read must hit maturity_snapshot_scope_date_idx (migration 463).
+// history keyset must hit idx_atq_maturity_report_history (migration 504) —
+// never the active-task index from migration 494 — and the scope/date trend
+// read must hit maturity_snapshot_scope_date_idx (migration 503).
 func TestMaturityIndexesServeTheirQueries(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

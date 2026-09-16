@@ -15,7 +15,7 @@ import (
 
 // AIFIRST: CR-2026-059 TASK-01 (SDD §2.1–§2.6 / §4.9, AC-19): up/down
 // round-trip for the Discussion shared-session and idempotency migrations.
-// That chain is 495–504 today; it was 481–490 when this test landed, and the
+// That chain is 535–544 today; it was 481–490 when this test landed, and the
 // fork renumbers migrations at each upstream sync (CUSTOM.md), so the files
 // are named explicitly below rather than selected by version range. Runs
 // against a throwaway schema that pre-creates the minimal
@@ -27,20 +27,20 @@ import (
 // application order. A version-range selector used to stand in for it and
 // silently re-pointed at whatever migrations later occupied 481–490 — by the
 // 2026-09 renumber that was the approval_record chain, so the test tried to
-// apply 481_approval_workspace_approve_uniq.up.sql to a fixture that has no
+// apply 521_approval_workspace_approve_uniq.up.sql to a fixture that has no
 // approval_record and failed before it could assert anything. Growing or
 // shrinking this coverage is meant to be a deliberate edit here.
 var discussionMigrationFiles = []string{
-	"495_chat_session_agent_nullable_set_null",
-	"496_chat_session_kind",
-	"497_chat_session_private_active_unique",
-	"498_drop_chat_session_project_creator_active_unique",
-	"499_chat_session_project_shared_active_unique",
-	"500_chat_message_author",
-	"501_chat_idempotency",
-	"502_chat_idempotency_scope_key_unique",
-	"503_chat_idempotency_pkey",
-	"504_idx_chat_idempotency_created",
+	"535_chat_session_agent_nullable_set_null",
+	"536_chat_session_kind",
+	"537_chat_session_private_active_unique",
+	"538_drop_chat_session_project_creator_active_unique",
+	"539_chat_session_project_shared_active_unique",
+	"540_chat_message_author",
+	"541_chat_idempotency",
+	"542_chat_idempotency_scope_key_unique",
+	"543_chat_idempotency_pkey",
+	"544_idx_chat_idempotency_created",
 }
 
 // discussionMigrations returns the covered up (or down) file paths, down in
@@ -125,7 +125,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 			t.Fatalf("prereq %s: %v", stmt, err)
 		}
 	}
-	// One populated row: 495.down's SET NOT NULL must succeed on it, and
+	// One populated row: 535.down's SET NOT NULL must succeed on it, and
 	// 496 keeps it 'private' via the column default.
 	agentID := "00000000-0000-0000-0000-00000000000a"
 	if _, err := conn.Exec(ctx, "INSERT INTO agent (id) VALUES ($1)", agentID); err != nil {
@@ -195,7 +195,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 			t.Errorf("index %s present = %d, want 1", idx, count)
 		}
 	}
-	// Old wide index dropped by 498.up.
+	// Old wide index dropped by 538.up.
 	var oldWide int
 	if err := conn.QueryRow(ctx, `
 		SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -204,7 +204,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Fatalf("old wide index: %v", err)
 	}
 	if oldWide != 0 {
-		t.Errorf("old wide index still present after 498.up (%d)", oldWide)
+		t.Errorf("old wide index still present after 538.up (%d)", oldWide)
 	}
 	// kind column with the private default for the pre-existing row.
 	var kind string
@@ -235,7 +235,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 		execFileOnConn(t, conn.Conn(), p)
 	}
 
-	// Post-rollback: 495.down re-imposes NOT NULL + CASCADE.
+	// Post-rollback: 535.down re-imposes NOT NULL + CASCADE.
 	if err := conn.QueryRow(ctx, `
 		SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c
 		JOIN pg_class t ON t.oid = c.conrelid
@@ -256,8 +256,8 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 	if isNullable != "NO" {
 		t.Errorf("agent_id is_nullable after down = %s, want NO", isNullable)
 	}
-	// 498.down restored the old wide index; 497.down dropped the new one;
-	// 496.down dropped kind; 500.down dropped author columns; 501.down
+	// 538.down restored the old wide index; 537.down dropped the new one;
+	// 536.down dropped kind; 540.down dropped author columns; 541.down
 	// dropped the idempotency table.
 	var restored int
 	if err := conn.QueryRow(ctx, `
@@ -286,7 +286,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Fatalf("idempotency table: %v", err)
 	}
 	if idempotencyTable != 0 {
-		t.Errorf("chat_idempotency still present after 501.down (%d)", idempotencyTable)
+		t.Errorf("chat_idempotency still present after 541.down (%d)", idempotencyTable)
 	}
 	var kindCols int
 	if err := conn.QueryRow(ctx, `
@@ -295,7 +295,7 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Fatalf("kind col: %v", err)
 	}
 	if kindCols != 0 {
-		t.Errorf("kind column still present after 496.down (%d)", kindCols)
+		t.Errorf("kind column still present after 536.down (%d)", kindCols)
 	}
 	if err := conn.QueryRow(ctx, `
 		SELECT count(*) FROM information_schema.columns
@@ -304,6 +304,6 @@ func TestDiscussionSharedSessionMigrationsUpDownRoundtrip(t *testing.T) {
 		t.Fatalf("author cols after down: %v", err)
 	}
 	if authorCols != 0 {
-		t.Errorf("author columns still present after 500.down (%d)", authorCols)
+		t.Errorf("author columns still present after 540.down (%d)", authorCols)
 	}
 }

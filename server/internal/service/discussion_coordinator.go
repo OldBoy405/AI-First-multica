@@ -120,9 +120,17 @@ func (s *TaskService) RouteDiscussionToTeamAgent(ctx context.Context, chatIssue 
 	// The inner capacity guard can still trip on a concurrent enqueue (same
 	// race documented on SendProjectChatMessage); *ErrProjectQueueFull is
 	// returned verbatim.
-	task, err := s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, chatIssue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", false, originatorID, pgtype.UUID{}, originatorID)
+	//
+	// OriginDerived: the Team Agent executor here was worked out by the
+	// coordinator's routing, not named by a person, so the run is refused
+	// while the issue sits in Triage (upstream MUL-7189 queue door).
+	task, err := s.enqueueMentionTaskWithCommentPlanAndOriginator(ctx, chatIssue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", false, originatorID, pgtype.UUID{}, originatorID, OriginDerived)
 	if err != nil {
-		if _, derr := s.Queries.DeleteComment(ctx, db.DeleteCommentParams{
+		// Compensating delete: the route comment must not linger as a ghost
+		// message when the enqueue is refused. DeleteLeafComment (upstream's
+		// tombstone-era hard delete for replyless comments) replaces the
+		// retired DeleteComment query and keeps the workspace guard.
+		if _, derr := s.Queries.DeleteLeafComment(ctx, db.DeleteLeafCommentParams{
 			ID: comment.ID, WorkspaceID: chatIssue.WorkspaceID,
 		}); derr != nil {
 			slog.Error("discussion route compensating delete failed",

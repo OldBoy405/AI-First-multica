@@ -1,7 +1,7 @@
 package main
 
 // contract-ignore: pre-390 fixture seed (pre-migration rows below are seeded with the old global key on purpose).
-// AIFIRST: CR-2026-049 TASK-05 — cr_sync_event workspace migrations 390–397
+// AIFIRST: CR-2026-049 TASK-05 — cr_sync_event workspace migrations 515–522
 // integration test (SDD §2.2/§2.4/§2.5). Runs the real migration files against
 // a throwaway schema with minimal 362-shaped tables, asserts the deterministic
 // preflight (orphan/multi-tenant hard fail), per-workspace idempotency, and a
@@ -42,7 +42,7 @@ func wsSchemaFixture(t *testing.T, pool *pgxpool.Pool) string {
 	return schema
 }
 
-// Minimal 362-shaped DDL (same column set / constraint names that 390-397 touch).
+// Minimal 362-shaped DDL (same column set / constraint names that 515-522 touch).
 func wsSchemaDDL() []string {
 	return []string{
 		`CREATE TABLE cr (
@@ -116,25 +116,25 @@ func runSQLFile(t *testing.T, conn *pgx.Conn, path string) error {
 }
 
 var wsUps = []string{
-	"475_cr_sync_event_workspace_id.up.sql",
-	"476_cr_sync_event_workspace_uniq.up.sql",
-	"477_cr_sync_event_trace_spec_idx.up.sql",
-	"478_cr_sync_event_ws_unprocessed_idx.up.sql",
-	"479_drop_cr_sync_event_old_uniq.up.sql",
-	"480_drop_cr_sync_event_unprocessed_idx.up.sql",
-	"481_approval_workspace_approve_uniq.up.sql",
-	"482_drop_approval_record_approve_uniq.up.sql",
+	"515_cr_sync_event_workspace_id.up.sql",
+	"516_cr_sync_event_workspace_uniq.up.sql",
+	"517_cr_sync_event_trace_spec_idx.up.sql",
+	"518_cr_sync_event_ws_unprocessed_idx.up.sql",
+	"519_drop_cr_sync_event_old_uniq.up.sql",
+	"520_drop_cr_sync_event_unprocessed_idx.up.sql",
+	"521_approval_workspace_approve_uniq.up.sql",
+	"522_drop_approval_record_approve_uniq.up.sql",
 }
 
 var wsDowns = []string{
-	"482_drop_approval_record_approve_uniq.down.sql",
-	"481_approval_workspace_approve_uniq.down.sql",
-	"480_drop_cr_sync_event_unprocessed_idx.down.sql",
-	"479_drop_cr_sync_event_old_uniq.down.sql",
-	"478_cr_sync_event_ws_unprocessed_idx.down.sql",
-	"477_cr_sync_event_trace_spec_idx.down.sql",
-	"476_cr_sync_event_workspace_uniq.down.sql",
-	"475_cr_sync_event_workspace_id.down.sql",
+	"522_drop_approval_record_approve_uniq.down.sql",
+	"521_approval_workspace_approve_uniq.down.sql",
+	"520_drop_cr_sync_event_unprocessed_idx.down.sql",
+	"519_drop_cr_sync_event_old_uniq.down.sql",
+	"518_cr_sync_event_ws_unprocessed_idx.down.sql",
+	"517_cr_sync_event_trace_spec_idx.down.sql",
+	"516_cr_sync_event_workspace_uniq.down.sql",
+	"515_cr_sync_event_workspace_id.down.sql",
 }
 
 func TestCRSyncEventWorkspaceMigrationHappyPath(t *testing.T) {
@@ -285,7 +285,7 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-999','shaX','status','{}',now())`); err != nil {
 			t.Fatalf("seed orphan: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "475_cr_sync_event_workspace_id.up.sql")); err == nil {
+		if err := runSQLFile(t, conn, workspaceMigration(t, "515_cr_sync_event_workspace_id.up.sql")); err == nil {
 			t.Fatalf("475 must hard-fail on orphan rows")
 		}
 	})
@@ -309,7 +309,7 @@ func TestCRSyncEventWorkspacePreflightBlocksOrphanAndAmbiguous(t *testing.T) {
 			VALUES ('CR-2026-001','shaA','status','{}',now())`); err != nil {
 			t.Fatalf("seed event: %v", err)
 		}
-		if err := runSQLFile(t, conn, workspaceMigration(t, "475_cr_sync_event_workspace_id.up.sql")); err == nil {
+		if err := runSQLFile(t, conn, workspaceMigration(t, "515_cr_sync_event_workspace_id.up.sql")); err == nil {
 			t.Fatalf("475 must hard-fail on ambiguous cr_id")
 		}
 	})

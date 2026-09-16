@@ -441,48 +441,6 @@ SELECT
 WHERE lock_task_owner_rows($1, NULL, $2)
 RETURNING *;
 
--- name: CreateDeferredAgentTask :one
--- Fenced against workspace teardown: lock_task_owner_rows (migration 284)
--- locks the owners' workspace rows in the writer's own transaction and returns
--- false once they are gone, so this statement writes no row instead of stranding
--- a task in a workspace that has just been deleted (MUL-5999).
--- Deferred tasks are inert until PromoteDueDeferredTasksForRuntime flips them
--- to queued. Used for comment-routing escalation: a thread-owner primary task
--- gets a delayed assignee fallback without waking both agents at t=0.
--- Attribution is resolved and stamped at creation (not at promotion), from the
--- same trigger comment as the primary task, so the fallback assignee's run
--- carries a non-NULL source and evidence rather than bypassing attribution
--- (MUL-4302 §2).
---
--- AIFIRST: CR-2026-010 stamps project_id like CreateAgentTask, so a promoted
--- fallback task is still subject to the project-wide single-writer claim
--- branch instead of silently falling back to per-(agent,issue) serialization.
-INSERT INTO agent_task_queue (
-    agent_id, runtime_id, issue_id, status, priority, trigger_comment_id,
-    trigger_summary, is_leader_task, squad_id, escalation_for_task_id, fire_at,
-    originator_user_id, accountable_user_id, originator_source,
-    delegated_from_task_id, trigger_evidence_kind, trigger_evidence_ref_id, project_id,
-    id
-)
-SELECT
-    @agent_id, @runtime_id, @issue_id, 'deferred', @priority,
-    sqlc.narg(trigger_comment_id),
-    sqlc.narg(trigger_summary),
-    COALESCE(sqlc.narg('is_leader_task')::boolean, FALSE),
-    sqlc.narg(squad_id),
-    @escalation_for_task_id,
-    @fire_at,
-    sqlc.narg(originator_user_id),
-    sqlc.narg(accountable_user_id),
-    sqlc.narg(originator_source),
-    sqlc.narg(delegated_from_task_id),
-    sqlc.narg(trigger_evidence_kind),
-    sqlc.narg(trigger_evidence_ref_id),
-    sqlc.narg(project_id),
-    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
-WHERE lock_task_owner_rows($1, $3, $2)
-RETURNING *;
-
 -- name: LinkTaskToIssue :exec
 -- Fenced against workspace teardown: lock_task_owner_rows (migration 284)
 -- locks the owners' workspace rows in the writer's own transaction and returns
@@ -523,8 +481,11 @@ WHERE id = $1 AND issue_id IS NULL
 -- agent's resume context (session_id/work_dir) so the child can continue
 -- the conversation when the backend supports it. Resume-unsafe failures are
 -- retried as fresh sessions so the child does not inherit a stuck agent
--- conversation. Keep the CASE WHEN predicates in sync with
--- resumeUnsafeFailureReason and the resume lookup blacklists. attempt is
+-- conversation, but work_dir is still carried forward: a poisoned
+-- conversation says nothing about the files it left behind, and the claim
+-- handler offers that workdir to the fresh session (MUL-7034). Keep the CASE
+-- WHEN predicates in sync with resumeUnsafeFailureReason and the resume lookup
+-- blacklists. attempt is
 -- incremented; max_attempts, trigger_comment_id, coalesced_comment_ids,
 -- is_leader_task, and squad_id are inherited so the retried task receives the
 -- parent's complete planned comment batch and keeps the same squad-role
@@ -602,7 +563,7 @@ SELECT
     CASE WHEN p.chat_session_id IS NOT NULL THEN GREATEST(p.priority, 3) ELSE p.priority END,
     p.trigger_comment_id, p.coalesced_comment_ids, p.trigger_summary, p.context,
     CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.work_dir END,
+    p.work_dir,
     p.attempt + 1, COALESCE(sqlc.narg(max_attempts)::int, p.max_attempts), p.id,
     p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
     p.is_leader_task,
@@ -621,7 +582,7 @@ SELECT
 FROM agent_task_queue p
 WHERE p.id = $1
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
-ON CONFLICT (issue_id, agent_id) WHERE status IN ('queued', 'dispatched')
+ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE status IN ('queued', 'dispatched')
        OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
 DO NOTHING
 RETURNING *;
@@ -740,7 +701,8 @@ WHERE id = sqlc.arg(task_id)
 -- status="working" with no self-correction. Only issue-deletion cleanup calls
 -- this now; a status flip to cancelled/done no longer does (MUL-4465).
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
@@ -762,9 +724,21 @@ RETURNING *;
 -- escalations, so rerun keeps its prior "replace the pending plan" behaviour for
 -- those rows.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
   AND status IN ('queued', 'dispatched', 'deferred')
+RETURNING *;
+
+-- name: CancelPendingTasksByIssueAndAgentInThread :many
+-- Cancel only the not-yet-started plan in the selected thread. Other threads
+-- retain their queues; running tasks are stopped explicitly through CancelTask.
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
+WHERE issue_id = $1 AND agent_id = $2
+  AND status IN ('queued', 'dispatched', 'deferred')
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid)
 RETURNING *;
 
 -- name: CancelAgentTasksByAgent :many
@@ -774,7 +748,8 @@ RETURNING *;
 -- (also :many + RETURNING + completed_at) so the three sibling cancel paths
 -- behave consistently.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE agent_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
@@ -784,7 +759,9 @@ RETURNING *;
 -- coalesced input; cancellation prevents an agent from acting on a stale or
 -- deleted version. Must run before deletion clears trigger_comment_id.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL,
+    context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('comment_change_cancelled_task_id', id::text)
 WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
   AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
@@ -796,7 +773,8 @@ RETURNING *;
 -- the FK ON DELETE SET NULL would otherwise nullify chat_session_id and we
 -- could no longer reach those tasks.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE chat_session_id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
@@ -1287,6 +1265,14 @@ RETURNING *;
 -- emptyContentRe and historyMessageLocatorRe in pkg/taskfailure/resume.go.
 -- Keep the three in sync.
 --
+-- Triage runs are excluded from all three CTEs (MUL-7189 §5.6). A triage run
+-- and the execution run that follows accept are the same (agent_id, issue_id)
+-- pair, so without this the first execution run would resume the conversation
+-- in which the agent was deciding whether the entry was worth keeping. From the
+-- execution side an accepted issue is a new issue, and it starts cold. The
+-- exclusion is symmetric: a triage run does not resume an execution session
+-- either, which is what force_fresh_session on the triage task already ensures.
+--
 -- retired_sessions is the explicit half of the same rule (GH #6066). The
 -- per-session latest state above can only judge sessions that some row still
 -- POINTS at, so it cannot see a session a run deliberately abandoned: a fresh
@@ -1299,11 +1285,13 @@ WITH retired_sessions AS (
     SELECT DISTINCT r.retired_session_id AS session_id
     FROM agent_task_queue r
     WHERE r.agent_id = $1 AND r.issue_id = $2
+      AND COALESCE(r.context->>'type', '') <> 'triage'
       AND r.retired_session_id IS NOT NULL
 ), resume_overflow_at AS (
     SELECT MAX(COALESCE(t.completed_at, t.started_at, t.dispatched_at, t.created_at)) AS at
     FROM agent_task_queue t
     WHERE t.agent_id = $1 AND t.issue_id = $2
+      AND COALESCE(t.context->>'type', '') <> 'triage'
       AND t.status = 'failed'
       AND (
         COALESCE(t.failure_reason, '') = 'codex_resume_oversized'
@@ -1315,6 +1303,7 @@ WITH retired_sessions AS (
         COALESCE(t.completed_at, t.started_at, t.dispatched_at, t.created_at) AS terminal_at
     FROM agent_task_queue t
     WHERE t.agent_id = $1 AND t.issue_id = $2
+      AND COALESCE(t.context->>'type', '') <> 'triage'
       AND t.session_id IS NOT NULL
       AND t.status IN ('completed', 'failed', 'cancelled')
     ORDER BY t.session_id, COALESCE(t.completed_at, t.started_at, t.dispatched_at, t.created_at) DESC
@@ -1365,8 +1354,15 @@ LIMIT 1;
 -- disclose that the most recent turn's context could not be carried over. Any
 -- later task that records a real session resets this to FALSE by being the new
 -- most-recent row, so the disclosure fires once and then clears.
+--
+-- Triage runs are excluded for the same reason GetLastTaskSession excludes them
+-- (MUL-7189 §5.6), and the two must agree: this query only reports whether THAT
+-- one fell back. A triage run is invisible to it, so a triage run reported here
+-- would tell the first execution run after accept that the previous turn's
+-- context could not be carried over — about a turn it was never entitled to.
 SELECT COALESCE(session_rollout_missing, FALSE) FROM agent_task_queue
 WHERE agent_id = $1 AND issue_id = $2
+  AND COALESCE(context->>'type', '') <> 'triage'
   AND status IN ('completed', 'failed')
   AND started_at IS NOT NULL
 ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
@@ -1717,7 +1713,8 @@ RETURNING retry.*;
 -- Automatic cancellation without an explicit persisted failure reason. Unlike
 -- CancelAgentTaskByUser, this deliberately leaves recovery inputs replayable.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE id = $1 AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
@@ -1730,6 +1727,9 @@ UPDATE agent_task_queue AS task
 SET status = 'cancelled',
     completed_at = now(),
     prepare_lease_expires_at = NULL,
+    cancelled_by_type = sqlc.arg('cancelled_by_type'),
+    cancelled_by_id = sqlc.narg('cancelled_by_id'),
+    cancelled_by_name = sqlc.narg('cancelled_by_name'),
     delivered_comment_ids = CASE
       -- Chat and ordinary issue tasks almost never carry a delegated-failure
       -- recovery signal. Keep their high-frequency user-cancel path to a
@@ -1834,7 +1834,10 @@ SET status = 'cancelled',
     completed_at = now(),
     error = sqlc.arg('error'),
     failure_reason = sqlc.arg('failure_reason'),
-    prepare_lease_expires_at = NULL
+    prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system',
+    cancelled_by_id = NULL,
+    cancelled_by_name = NULL
 WHERE id = sqlc.arg('id') AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
 RETURNING *;
 
@@ -1842,7 +1845,10 @@ RETURNING *;
 -- Queue editing is a compare-and-set: never cancel a task that the daemon
 -- promoted between the user's click and this statement.
 UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = sqlc.arg('cancelled_by_type'),
+    cancelled_by_id = sqlc.narg('cancelled_by_id'),
+    cancelled_by_name = sqlc.narg('cancelled_by_name')
 WHERE id = sqlc.arg('id')
   AND chat_session_id = sqlc.arg('chat_session_id')
   AND status = 'queued'
@@ -1871,7 +1877,8 @@ WITH head AS MATERIALIZED (
   LIMIT 1
 )
 UPDATE agent_task_queue AS queued
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE queued.chat_session_id = $1
   AND queued.status = 'queued'
   AND queued.id IS DISTINCT FROM (SELECT id FROM head)
@@ -1953,6 +1960,21 @@ WHERE issue_id = $1 AND agent_id = $2
     OR context->>'head_sha' = sqlc.narg('head_sha')::text
   );
 
+-- name: HasPendingTaskForIssueAndAgentInThread :one
+-- Same pending/head rules as HasPendingTaskForIssueAndAgent, scoped to one
+-- root comment and all descendants. NULL selects assignment-level work.
+SELECT count(*) > 0 AS has_pending FROM agent_task_queue
+WHERE issue_id = $1 AND agent_id = $2
+  AND (
+    status IN ('queued', 'dispatched')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
+  AND (
+    COALESCE(sqlc.narg('head_sha')::text, '') = ''
+    OR context->>'head_sha' = sqlc.narg('head_sha')::text
+  )
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
+
 -- name: HasPendingTaskForIssueAndAgentExcludingTriggerComment :one
 -- Same as HasPendingTaskForIssueAndAgent, but ignores tasks triggered by the
 -- current comment being edited. Edit preview needs this because save cancels
@@ -1970,6 +1992,22 @@ WHERE issue_id = @issue_id
     COALESCE(sqlc.narg('head_sha')::text, '') = ''
     OR context->>'head_sha' = sqlc.narg('head_sha')::text
   );
+
+-- name: HasPendingTaskForIssueAndAgentExcludingTriggerCommentInThread :one
+-- Thread-scoped edit preview: ignore the comment whose old run save replaces.
+SELECT count(*) > 0 AS has_pending FROM agent_task_queue
+WHERE issue_id = @issue_id
+  AND agent_id = @agent_id
+  AND (
+    status IN ('queued', 'dispatched')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
+  AND trigger_comment_id IS DISTINCT FROM @exclude_trigger_comment_id::uuid
+  AND (
+    COALESCE(sqlc.narg('head_sha')::text, '') = ''
+    OR context->>'head_sha' = sqlc.narg('head_sha')::text
+  )
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
 
 -- name: MergeCommentIntoPendingTask :one
 -- MUL-4195: fold a newly-arrived comment into an existing task for (issue,
@@ -2042,12 +2080,13 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.issue_id = @issue_id
       AND t.agent_id = @agent_id
+      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
       AND (
           t.status = 'queued'
           OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
       )
       -- Head-scoped (TEN-356, #5914): never fold across HEADs. The physical
-      -- unique index is only (issue_id, agent_id), so an insert-race loser can
+      -- unique index is per (issue_id, agent_id, thread), so an insert-race loser can
       -- collide with a pending task stamped for a DIFFERENT head_sha; merging
       -- into it would give a new-HEAD comment old-HEAD review coverage. Empty/
       -- absent head_sha (no linked PR) matches any task, preserving coalescing.
@@ -2084,6 +2123,9 @@ RETURNING id, coalesced_comment_ids;
 -- could execute under the first member's identity/connected-apps (MUL-4302).
 -- Only claim-receipt statuses (already-built delivered set) are safe planned-id
 -- targets.
+-- Recheck status on the UPDATE target after a concurrent row-lock wait. The
+-- subquery can see an active snapshot while completion commits; appending to
+-- that completed row would be too late for its completion replay to see it.
 UPDATE agent_task_queue
 SET coalesced_comment_ids = (
         SELECT COALESCE(array_agg(DISTINCT e), '{}')
@@ -2094,6 +2136,7 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.issue_id = @issue_id
       AND t.agent_id = @agent_id
+      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND t.status IN ('dispatched', 'running', 'waiting_local_directory')
       AND (
           COALESCE(sqlc.narg('head_sha')::text, '') = ''
@@ -2102,6 +2145,7 @@ WHERE id = (
     ORDER BY t.created_at DESC
     LIMIT 1
 )
+AND status IN ('dispatched', 'running', 'waiting_local_directory')
 RETURNING id, coalesced_comment_ids;
 
 -- name: MergeDelegatedFailureCommentIntoPendingTask :one
@@ -2123,6 +2167,7 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.issue_id = @issue_id
       AND t.agent_id = @agent_id
+      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND (
           t.status = 'queued'
           OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
@@ -2253,7 +2298,8 @@ WHERE id = @comment_id
 -- that one condition is recorded as durable state instead of being re-proven
 -- through four joins and two NOT EXISTS subqueries on every tick. The predicate
 -- of idx_comment_delegated_failure_unsettled matches the first four conditions,
--- so LIMIT now bounds the rows CHECKED and not just the rows RETURNED.
+-- narrowing the scan to unsettled signals. Reversible eligibility must still
+-- be checked before LIMIT so paused signals cannot starve executable ones.
 SELECT recovery.*
 FROM comment recovery
 JOIN agent_task_queue failed ON failed.id = recovery.source_task_id
@@ -2267,6 +2313,8 @@ WHERE recovery.author_type = 'system'
   AND recovery.type = 'progress_update'
   AND recovery.source_task_id IS NOT NULL
   AND recovery.recovery_settled_at IS NULL
+  -- A deleted recovery signal is withdrawn, even when replies keep its row.
+  AND recovery.deleted_at IS NULL
   AND recovery.issue_id = source_issue.id
   AND recovery.workspace_id = source_issue.workspace_id
   AND failed.status = 'failed'
@@ -2276,7 +2324,21 @@ WHERE recovery.author_type = 'system'
   AND source.autopilot_run_id IS NULL
   AND source.issue_id IS NOT NULL
   AND source.agent_id <> failed.agent_id
-  AND COALESCE(source_status.category, source_issue.status) NOT IN ('done', 'cancelled', 'backlog')
+  -- Match canDispatchDelegatedFailureRecovery: lifecycle permits recovery only
+  -- for open work; parking belongs exclusively to the fixed Backlog status.
+  -- Built-ins resolve without catalog rows; unknown custom states stay pending.
+  AND source_issue.status <> 'backlog'
+  -- A coordinator waiting in Triage is the entry's proposed owner, not its
+  -- owner, so a worker failure must not wake it (MUL-7189 §2.3). Triage is not
+  -- a status, so it is a predicate of its own rather than a CASE arm.
+  AND source_issue.triage_state IS NULL
+  AND CASE
+      WHEN source_issue.status IN ('backlog', 'todo') THEN 'unstarted'
+      WHEN source_issue.status IN ('in_progress', 'in_review', 'blocked') THEN 'started'
+      WHEN source_issue.status = 'done' THEN 'done'
+      WHEN source_issue.status = 'cancelled' THEN 'closed'
+      ELSE issue_status_category(source_status.category)
+  END IN ('unstarted', 'started')
   AND source_agent.archived_at IS NULL
   AND source_agent.runtime_id IS NOT NULL
   AND source_agent.workspace_id = source_issue.workspace_id
@@ -2328,6 +2390,16 @@ WHERE issue_id = $1 AND agent_id = $2
     status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
   );
+
+-- name: HasActiveTaskForIssueAndAgentInThread :one
+-- Active execution and pending work in this comment thread only.
+SELECT count(*) > 0 AS has_active FROM agent_task_queue
+WHERE issue_id = $1 AND agent_id = $2
+  AND (
+    status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+    OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid);
 
 -- name: GetLatestTaskRoleForIssueAndAgent :one
 -- Returns the role markers from the agent's most recent task on this issue.
@@ -2393,8 +2465,6 @@ ORDER BY atq.priority DESC, atq.created_at ASC;
 --
 -- Scope is deliberately tight:
 --   * retry_of_task_id IS NOT NULL — only auto-retry clones, never a fresh run.
---   * escalation_for_task_id IS NULL — assignee-fallback escalations own their
---     fire_at lifecycle and are SUPPOSED to coexist with an active primary.
 --   * channel-media pending rows are excluded for the same reason: that deferred
 --     row is the issue's own task waiting on media, not a superseded retry.
 --   * issue_id IS NOT NULL — chat / quick-create tasks have no slot semantics.
@@ -2403,17 +2473,18 @@ ORDER BY atq.priority DESC, atq.created_at ASC;
 -- fires precisely when the rerun has STARTED, which is when the row would
 -- otherwise no longer look blocked.
 UPDATE agent_task_queue r
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE r.runtime_id = ANY(@runtime_ids::uuid[])
   AND r.status = 'deferred'
   AND r.issue_id IS NOT NULL
   AND r.retry_of_task_id IS NOT NULL
-  AND r.escalation_for_task_id IS NULL
   AND COALESCE(r.context->>'channel_issue_media_pending', '') <> 'true'
   AND EXISTS (
     SELECT 1 FROM agent_task_queue successor
     WHERE successor.issue_id = r.issue_id
       AND successor.agent_id = r.agent_id
+      AND successor.comment_thread_id IS NOT DISTINCT FROM r.comment_thread_id
       AND successor.id <> r.id
       AND successor.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
   )
@@ -2421,7 +2492,7 @@ RETURNING *;
 
 -- name: PromoteDueDeferredTasksForRuntime :many
 -- Promotion is fenced against the single queued/dispatched slot
--- idx_one_pending_task_per_issue_agent_v2 allows per (issue, agent). A deferred
+-- idx_one_pending_task_per_issue_agent_thread allows per (issue, agent, thread). A deferred
 -- row is NOT covered by that index, so it can legitimately coexist with a queued
 -- one — a manual rerun enqueued behind a running task, plus the deferred retry
 -- that task's failure armed (runtime_offline, provider_network's final attempt).
@@ -2429,8 +2500,8 @@ RETURNING *;
 -- the claim loop promotes before it claims, that error blocked every claim on the
 -- runtime — including the rerun the operator was waiting for.
 --
--- Two fences: skip a row whose (issue, agent) slot is already occupied, and
--- promote at most ONE row per (issue, agent) so a single statement cannot collide
+-- Two fences: skip a row whose (issue, agent, thread) slot is already occupied, and
+-- promote at most ONE row per (issue, agent, thread) so a single statement cannot collide
 -- with itself. A skipped row stays deferred with fire_at in the past and is
 -- promoted by a later tick once the slot frees, so nothing is lost — the human's
 -- rerun simply goes first. Chat / quick-create rows (issue_id NULL) are outside
@@ -2439,7 +2510,7 @@ WITH due AS (
     SELECT t.id,
            t.issue_id,
            row_number() OVER (
-               PARTITION BY t.issue_id, t.agent_id
+               PARTITION BY t.issue_id, t.agent_id, t.comment_thread_id
                ORDER BY t.priority DESC, t.created_at ASC, t.id
            ) AS rn
     FROM agent_task_queue t
@@ -2457,6 +2528,7 @@ WITH due AS (
         SELECT 1 FROM agent_task_queue occupant
         WHERE occupant.issue_id = t.issue_id
           AND occupant.agent_id = t.agent_id
+          AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
           AND (
             occupant.status IN ('queued', 'dispatched')
@@ -2530,6 +2602,7 @@ WHERE t.runtime_id = ANY(@runtime_ids::uuid[])
       SELECT 1 FROM agent_task_queue occupant
       WHERE occupant.issue_id = t.issue_id
         AND occupant.agent_id = t.agent_id
+          AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
         AND occupant.id <> t.id
         AND (
           occupant.status IN ('queued', 'dispatched')
@@ -2546,7 +2619,7 @@ WITH due AS (
     SELECT t.id,
            t.issue_id,
            row_number() OVER (
-               PARTITION BY t.issue_id, t.agent_id
+               PARTITION BY t.issue_id, t.agent_id, t.comment_thread_id
                ORDER BY t.priority DESC, t.created_at ASC, t.id
            ) AS rn
     FROM agent_task_queue t
@@ -2564,6 +2637,7 @@ WITH due AS (
         SELECT 1 FROM agent_task_queue occupant
         WHERE occupant.issue_id = t.issue_id
           AND occupant.agent_id = t.agent_id
+          AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
           AND (
             occupant.status IN ('queued', 'dispatched')
@@ -2575,26 +2649,6 @@ UPDATE agent_task_queue
 SET status = 'queued'
 WHERE id IN (SELECT id FROM due WHERE issue_id IS NULL OR rn = 1)
 RETURNING *;
-
--- name: CancelDeferredEscalationsForTask :many
-UPDATE agent_task_queue
-SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-WHERE escalation_for_task_id = $1
-  AND status IN ('deferred', 'queued', 'dispatched', 'waiting_local_directory')
-RETURNING *;
-
--- name: CancelDeferredEscalationsForIssueAgent :many
-WITH cancelled AS (
-    UPDATE agent_task_queue fallback
-    SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL
-    FROM agent_task_queue primary_task
-    WHERE fallback.escalation_for_task_id = primary_task.id
-      AND fallback.status IN ('deferred', 'queued', 'dispatched', 'waiting_local_directory')
-      AND primary_task.issue_id = @issue_id
-      AND primary_task.agent_id = @agent_id
-    RETURNING fallback.*
-)
-SELECT * FROM cancelled;
 
 -- name: ListActiveTasksByIssue :many
 -- Backs the issue-detail "agent live" banner. Includes 'queued' so the
@@ -2687,11 +2741,15 @@ GROUP BY atq.agent_id;
 -- still in flight has no completed_at and contributes nothing here — that's
 -- correct: in-flight tasks are surfaced via the live presence indicator,
 -- not the historical trend.
+-- Keep total activity separate from outcomes: cancelled runs belong in the
+-- history, but success rate is completed / (completed + failed).
 SELECT
     atq.agent_id,
     DATE_TRUNC('day', atq.completed_at)::timestamptz AS bucket,
     COUNT(*)::int AS task_count,
-    COUNT(*) FILTER (WHERE atq.status = 'failed')::int AS failed_count
+    COUNT(*) FILTER (WHERE atq.status = 'failed')::int AS failed_count,
+    COUNT(*) FILTER (WHERE atq.status = 'completed')::int AS completed_count,
+    COUNT(*) FILTER (WHERE atq.status = 'cancelled')::int AS cancelled_count
 FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 WHERE a.workspace_id = $1
@@ -2977,3 +3035,6 @@ SELECT count(*) FROM agent_task_queue
 WHERE project_id = $1
   AND status IN ('dispatched', 'running', 'waiting_local_directory')
   AND id != $2;
+
+-- name: GetCommentThreadRootID :one
+SELECT comment_thread_root_id(@comment_id::uuid)::uuid AS id;

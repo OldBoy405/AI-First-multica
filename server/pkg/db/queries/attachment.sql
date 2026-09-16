@@ -84,6 +84,13 @@ WHERE a.issue_id = $1
 SELECT url FROM attachment
 WHERE comment_id = $1;
 
+-- name: DeleteCommentAttachments :many
+-- Part of the comment delete transaction: removes the deleted comment's
+-- attachments and returns their storage URLs for cleanup after commit.
+DELETE FROM attachment
+WHERE comment_id = @comment_id AND workspace_id = @workspace_id
+RETURNING url;
+
 -- name: LinkAttachmentsToComment :exec
 UPDATE attachment
 SET comment_id = $1
@@ -174,9 +181,12 @@ WHERE chat_message_id = ANY($1::uuid[]) AND workspace_id = $2
 ORDER BY created_at ASC;
 
 -- name: LockAttachmentsForIssueLink :many
--- Issue updates bind attachments and then touch the owner row. Lock eligible
--- attachment rows first so every attachment -> issue mutation uses the same
--- lock order as DeleteAttachment and cannot deadlock with it.
+-- Issue updates bind attachments and then touch the owner row. Only rows that
+-- belong to no issue yet are eligible, and nothing reaches those through an
+-- issue — not teardown's cascade, not DeleteAttachment, which takes the owning
+-- issue first — so locking them before the owner cannot deadlock.
+-- Attachments that DO belong to the issue are locked after it; see
+-- LockAttachmentsForCommentLink.
 SELECT id FROM attachment
 WHERE workspace_id = sqlc.arg(workspace_id)
   AND issue_id IS NULL
@@ -197,6 +207,22 @@ WHERE workspace_id = sqlc.arg(workspace_id)
   AND chat_session_id IS NULL
   AND chat_message_id IS NULL
   AND task_id IS NULL
+  AND source_context_id IS NULL
+  AND id = ANY(sqlc.arg(attachment_ids)::uuid[])
+ORDER BY id
+FOR UPDATE;
+
+-- name: LockAttachmentsForCommentLink :many
+-- CreateComment binds attachments in the transaction that created the comment,
+-- after the CreateComment statement has taken the issue row: issue -> comment
+-- -> child, the order every owner-first mutation here uses. This pins the
+-- requested set under that lock and returns the ids still eligible, so the
+-- caller can refuse before the comment is committed when a requested
+-- attachment was deleted while the issue lock was contended.
+SELECT id FROM attachment
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND issue_id = sqlc.arg(issue_id)
+  AND comment_id IS NULL
   AND source_context_id IS NULL
   AND id = ANY(sqlc.arg(attachment_ids)::uuid[])
 ORDER BY id
@@ -235,6 +261,15 @@ WHERE id = $1 AND workspace_id = $2
   AND task_id IS NULL
   AND source_context_id IS NULL
 RETURNING id;
+
+-- name: LockAttachmentRow :one
+-- Locks an attachment that has no owner to lock instead — a chat, avatar or
+-- still-unbound upload. Reading it under its own lock is what keeps it from
+-- gaining an owner between the read and the write, which would put the write
+-- back in the attachment -> issue order issue teardown deadlocks with.
+SELECT * FROM attachment
+WHERE id = $1 AND workspace_id = $2
+FOR UPDATE;
 
 -- name: LinkAttachmentsToIssue :one
 WITH linked AS (

@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -184,28 +183,6 @@ func TestProjectQueueCapacity_InvalidLimitFallsBack(t *testing.T) {
 	if task.Priority != 2 { // priorityToInt("medium")
 		t.Fatalf("plain member must keep ordinary priority, got %d", task.Priority)
 	}
-}
-
-// TestProjectQueueCapacity_DeferredPathUnguarded: the deferred system
-// compensation path ignores the capacity gate (SDD INSERT-point table).
-func TestProjectQueueCapacity_DeferredPathUnguarded(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-	ctx := context.Background()
-
-	agentID := createHandlerTestAgent(t, "QCapAgentDeferred", []byte("[]"))
-	projectID := createCapacityTestProject(t, "qcap-deferred", `{"team_agent_queue_limit": 2}`)
-	fillProjectQueue(t, projectID, agentID, 2, 93300)
-
-	issueID := createCapacityTestIssue(t, projectID, agentID, testUserID, 93350)
-	task, err := testHandler.TaskService.EnqueueDeferredAssigneeFallback(ctx,
-		capacityTestIssueStruct(issueID, projectID, agentID, testUserID),
-		parseUUID(agentID), pgtype.UUID{}, pgtype.UUID{}, pgtype.UUID{}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatalf("deferred path must bypass capacity gate: %v", err)
-	}
-	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, uuidToString(task.ID)) })
 }
 
 // TestCancelTaskByUser_PlainMember_NotOriginator_Returns403: the shared-queue

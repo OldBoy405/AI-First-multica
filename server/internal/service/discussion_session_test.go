@@ -17,7 +17,7 @@ import (
 // merge-forward rendering. DB-backed send/ensure vectors live in the handler
 // package tests (TASK-03, plan cmd-02).
 
-func mustUUID(t *testing.T, s string) uuid.UUID {
+func mustNativeUUID(t *testing.T, s string) uuid.UUID {
 	t.Helper()
 	id, err := uuid.Parse(s)
 	if err != nil {
@@ -28,7 +28,7 @@ func mustUUID(t *testing.T, s string) uuid.UUID {
 
 func agentWithID(t *testing.T, s string) *db.Agent {
 	t.Helper()
-	return &db.Agent{ID: pgtype.UUID{Bytes: mustUUID(t, s), Valid: true}}
+	return &db.Agent{ID: pgtype.UUID{Bytes: mustNativeUUID(t, s), Valid: true}}
 }
 
 func TestDetectCoordinatorTriggerMatrix(t *testing.T) {
@@ -36,7 +36,7 @@ func TestDetectCoordinatorTriggerMatrix(t *testing.T) {
 		coordinator = "11111111-1111-1111-1111-111111111111"
 		otherAgent  = "22222222-2222-2222-2222-222222222222"
 	)
-	configured := mustUUID(t, coordinator)
+	configured := mustNativeUUID(t, coordinator)
 	nilUUID := uuid.Nil
 	routable := agentWithID(t, coordinator)
 	mentionContent := "please look at this [@Coordinator](mention://agent/" + coordinator + ")"
@@ -136,9 +136,9 @@ func TestDiscussionSendFingerprintOrderInvariant(t *testing.T) {
 	// AC-26: the same attachment set in a different request order must yield
 	// the same fingerprint (never a 409 idempotency_key_reused on replay).
 	ids := []uuid.UUID{
-		mustUUID(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-		mustUUID(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
-		mustUUID(t, "cccccccc-cccc-cccc-cccc-cccccccccccc"),
+		mustNativeUUID(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+		mustNativeUUID(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+		mustNativeUUID(t, "cccccccc-cccc-cccc-cccc-cccccccccccc"),
 	}
 	a := DiscussionSendInput{Content: "same content", AttachmentIDs: ids, CoordinatorRequest: "none"}
 	b := DiscussionSendInput{
@@ -190,7 +190,7 @@ func TestMergeForwardMessageFingerprintDedupPreservesOrder(t *testing.T) {
 	// the fingerprint.
 	mk := func(s string) db.ChatMessage {
 		return db.ChatMessage{
-			ID:        pgtype.UUID{Bytes: mustUUID(t, s), Valid: true},
+			ID:        pgtype.UUID{Bytes: mustNativeUUID(t, s), Valid: true},
 			CreatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		}
 	}

@@ -507,7 +507,7 @@ func (s *IssueService) sendProjectChatCore(ctx context.Context, workspaceID, pro
 	// exemption but lose the queue-jump priority while a presenter other than
 	// themselves is active. The chat_config snapshot is the SAME resolved
 	// output the §4.3 validation consumed.
-	task, err := s.TaskService.enqueueMentionTaskWithCommentPlanTx(ctx, qtx, issue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{}, pgtype.UUID{}, &resolved, &overlay)
+	task, err := s.TaskService.enqueueMentionTaskWithCommentPlanTx(ctx, qtx, issue, teamAgentID, comment.ID, nil, false, pgtype.UUID{}, false, "", suppressPreempt, callerID, pgtype.UUID{}, pgtype.UUID{}, &resolved, &overlay, OriginNamed)
 	if err != nil {
 		return nil, err
 	}
