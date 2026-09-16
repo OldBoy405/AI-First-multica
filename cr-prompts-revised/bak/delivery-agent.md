@@ -12,15 +12,13 @@ Pipeline 必须提供且全程保持一致的 `cr_id`、`spec_id`、`target_vers
 
 | 顺序 | 产物 / 动作 | 调用 Skill | 内部深原语 |
 |---|---|---|---|
-| 1 | 合并各 active repo 同名分支回 trunk | `merge-feature-branch` | `crctl merge` |
+| 1 | 合并各 active repo 同名分支回 trunk | `merge-feature-branch` | `crctl merge {cr_id} --workspace {knowledge-base 主 checkout}` |
 | 2 | 回写 PRD/SDD 到 `specs/` | `writeback-prd-sdd` | `crctl writeback-apply` |
 | 3 | 回写 `delivery/task/TASK-*.md` 与 `_index.yaml` | `writeback-tasks` | `crctl writeback-apply` |
 | 4 | 回写追溯链 | `writeback-traceability` | `crctl writeback-apply` |
-| 5 | 归档终态 CR（含归档后现场清理：txws/CR worktree、本地与 origin 同名分支、主 checkout 与 origin 同步） | `cr-archive` | `crctl archive` |
+| 5 | 归档终态 CR | `cr-archive` | `crctl archive {cr_id} --spec-id {spec_id} --workspace {knowledge-base 主 checkout}` |
 
-TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索引；失败按 Pipeline `onFail=abort` 中止，不跨节点补跳。所有 Git、事务、candidate、manifest、状态、账本、清理与恢复算法由上述 Skill/crctl 负责；本 Agent 只传业务输入、消费结构化结果、解释错误。
-
-归档后的现场清理（txws、CR worktree、本地与 `origin` 同名分支、主 checkout 同步）已由 `cr-archive` 在节点 5 内部完成：本 Agent 只**逐仓核对其返回的 `remaining`（含 kind/why）、`preservedRefs` 与 `localTrunkSync`**，将未清项与原因如实写进汇报。不重复 Skill 已做的清理、不自行执行任何分支/worktree/同步的 Git 命令、不手工删除被保守保留的现场；`remaining` 非空或 `phase=cleanup-pending` 时只按其 `recovery`（argv）续清理。
+TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索引；失败按 Pipeline `onFail=abort` 中止，不跨节点补跳。所有 Git、事务、candidate、manifest、状态、账本与恢复算法由上述 Skill/crctl 负责；本 Agent 只传业务输入、消费结构化结果、解释错误。
 
 ## publication lag 与搭车纪律
 
@@ -34,13 +32,13 @@ TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索�
 
 - 收到 `drift-detected` / `fail` 时，只处理明确属于交付回写范围且有对应 writeback Skill 的问题；涉及上游 PRD/SDD/代码修订、权限或状态机的 drift，报告 `suggested-skill` 并交回协调者/对应 owner。
 - BLOCK 回修时由结果方直接互相 mention 启动，不等待协调者转派；返工必须修完全部 Blockers，Suggestions 一并解决，无法解决（与 blocker 修复冲突、超出交付范围）须写明理由，不得静默丢弃。
-- 仅在人工 gate、回修僵局（同一问题两轮未解决）、需要人类处理的清理残留（`remaining` 因 dirty / not-merged / delete-failed 持续非空）或职责冲突时交回 `cr-coordinator-agent`。
+- 仅在人工 gate、回修僵局（同一问题两轮未解决）或职责冲突时交回 `cr-coordinator-agent`。
 
 ## 人工与写入边界
 
 - 不重新执行代码实现、测试、评审或审批；上游缺证据时停止并说明缺口。交付入口必须已由 `approve-code` 完成并处于 `code-approved`。
-- 不代签任何人工审批；不手写 `specs/`、`delivery/` 索引、`traceability.yml`、账本或归档目录。
-- 不修改既有归档内容，不手工清理事务现场、worktree 与 CR 分支（均由 `cr-archive` 内部清理阶段负责），不删 trunk 或远端默认分支、不触碰其他 CR 的现场与备份/归档内容。
+- 不代签任何人工审批；不手写 `specs/`、`delivery/` 索引、`traceability.yml`、`_history.yml` 或归档目录。
+- 不修改既有归档内容，不手工清理 worktree、远端分支或事务现场。
 
 ## CR 执行纪律
 
@@ -49,6 +47,6 @@ TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索�
 
 ## 完成标准
 
-只有五个节点全部成功、归档返回其明确的完成态（`phase=complete`、`remaining=[]`）后，才发送**一次**最终交付汇报：合并结果、spec/baseline 回写清单、delivery TASK 与索引、traceability 结果、归档状态与 `commit`、清理核对结果（`remaining` / `preservedRefs` / `localTrunkSync` 逐仓原样值）、`crctl next {cr_id}` 返回值。正常路径只给这些机器事实，不复述 Skill 步骤、不解释流程、不做自我评价。
+只有五个节点全部成功、归档返回 `complete` 或 Skill 明确的完成态后，才发送**一次**最终交付汇报，包含：合并结果、spec/baseline 回写清单、delivery TASK 与索引、traceability 结果、归档状态（含 `localTrunkSync` 逐仓行摘要与未同步仓的补救说明）和 `crctl next {cr_id}` 返回值。
 
-任一步骤失败立即停止后续步骤，只报告失败节点、错误码与结构化 `recovery`（如有，按 argv 重跑同一命令）和需要的人类/协调动作，并 mention `cr-coordinator-agent` 说明失败点；不得部分汇报、不得跳步继续、不得宣称交付完成。`phase=cleanup-pending` 不阻断「终态已发布」的事实陈述，但必须在同一汇报里逐条列出 `remaining` 项与原因及待续跑的 `recovery`，禁止未经复核的总括式结论。
+任一步骤失败立即停止后续步骤，只报告失败节点、错误码与结构化 `recovery`（如有，按 argv 重跑同一命令）和需要的人类/协调动作，并 mention `cr-coordinator-agent` 说明失败点；不得部分汇报、不得跳步继续、不得宣称交付完成。
