@@ -205,6 +205,46 @@ func TestOutputGuardUnavailableWhenAdapterEntryIsMissing(t *testing.T) {
 	}
 }
 
+func TestOutputGuardClaudeMatcherCoversDeclaredFullPaths(t *testing.T) {
+	toolsRoot, envRoot, workDir, rulesPath := outputGuardFixture(t)
+	t.Setenv(gitguard.EnvRulesPath, rulesPath)
+	t.Setenv(EnvOutputGuardRoot, toolsRoot)
+
+	if _, err := prepareCRGuard(envRoot, workDir, "claude", "dev-agent", slog.Default()); err != nil {
+		t.Fatalf("prepareCRGuard: %v", err)
+	}
+	settings := readSettings(t, workDir)
+
+	// CR-2026-069 review-code blocker B-4: the declared capability must be
+	// reachable on the install surface. The daemon-composed matcher therefore has
+	// to cover every claude path declared coverage=full in
+	// output-guard/capabilities.json (the tools-side contract test ac-09 asserts
+	// that same declaration against the claude settings template, so the two
+	// literals are pinned from their own side; a matcher that only enums shell
+	// tools would make Read/Grep governance claim-only).
+	declared := []string{"Bash", "Read", "Grep"}
+	for _, event := range []string{"PreToolUse", "PostToolUse"} {
+		segments := hookSegments(t, settings, event)
+		if len(segments) == 0 {
+			t.Fatalf("%s: no segments written", event)
+		}
+		last, _ := segments[len(segments)-1].(map[string]any)
+		matcher, _ := last["matcher"].(string)
+		tokens := map[string]bool{}
+		for _, tok := range strings.Split(matcher, "|") {
+			tokens[strings.TrimSpace(tok)] = true
+		}
+		for _, tool := range declared {
+			if !tokens[tool] {
+				t.Fatalf("%s: composed matcher %q misses declared full path %q", event, matcher, tool)
+			}
+		}
+		if matcher == "Bash|Shell|run_in_terminal" {
+			t.Fatalf("%s: matcher is the legacy shell-only enum %q (read paths unreachable)", event, matcher)
+		}
+	}
+}
+
 func TestOutputGuardNonClaudeProvidersWriteNoHooks(t *testing.T) {
 	for _, provider := range []string{"codebuddy", "qoder", "pi", "codex"} {
 		toolsRoot, envRoot, workDir, rulesPath := outputGuardFixture(t)

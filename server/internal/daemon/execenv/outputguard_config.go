@@ -36,15 +36,22 @@ type outputGuardMount struct {
 	InstallSurface string
 }
 
-// outputGuardAdapterEntries lists the hook entry file each Runtime ships. Only
-// claude is mounted here; the map exists so the "not written" decision for the
-// other four is explicit rather than accidental.
-var outputGuardAdapterEntries = map[string][2]string{
-	"claude":    {"pretooluse-guard.mjs", "posttooluse-guard.mjs"},
-	"codebuddy": {"pretooluse-guard.mjs", "posttooluse-guard.mjs"},
-	"qoder":     {"pretooluse-guard.mjs", "posttooluse-guard.mjs"},
-	"codex":     {"pretooluse-guard.mjs", "posttooluse-guard.mjs"},
-}
+// outputGuardClaudeHookEntries names the two hook entry files of the only Runtime
+// the daemon mounts (claude). The other four ship the same two file names under
+// their own adapter dirs but are installed by their native config surfaces; that
+// decision lives in outputGuardMountable below, so no per-provider table is kept
+// here (an unreachable "known provider" branch would just be dead code).
+var outputGuardClaudeHookEntries = [2]string{"pretooluse-guard.mjs", "posttooluse-guard.mjs"}
+
+// outputGuardClaudeMatcherToolNames lists the claude tool names the mounted hooks
+// must match. It mirrors output-guard/capabilities.json's claude paths declared
+// with coverage=full (Bash / Read / Grep): the tools-side contract test
+// (output-guard/test/adapters-contract.test.mjs, ac-09) asserts that set against
+// the claude settings template's matcher, and the same-package test below asserts
+// it against the composed matcher — so both literals are checked from their own
+// side. Widening or narrowing it is a capability decision (scope amendment), not
+// a local edit.
+var outputGuardClaudeMatcherToolNames = []string{"Bash", "Read", "Grep"}
 
 // outputGuardMountable reports whether the daemon writes this Runtime's hooks
 // itself. Explicit design, not "not implemented yet": daemon write points exist
@@ -67,17 +74,13 @@ func prepareOutputGuard(toolsRoot, provider string) (outputGuardMount, bool) {
 	if root == "" || !outputGuardMountable(provider) {
 		return outputGuardMount{}, false
 	}
-	entries, known := outputGuardAdapterEntries[provider]
-	if !known {
-		return outputGuardMount{}, false
-	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return outputGuardMount{}, false
 	}
 	adapterDir := filepath.Join(absRoot, "output-guard", "adapters", provider)
-	pre := filepath.Join(adapterDir, entries[0])
-	post := filepath.Join(adapterDir, entries[1])
+	pre := filepath.Join(adapterDir, outputGuardClaudeHookEntries[0])
+	post := filepath.Join(adapterDir, outputGuardClaudeHookEntries[1])
 	if !isRegularFile(pre) || !isRegularFile(post) {
 		return outputGuardMount{}, false
 	}
@@ -114,7 +117,7 @@ func composeOutputGuardHooks(existing map[string]any, og outputGuardMount) map[s
 			list = []any{}
 		}
 		out[event] = append(list, map[string]any{
-			"matcher": "Bash|Shell|run_in_terminal",
+			"matcher": strings.Join(outputGuardClaudeMatcherToolNames, "|"),
 			"hooks": []any{map[string]any{
 				"type":    "command",
 				"command": fmt.Sprintf("node \"%s\"", entry),
