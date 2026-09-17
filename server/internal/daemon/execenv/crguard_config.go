@@ -106,6 +106,15 @@ func prepareCRGuard(envRoot, workDir, provider, agentCaller string, logger *slog
 				}},
 			},
 		}
+		// AIFIRST: CR-2026-069 — compose the OutputGuard hooks into the SAME settings
+		// object (single writer, single write). The mount input is resolved here, so
+		// the function signature and its only call site stay untouched; an unavailable
+		// mount leaves the object above byte-identical to the pre-CR behaviour.
+		if og, ok := prepareOutputGuard("", provider); ok {
+			if existingHooks, isMap := settings["hooks"].(map[string]any); isMap {
+				settings["hooks"] = composeOutputGuardHooks(existingHooks, og)
+			}
+		}
 		claudeDir := filepath.Join(workDir, ".claude")
 		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 			return result, err
