@@ -830,6 +830,19 @@ func builtinSlug(skills []SkillContextForEnv, name string) (string, bool) {
 // every provider that actually reached it — grok and traecli write to
 // `.grok/skills` and `.traecli/skills` — while both discover natively and never
 // needed the pointer.
+
+// skillsRoutingRule is the authoritative entry point for skill selection. It is
+// appended to the `## Skills` section so every provider reads the same rule from
+// the same place (CR-2026-070 FR-1).
+//
+// It is deliberately provider-neutral and deliberately singular: the runtime,
+// not the brief, owns every per-provider path, and a rule copied into each other
+// place would be a second source of truth to keep in sync. It says what to do
+// when the discovered list is short of the task instead of sending the agent to
+// look around the machine for one, which is what the incident this rule answers
+// looked like from the outside.
+const skillsRoutingRule = "Treat that list as the authoritative entry point for skill selection: the runtime has already discovered those skills for this task, so use the discovered copy directly, before any repository exploration. Do not hunt for a skill on the filesystem — no recursive search for `SKILL.md` (or its shell equivalents) and no reads under guessed runtime-private directories; per-provider paths are deliberately not listed here. If a skill this task expects is not in the list, stop the current node and report the missing capability (skill name, runtime, task) through the existing technical-abort path: do not produce a business verdict, and do not write any CR state or ledger."
+
 func writeSkills(b *strings.Builder, ctx TaskContextForEnv) {
 	skills := modelVisibleSkills(ctx.AgentSkills)
 	if len(skills) == 0 {
@@ -852,6 +865,10 @@ func writeSkills(b *strings.Builder, ctx TaskContextForEnv) {
 	if platformSlug != "" {
 		b.WriteString("For a Multica platform action this brief does not fully cover — issue and PR contracts, mentions, agents, squads, autopilots, projects, runtimes, skill import — load the `" + platformSlug + "` skill and open the reference(s) its routing table names for the domains your task touches.\n\n")
 	}
+	// Last, so it reads as a rule about the list above rather than as one more
+	// item in it. The empty-set early return above still leaves a task with no
+	// visible skills without the rule, which is the intended boundary.
+	b.WriteString(skillsRoutingRule)
 }
 
 // writeMentions emits the @mention side-effects section (compressed).

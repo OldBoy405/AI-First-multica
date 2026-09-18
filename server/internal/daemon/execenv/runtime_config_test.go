@@ -2169,6 +2169,37 @@ func TestBriefSkillsListIsNamesOnly(t *testing.T) {
 			}
 		})
 	}
+
+	// The routing rule rides at the end of the section: the list above says what
+	// was discovered, and this says to use it instead of going to look for a
+	// skill somewhere else. It is one constant with one write site, so every
+	// provider's brief must carry it exactly once and byte-identically — and the
+	// rule must not name any provider's private path, because naming one would
+	// send every other provider's agent there.
+	first := ""
+	for _, provider := range []string{"claude", "codex", "pi", "some-unknown-provider"} {
+		out := buildMetaSkillContent(provider, ctx)
+		if got := strings.Count(out, skillsRoutingRule); got != 1 {
+			t.Errorf("provider %s: brief carries the routing rule %d times, want exactly 1:\n%s", provider, got, out)
+		}
+		i := strings.Index(out, skillsRoutingRule)
+		if i < 0 {
+			t.Fatalf("provider %s: brief does not carry the routing rule verbatim:\n%s", provider, out)
+		}
+		got := out[i : i+len(skillsRoutingRule)]
+		if first == "" {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Errorf("provider %s: routing rule differs from the other providers:\n%s", provider, got)
+		}
+	}
+	for _, lit := range []string{".pi/skills", ".claude", ".codex", ".qwen", ".multica", "AGENTS.md", "CLAUDE.md", "QWEN.md"} {
+		if strings.Contains(skillsRoutingRule, lit) {
+			t.Errorf("routing rule names the provider-private literal %q; it has to stay provider-neutral", lit)
+		}
+	}
 }
 
 // TestBriefIssuePointerFollowsTheInstalledSkill covers the compatibility
